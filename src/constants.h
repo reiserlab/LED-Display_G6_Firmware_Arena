@@ -47,7 +47,7 @@ constexpr uint16_t frame_buf_byte_count_max = stream_frame_byte_count_gs16;
 // Clock per panel firmware default upper bound (g6_01-panel-protocol.md §SPI framing).
 // -----------------------------------------------------------------------------
 
-constexpr uint32_t spi_clock_speed = 10'000'000;
+constexpr uint32_t spi_clock_speed = 15'000'000;
 constexpr uint8_t  spi_bit_order   = MSBFIRST;
 constexpr uint8_t  spi_data_mode   = SPI_MODE3;
 
