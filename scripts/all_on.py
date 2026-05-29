@@ -32,8 +32,10 @@ def send_binary(sock, cmd_byte, label):
         resp = sock.recv(256)
     except socket.timeout:
         resp = b""
-    print(f"{label:>8} -> 0x{cmd_byte:02X}  resp={resp.hex(' ') or '<empty>'}  "
-          f"ascii={_printable(resp)!r}")
+    print(
+        f"{label:>8} -> 0x{cmd_byte:02X}  resp={resp.hex(' ') or '<empty>'}  "
+        f"ascii={_printable(resp)!r}"
+    )
 
 
 def main():

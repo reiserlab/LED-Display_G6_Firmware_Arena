@@ -117,15 +117,15 @@ void NetworkManager::flushResponses() {
 }
 
 void NetworkManager::sendResponse(uint8_t cmd_echo, uint8_t status,
-                                  const char *message) {
-  size_t msg_len = strlen(message);
+                                  const uint8_t *payload, size_t payload_len) {
   uint8_t response_byte_count = 0;
   resp_buf_[response_byte_count++] = 2;  // placeholder length
   resp_buf_[response_byte_count++] = status;
   resp_buf_[response_byte_count++] = cmd_echo;
-  if (msg_len > 0 && (response_byte_count + msg_len) < RESP_BUF_SIZE) {
-    memcpy(resp_buf_ + response_byte_count, message, msg_len);
-    response_byte_count += msg_len;
+  if (payload != nullptr && payload_len > 0 &&
+      (response_byte_count + payload_len) < RESP_BUF_SIZE) {
+    memcpy(resp_buf_ + response_byte_count, payload, payload_len);
+    response_byte_count += payload_len;
   }
   resp_buf_[0] = response_byte_count - 1;  // length excluding length byte
   resp_len_ = response_byte_count;

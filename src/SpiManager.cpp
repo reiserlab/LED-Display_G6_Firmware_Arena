@@ -111,6 +111,11 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
 
     beginPanelSetTransaction();
     digitalWriteFast(ps.cs_pin, LOW);
+    // CS-to-SCK setup time. Sized as ~cs_setup_sck_periods of SCK at the
+    // currently configured spi_clock_speed (see constants.h). Lets the
+    // PL022 slave's TX shift register load bit 0 before the first edge,
+    // preventing the off-by-one-bit corruption we hit early in bring-up.
+    delayNanoseconds(cs_setup_delay_ns);
 #ifdef DEBUG_SERIAL
     if (i == 0) {
       transferPanelSet(block_b0, block_b1, block_byte_count,
@@ -121,6 +126,12 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
 #else
     transferPanelSet(block_b0, block_b1, block_byte_count);
 #endif
+    // SCK-to-CS hold time. Sized as ~cs_hold_sck_periods of SCK at the
+    // currently configured spi_clock_speed (see constants.h). Covers both
+    // the PL022 shift-register-to-FIFO transfer for the final byte AND a
+    // few polling-loop iterations on the slave to actually drain the FIFO
+    // before the slave sees cs_pin go HIGH and exits its read loop.
+    delayNanoseconds(cs_hold_delay_ns);
     digitalWriteFast(ps.cs_pin, HIGH);
     endPanelSetTransaction();
   }

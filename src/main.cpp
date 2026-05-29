@@ -1,11 +1,15 @@
 #include <Arduino.h>
 #include "NetworkManager.h"
+#include "SerialManager.h"
 #include "SpiManager.h"
+#include "SdManager.h"
 #include "CommandProcessor.h"
 
 NetworkManager   net;
+SerialManager    serial;
 SpiManager       spi;
-CommandProcessor cmdProc(net, spi);
+SdManager        sd;
+CommandProcessor cmdProc(net, serial, spi, sd);
 
 #ifdef DEBUG_SERIAL
 static bool ipPrinted = false;
@@ -25,17 +29,21 @@ void setup() {
   blinkStartupPattern();
 
   net.begin();
+  serial.begin();
   cmdProc.begin();
   spi.begin();
+  sd.begin();  // mounts BUILTIN_SDCARD for Modes 2/3/4; safe with no card
 
   setupInterruptPriorities();
 }
 
 void loop() {
-  net.serviceTcp();         // 1. Accept client, read and parse commands
-  cmdProc.processCommand(); // 2. Handle one parsed command
-  cmdProc.serviceDisplay(); // 3. Re-transmit current frame at refresh rate
-  net.flushResponses();     // 4. Send queued responses over TCP
+  net.serviceTcp();           // 1a. Accept TCP client, read and parse commands
+  serial.serviceUsb();        // 1b. Read and parse commands from USB CDC
+  cmdProc.processCommand();   // 2.  Handle one parsed command per source
+  cmdProc.serviceDisplay();   // 3.  Re-transmit current frame at refresh rate
+  net.flushResponses();       // 4a. Send queued responses over TCP
+  serial.flushResponses();    // 4b. Send queued responses over USB CDC
 
 #ifdef DEBUG_SERIAL
   if (!ipPrinted && Serial && net.ipAddress()[0] != '\0') {
@@ -72,8 +80,10 @@ void blinkStartupPattern() {
 }
 
 void setupInterruptPriorities() {
-  // SPI first, then Ethernet. SDIO not enabled in this build.
+  // SPI first, then Ethernet, then SDIO last. SD reads happen in the main
+  // loop (Modes 2/3/4), so the SDHC IRQ stays below SPI and Ethernet.
   NVIC_SET_PRIORITY(IRQ_LPSPI4, 0);   // Teensy 4.1 "SPI"  (B0)
   NVIC_SET_PRIORITY(IRQ_LPSPI3, 0);   // Teensy 4.1 "SPI1" (B1)
   NVIC_SET_PRIORITY(IRQ_ENET,   64);
+  NVIC_SET_PRIORITY(IRQ_SDHC1,  96);  // USDHC1 drives the built-in SD slot
 }

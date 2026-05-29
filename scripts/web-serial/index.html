@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>G6 Arena Controller (Web Serial)</title>
+  <style>
+    body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      max-width: 56rem;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      color: #222;
+      background: #fafafa;
+    }
+    h1 { font-size: 1.5rem; margin-bottom: 1rem; }
+    .row { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; }
+    .row label { min-width: 4rem; }
+    input { font-family: inherit; font-size: 1rem; padding: 0.25rem 0.5rem; }
+    input[type="text"] { width: 16rem; }
+    button {
+      font-family: inherit;
+      font-size: 1rem;
+      padding: 0.5rem 1.25rem;
+      cursor: pointer;
+      margin-right: 0.5rem;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .connect    { background: #6e40c9; color: white; border: 1px solid #6e40c9; }
+    .disconnect { background: #6e7681; color: white; border: 1px solid #6e7681; }
+    .all-on     { background: #2ea043; color: white; border: 1px solid #2ea043; }
+    .all-off    { background: #d1242f; color: white; border: 1px solid #d1242f; }
+    .stop       { background: #bc4c00; color: white; border: 1px solid #bc4c00; }
+    .query      { background: #0969da; color: white; border: 1px solid #0969da; }
+    .hex-send   { background: #0969da; color: white; border: 1px solid #0969da; }
+    .controls { margin: 1rem 0; }
+    fieldset { border: 1px solid #d0d7de; border-radius: 6px; margin: 1rem 0; padding: 0.75rem 1rem; }
+    legend { font-weight: bold; padding: 0 0.4rem; }
+    input[type="number"] { width: 6rem; }
+    select { font-family: inherit; font-size: 1rem; padding: 0.25rem; }
+    pre#log {
+      background: #1f2329;
+      color: #e6edf3;
+      padding: 1rem;
+      border-radius: 6px;
+      height: 18rem;
+      overflow-y: auto;
+      font-size: 0.85rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .warning {
+      background: #fff8c5;
+      border: 1px solid #d4a72c;
+      padding: 1rem;
+      border-radius: 6px;
+      margin-bottom: 1rem;
+    }
+    .status {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 3px;
+      font-size: 0.85rem;
+      background: #eee;
+      border: 1px solid #ccc;
+    }
+    .status.connected { background: #c4f1c4; border-color: #2ea043; }
+    code { background: rgba(0,0,0,0.05); padding: 0 0.2em; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>G6 Arena Controller &mdash; Web Serial</h1>
+
+  <div id="api-check" class="warning" hidden>
+    <strong>Web Serial API not available.</strong>
+    Use a Chromium-based browser (Chrome / Edge / Opera) on a desktop OS.
+    Firefox and Safari do not support <code>navigator.serial</code>.
+  </div>
+
+  <div class="row">
+    <button id="btn-connect"    class="connect">Connect to Teensy</button>
+    <button id="btn-disconnect" class="disconnect" disabled>Disconnect</button>
+    <span id="port-status" class="status">disconnected</span>
+  </div>
+
+  <div class="controls">
+    <button id="btn-all-on"  class="all-on"  disabled>All On (0xFF)</button>
+    <button id="btn-all-off" class="all-off" disabled>All Off (0x00)</button>
+    <button id="btn-stop"    class="stop"    disabled>Stop (0x30)</button>
+  </div>
+
+  <div class="row">
+    <button id="btn-get-ip"   class="query" disabled>Get IP (0x66)</button>
+    <button id="btn-get-info" class="query" disabled>Get Controller Info (0x67)</button>
+  </div>
+
+  <div class="row">
+    <label for="refresh">Refresh</label>
+    <input type="number" id="refresh" value="300" min="1" max="65535"> Hz
+    <button id="btn-set-refresh" class="query" disabled>Set Refresh (0x16)</button>
+  </div>
+
+  <fieldset>
+    <legend>SD pattern playback (Modes 2/3/4)</legend>
+    <div class="row">
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="2">2 — Open loop (auto-advance)</option>
+        <option value="3">3 — Show frame (host index)</option>
+        <option value="4">4 — Closed loop (AIN0 velocity)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="pat">Pattern ID</label>
+      <input type="number" id="pat" value="1" min="1" max="65535">
+      <label for="rate">Frame rate</label>
+      <input type="number" id="rate" value="0" min="0" max="65535"> Hz
+    </div>
+    <div class="row">
+      <label for="gain">Gain (×10)</label>
+      <input type="number" id="gain" value="0" min="-128" max="127">
+      <label for="init">Init pos</label>
+      <input type="number" id="init" value="0" min="0" max="65535">
+      <button id="btn-trial" class="query" disabled>Send trial-params (0x08)</button>
+    </div>
+    <div class="row">
+      <label for="frame">Frame index</label>
+      <input type="number" id="frame" value="0" min="0" max="65535">
+      <button id="btn-setframe" class="query" disabled>Set frame position (0x70)</button>
+    </div>
+  </fieldset>
+
+  <div class="row">
+    <label for="stream">Stream</label>
+    <select id="stream">
+      <option value="gs2-on">GS2 all-on</option>
+      <option value="gs16-on">GS16 all-on</option>
+      <option value="gs2-checker">GS2 checker</option>
+    </select>
+    <button id="btn-stream" class="query" disabled>Stream test frame (0x32)</button>
+  </div>
+
+  <div class="row">
+    <label for="hex">Hex</label>
+    <input type="text" id="hex" placeholder="e.g. 01 66" value="01 66">
+    <button id="btn-hex-send" class="hex-send" disabled>Send bytes</button>
+  </div>
+
+  <h2 style="font-size: 1rem; margin-top: 2rem;">Log</h2>
+  <pre id="log"></pre>
+
+  <script src="main.js" type="module"></script>
+</body>
+</html>

@@ -29,14 +29,20 @@ import dwfpy as dwf
 import numpy as np
 
 # Bit assignments in the 16-bit logic-input word.
-SCK_BIT  = 0
+SCK_BIT = 0
 MOSI_BIT = 1
 MISO_BIT = 2
-CS_BIT   = 3
+CS_BIT = 3
 
-SAMPLE_RATE = 125e6
-BUFFER_SIZE = 16_384            # 131 us window at 125 MS/s
-PRE_TRIGGER_FRACTION = 0.05     # 5 % before the CS falling edge
+# Keep SCK_FREQ in sync with src/constants.h `spi_clock_speed` — if the
+# firmware SCK rate is wrong here, the AD3 oversamples at the wrong rate and
+# the SPI decoder may miss edges or capture a window that doesn't cover the
+# full 203-byte (GS16) transaction.
+SCK_FREQ = 10e6
+OVERSAMPLE = 5  # AD3 samples per SCK period
+SAMPLE_RATE = min(SCK_FREQ * OVERSAMPLE, 125e6)  # AD3 LA max = 125 MS/s
+BUFFER_SIZE = 16_384
+PRE_TRIGGER_FRACTION = 0.05  # 5 % before the CS falling edge
 
 OUTPUT_FILE = Path(__file__).with_name("spi_capture.npz")
 
@@ -49,12 +55,12 @@ def decode_spi_mode3(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     full HIGH phase — sampling MOSI/MISO at the SCK rising edge while CS is
     LOW is the canonical decoder.
     """
-    cs   = ((samples >> CS_BIT)   & 1).astype(np.uint8)
-    sck  = ((samples >> SCK_BIT)  & 1).astype(np.uint8)
+    cs = ((samples >> CS_BIT) & 1).astype(np.uint8)
+    sck = ((samples >> SCK_BIT) & 1).astype(np.uint8)
     mosi = ((samples >> MOSI_BIT) & 1).astype(np.uint8)
     miso = ((samples >> MISO_BIT) & 1).astype(np.uint8)
 
-    rising = ((sck[1:] == 1) & (sck[:-1] == 0) & (cs[1:] == 0))
+    rising = (sck[1:] == 1) & (sck[:-1] == 0) & (cs[1:] == 0)
     idx = np.nonzero(rising)[0] + 1
     if idx.size < 8:
         return np.zeros(0, dtype=np.uint8), np.zeros(0, dtype=np.uint8)
@@ -96,11 +102,24 @@ def main() -> int:
         configure_trigger(logic)
 
         window_us = BUFFER_SIZE / SAMPLE_RATE * 1e6
+        # GS16 panel block at SCK rate = 203 bytes * 8 bits / SCK_FREQ seconds.
+        gs16_xmit_us = 203 * 8 / SCK_FREQ * 1e6
+        coverage_ratio = window_us / gs16_xmit_us
         print(
-            f"Arming: {SAMPLE_RATE / 1e6:.0f} MS/s x {BUFFER_SIZE} samples "
-            f"({window_us:.1f} us). Trigger = DIO{CS_BIT} falling. "
+            f"Arming: {SAMPLE_RATE / 1e6:.1f} MS/s x {BUFFER_SIZE} samples "
+            f"({window_us:.1f} us window, "
+            f"SCK={SCK_FREQ / 1e6:.1f} MHz, "
+            f"GS16 xmit={gs16_xmit_us:.1f} us, "
+            f"coverage={coverage_ratio:.2f}x). "
+            f"Trigger = DIO{CS_BIT} falling. "
             f"Run scripts/all_on.py to drive traffic..."
         )
+        if coverage_ratio < 1.0:
+            print(
+                f"  WARNING: capture window is shorter than the GS16 transmission "
+                f"({window_us:.0f} us < {gs16_xmit_us:.0f} us). The dump will be "
+                f"truncated. Lower SCK_FREQ or increase BUFFER_SIZE."
+            )
         samples = logic.single(
             sample_rate=SAMPLE_RATE,
             sample_format=16,
@@ -114,8 +133,12 @@ def main() -> int:
     # Per-channel diagnostics — catches wiring problems before the user
     # tries to interpret an empty SPI decode.
     print("Per-channel diagnostics:")
-    for name, bit in (("SCK ", SCK_BIT), ("MOSI", MOSI_BIT),
-                      ("MISO", MISO_BIT), ("CS  ", CS_BIT)):
+    for name, bit in (
+        ("SCK ", SCK_BIT),
+        ("MOSI", MOSI_BIT),
+        ("MISO", MISO_BIT),
+        ("CS  ", CS_BIT),
+    ):
         bits = ((samples >> bit) & 1).astype(np.uint8)
         edges = int(np.abs(np.diff(bits.astype(np.int8))).sum())
         high_pct = float(bits.mean()) * 100.0
@@ -142,12 +165,18 @@ def main() -> int:
     else:
         print("  (no rising SCK edges seen while CS was low)")
         print("  Likely causes — see per-channel diagnostics above:")
-        print("    - SCK channel shows 0 edges       -> SCK probe not connected, "
-              "or all_on.py didn't fire during capture window")
-        print("    - SCK toggles but CS stays HIGH   -> trigger fired on noise; "
-              "the capture missed a real CS pulse")
-        print("    - all channels at 0.0% high      -> probes not connected; "
-              "DIO inputs floating to the AD3's 1 Mohm pulldowns")
+        print(
+            "    - SCK channel shows 0 edges       -> SCK probe not connected, "
+            "or all_on.py didn't fire during capture window"
+        )
+        print(
+            "    - SCK toggles but CS stays HIGH   -> trigger fired on noise; "
+            "the capture missed a real CS pulse"
+        )
+        print(
+            "    - all channels at 0.0% high      -> probes not connected; "
+            "DIO inputs floating to the AD3's 1 Mohm pulldowns"
+        )
     print(f"Raw + decoded saved to {OUTPUT_FILE}")
     return 0
 

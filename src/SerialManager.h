@@ -1,45 +1,37 @@
 #pragma once
 
 #include <Arduino.h>
-#include <QNEthernet.h>
 #include "constants.h"
 #include "MessageSource.h"
+#include "NetworkManager.h"  // for ParsedCommand
 
-using namespace qindesign::network;
-
-// Parsed command from the G4-compatible binary protocol.
-struct ParsedCommand {
-  uint8_t  cmd;
-  uint8_t  data[AC::constants::stream_header_byte_count
-                + AC::constants::frame_buf_byte_count_max + 16];
-  uint16_t data_len;   // total bytes received (including length / stream header)
-  bool     is_stream;
-};
-
-class NetworkManager : public MessageSource {
+// USB-CDC command source. Mirrors NetworkManager's interface but uses the
+// Teensy's USB Serial port (`Serial`) instead of TCP. Accepts the same G4-
+// compatible binary framing — `[length, cmd, params...]` for short commands
+// and `[0x32, len_lo, len_hi, ...]` for stream frames — so a host can drive
+// the controller via USB serial (e.g. browser Web Serial, pio device monitor,
+// raw `cat` / `printf`).
+//
+// In DEBUG_SERIAL builds, the same USB CDC link is shared with DBG_PRINTF
+// diagnostic output. The Teensy USB CDC pipe is bidirectional and packet-
+// based, so binary command bytes from the host and text printf bytes from
+// the firmware do not interfere on the wire — but a human-readable terminal
+// monitor will show interleaved text and binary, which can look noisy.
+class SerialManager : public MessageSource {
  public:
   void begin();
-
-  void serviceTcp();
+  void serviceUsb();
   void flushResponses();
 
   bool hasCommand() const { return cmd_ready_; }
   const ParsedCommand &command() const { return parsed_cmd_; }
   void commandConsumed() { cmd_ready_ = false; }
 
-  // Build and queue a response: [len, status, echo_cmd, ...payload].
   using MessageSource::sendResponse;  // keep the char* convenience overload
   void sendResponse(uint8_t cmd_echo, uint8_t status,
                     const uint8_t *payload, size_t payload_len) override;
 
-  const char *ipAddress() const { return ip_str_; }
-  const char *macAddress() const { return mac_str_; }
-
  private:
-  EthernetServer server_{AC::constants::ethernet_server_port};
-  EthernetClient client_;
-
-  // Receive buffer sized for the largest GS16 stream frame plus headroom.
   static constexpr size_t RX_BUF_SIZE
       = AC::constants::stream_header_byte_count
         + AC::constants::frame_buf_byte_count_max + 16;
@@ -49,13 +41,9 @@ class NetworkManager : public MessageSource {
   ParsedCommand parsed_cmd_;
   bool cmd_ready_ = false;
 
-  // Response buffer.
   static constexpr size_t RESP_BUF_SIZE = AC::constants::byte_count_per_response_max;
   uint8_t resp_buf_[RESP_BUF_SIZE];
   size_t  resp_len_ = 0;
-
-  char ip_str_[32] = "";
-  char mac_str_[18] = "";  // "XX:XX:XX:XX:XX:XX"
 
   void parseIncoming();
 };

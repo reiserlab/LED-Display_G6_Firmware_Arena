@@ -10,6 +10,13 @@ deploy = "pio run -e teensy41 -t upload"
 deploy-printf = "pio run -e teensy41-printf -t upload"
 build = "pio run -e teensy41"
 monitor = "mkdir -p log && bash -c 'pio device monitor -e teensy41 2>&1 | tee \"log/$(date +%Y%m%d_%H%M%S).log\"'"
+# Serve scripts/web-serial on http://localhost:8000 AND open a Chromium-based
+# browser in parallel. The previous one-liner used `;`, which is sequential:
+# http.server blocks, so the browser only launched after the server was killed.
+# serve.sh backgrounds the browser and foregrounds the server instead.
+# NOTE: chromium is NOT on conda-forge, so it can't be a pixi dependency — the
+# script uses a system Chromium/Chrome (override with BROWSER=/path/to/chrome).
+webserial = "bash scripts/web-serial/serve.sh"
 
 [dependencies]
 platformio = ">=6.1.19,<7"
@@ -31,6 +38,7 @@ numpy = "*"
 spi-capture = "python debug/spi_capture.py"
 plot-recent = "python debug/plot_capture.py"
 dump-spi    = "python debug/dump_spi.py"
+cs-count    = "python debug/cs_count.py"
 
 [environments]
 debugad3 = ["debugad3"]

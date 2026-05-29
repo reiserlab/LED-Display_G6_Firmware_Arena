@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 DEBUG_DIR = Path(__file__).resolve().parent
+LOG_DIR = DEBUG_DIR.parent / "log"
 
 
 def find_latest_capture() -> Path:
@@ -52,7 +53,8 @@ def main() -> int:
     samples = data["samples"] if "samples" in data.files else None
 
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = DEBUG_DIR / f"spi_dump_{timestamp}.txt"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = LOG_DIR / f"spi_dump_{timestamp}.txt"
 
     header = [
         "# G6 SPI capture dump",
