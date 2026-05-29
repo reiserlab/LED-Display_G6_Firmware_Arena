@@ -8,6 +8,11 @@ needs no Isolated Web App, no special install — any modern Chromium-based
 browser running on a desktop OS can open it from disk (`file://`) or any
 HTTPS origin and pick the G6 Arena's serial port from the system chooser.
 
+**Hosted version:** this directory is published to GitHub Pages on every push
+to `main` (see [`.github/workflows/pages.yml`](../../.github/workflows/pages.yml))
+at <https://reiserlab.github.io/LED-Display_G6_Firmware_Arena/> — open it in a
+Chromium-based browser instead of serving it locally if you prefer.
+
 ## Prerequisites
 
 - A G6 Arena controller (Teensy 4.1) flashed with the G6-ArenaSlim firmware
