@@ -19,6 +19,11 @@ Current capabilities:
 
 ## Quickstart
 
+**You only need [pixi](https://pixi.sh/) installed.** Everything else — PlatformIO, the Teensy
+compiler, Python, the local web server — is fetched automatically the first time you run a `pixi
+run` task. The one optional extra is a **Chromium-based browser** (Chrome / Edge / Opera / Brave)
+for the Web Serial UI in step 4.
+
 1. **Connect the controller.** Plug the Teensy 4.1 on the G6 arena into your computer via USB.
 2. **Flash the controller firmware:**
    ```
@@ -41,7 +46,8 @@ Current capabilities:
 
 ## Build
 
-Requires [PlatformIO](https://platformio.org/) managed via [pixi](https://pixi.sh/).
+The toolchain (PlatformIO, the Teensy compiler, Python, …) is installed automatically by pixi the
+first time you run a task — you don't install any of it yourself.
 
 ```
 pixi run build           # compile
