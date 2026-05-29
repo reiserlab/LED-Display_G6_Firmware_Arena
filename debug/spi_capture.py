@@ -51,7 +51,7 @@ def decode_spi_mode3(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Decode SPI Mode 3, MSB-first.
 
     In Mode 3 the controller drives MOSI on the SCK falling edge and the
-    slave samples on the rising edge, so the bit value is stable across the
+    peripheral samples on the rising edge, so the bit value is stable across the
     full HIGH phase — sampling MOSI/MISO at the SCK rising edge while CS is
     LOW is the canonical decoder.
     """

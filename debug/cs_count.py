@@ -1,6 +1,6 @@
 """Count CS-falling edges seen on the panel's CS line over many refresh frames.
 
-Goal: confirm whether the v0.3.1 panel sees one CS-down event per master
+Goal: confirm whether the v0.3.1 panel sees one CS-down event per controller
 refresh frame (the expected 300 Hz) or more (which would explain the
 50%-failure PE03 pattern as the panel responding to extra/spurious CS edges).
 
@@ -99,7 +99,7 @@ def main() -> int:
         print(f"  Last  fall at sample {falls[-1]} = {falls[-1] / SAMPLE_RATE * 1e3:.2f} ms")
         print(f"  CS LOW fraction: {(cs == 0).mean():.3f}")
     if falls.size < 2:
-        print("Not enough edges to compute gaps. Is the master streaming?")
+        print("Not enough edges to compute gaps. Is the controller streaming?")
         print(f"CS levels: low_fraction={(cs == 0).mean():.3f}  "
               f"sck_low_fraction={(sck == 0).mean():.3f}")
         return 0
@@ -117,7 +117,7 @@ def main() -> int:
         (0,      100,   "<100us  (back-to-back, suspicious)"),
         (100,    500,   "100-500us"),
         (500,    2000,  "500us-2ms"),
-        (2000,   4000,  "2-4ms   (one master period @300Hz = 3333us)"),
+        (2000,   4000,  "2-4ms   (one controller period @300Hz = 3333us)"),
         (4000,   8000,  "4-8ms"),
         (8000,   16000, "8-16ms"),
         (16000,  64000, ">16ms"),
@@ -138,7 +138,7 @@ def main() -> int:
           f"(MODE3 idle-HIGH → expect ~95% during steady streaming)")
 
     # Cluster CS-falls into bursts so we can tell whether the 3000+ edges
-    # are one tight burst per real master event or many.
+    # are one tight burst per real controller event or many.
     BURST_GAP_US = 200  # gaps within a single ringing burst are <<200 us
     burst_starts = np.concatenate(([0], np.nonzero(gaps_us > BURST_GAP_US)[0] + 1))
     burst_count  = burst_starts.size

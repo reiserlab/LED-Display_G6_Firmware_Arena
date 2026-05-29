@@ -54,12 +54,12 @@ constexpr uint8_t  spi_data_mode   = SPI_MODE3;
 // CS-to-SCK setup and SCK-to-CS hold delays, expressed as SCK-period counts
 // and converted to nanoseconds against the current spi_clock_speed. Both
 // scale automatically when spi_clock_speed changes, preserving the bit-edge
-// margin we want at the slave's SPI peripheral. Rationale:
-//   - cs_setup: PL022 slave needs CS asserted ~1-2 SCK periods before the
+// margin we want at the panel's SPI peripheral. Rationale:
+//   - cs_setup: PL022 peripheral needs CS asserted ~1-2 SCK periods before the
 //     first clock edge so its TX shift register can load bit 0.
 //   - cs_hold:  panel firmware's polling loop breaks on cs_pin HIGH without
 //     draining the RX FIFO; ~25 SCK periods gives plenty of time for the
-//     PL022 to shift the final byte into the FIFO and for the slave loop
+//     PL022 to shift the final byte into the FIFO and for the peripheral loop
 //     to read it before CS rises.
 constexpr uint32_t cs_setup_sck_periods = 2;
 constexpr uint32_t cs_hold_sck_periods  = 25;
