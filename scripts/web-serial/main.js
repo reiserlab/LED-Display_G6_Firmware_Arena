@@ -1,6 +1,6 @@
 // G6 Arena Controller — Web Serial client.
 //
-// Talks to the Teensy 4.1 over its USB CDC port. The controller's
+// Talks to the G6 Arena controller (Teensy 4.1) over its USB CDC port. The
 // SerialManager parses the same G4-compatible binary framing as the TCP
 // path, so the wire format is identical to scripts/web/ and scripts/all_on.py:
 //   binary command: [length, cmd, params...]
@@ -111,12 +111,12 @@ async function readLoop() {
 
 async function connect() {
   try {
-    // Web Serial doesn't expose a vendor filter for the Teensy 4.1 USB CDC
+    // Web Serial doesn't expose a vendor filter for the G6 Arena's USB CDC
     // by default — just let the user pick. The user-gesture chooser
     // remembers prior selections for the origin.
     port = await navigator.serial.requestPort();
     // baudRate is required by the API but ignored by USB CDC on the
-    // device side (Teensy reports any rate as "OK"). 115200 is just a
+    // device side (the G6 Arena reports any rate as "OK"). 115200 is just a
     // conventional placeholder.
     await port.open({ baudRate: 115200 });
 

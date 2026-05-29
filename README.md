@@ -38,7 +38,7 @@ for the Web Serial UI in step 4.
    This serves the page and opens a browser. If no browser opens, open a **Chromium-based**
    browser (Chrome / Edge / Opera / Brave — Web Serial is not in Firefox or Safari) and go to
    <http://localhost:8000>.
-5. **Connect to the Teensy.** Click **Connect to Teensy** and pick the correct serial port from
+5. **Connect to the arena.** Click **Connect to G6 Arena** and pick the correct serial port from
    the chooser (typically `/dev/ttyACM*` on Linux, `COM*` on Windows, `/dev/cu.usbmodem*` on
    macOS). Close any other program holding the port (e.g. `pixi run monitor`) first.
 6. **Light it up.** Click any command — **All On** is a good first test. From there try the
