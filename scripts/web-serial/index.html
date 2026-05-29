@@ -131,12 +131,15 @@
 
   <div class="row">
     <label for="stream">Stream</label>
-    <select id="stream">
-      <option value="gs2-on">GS2 all-on</option>
-      <option value="gs16-on">GS16 all-on</option>
-      <option value="gs2-checker">GS2 checker</option>
-    </select>
-    <button id="btn-stream" class="query" disabled>Stream test frame (0x32)</button>
+    <!-- options populated from the webDisplayTools GS2_/GS16_ presets in main.js -->
+    <select id="stream"></select>
+    <button id="btn-stream" class="query" disabled>Stream pattern (0x32)</button>
+  </div>
+
+  <div class="row">
+    <label for="binfile">.bin file</label>
+    <input type="file" id="binfile" accept=".bin,application/octet-stream">
+    <button id="btn-upload" class="query" disabled>Stream file (0x32)</button>
   </div>
 
   <div class="row">
