@@ -107,8 +107,8 @@ constexpr uint16_t byte_count_per_response_max = 200;
 constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // Capability bitmap: bit0 g6_mode (always 1 for any G6 controller),
 // bit1 v2_local_storage, bit2 mode_1_tsi, bit3 v3_triggered, bit4 v3_gated.
-// This v1 controller advertises g6_mode only.
-constexpr uint8_t controller_capability_bitmap = 0x01;
+// Advertises g6_mode + v2_local_storage (V2 display-from-PSRAM, LAB-41/42).
+constexpr uint8_t controller_capability_bitmap = 0x03;
 
 // -----------------------------------------------------------------------------
 // SD pattern backend — Modes 2/3/4 load .pat files from the built-in SD slot.

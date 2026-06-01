@@ -23,6 +23,25 @@ constexpr uint8_t cmd_disp_16lvl_persist  = 0x31;
 constexpr uint16_t block_byte_count_gs2  = 53;
 constexpr uint16_t block_byte_count_gs16 = 203;
 
+// ---- V2 (header 0x02/0x82) — PSRAM-backed display (LAB-41/42) ----
+// The controller sends a 16-bit LE PSRAM frame index; the panel renders its
+// locally-stored frame at that index. Low nibble = display mode (0 Oneshot /
+// 1 Persistent / 2 Triggered / 3 Gated), same encoding as v1. The 0x6x set
+// appends an explicit duty_cycle byte; 0x5x uses the duty stored with the frame.
+constexpr uint8_t header_version_v2                 = 0x02;  // parity 0
+constexpr uint8_t header_version_v2_with_parity_bit = 0x82;  // parity 1
+
+constexpr uint8_t cmd_disp_psram_oneshot   = 0x50;
+constexpr uint8_t cmd_disp_psram_persist   = 0x51;
+constexpr uint8_t cmd_disp_psram_triggered = 0x52;
+constexpr uint8_t cmd_disp_psram_gated     = 0x53;
+constexpr uint8_t cmd_disp_psram_duty_oneshot = 0x60;  // +duty; 0x61..0x63 follow modes
+
+// V2 block sizes: header + cmd + 16-bit LE index [+ 1 duty byte].
+constexpr uint16_t block_byte_count_psram      = 4;
+constexpr uint16_t block_byte_count_psram_duty = 5;
+// build_psram_index_block() is defined below, after stamp_header_parity().
+
 // Compute the parity bit (0 or 1) over a candidate message. The header byte
 // is passed *without* its own parity bit (i.e. version bits only); the parity
 // is set so the popcount across {version_bits, cmd, payload} is even.
@@ -55,6 +74,22 @@ inline void stamp_header_parity(uint8_t *msg, size_t msg_len) {
   uint8_t version = msg[0] & 0x7F;
   uint8_t p = compute_parity_bit(version, msg[1], msg + 2, msg_len - 2);
   msg[0] = version | (p << 7);
+}
+
+// Lay out a V2 "display PSRAM index" block into `block` and stamp parity.
+// `cmd_id` selects mode + duty shape; `duty` is used only for the 0x6x
+// explicit-duty opcodes. Returns the block byte count (4 or 5).
+inline uint16_t build_psram_index_block(uint8_t *block, uint16_t index,
+                                        uint8_t cmd_id, uint8_t duty) {
+  bool explicit_duty = (cmd_id & 0xF0) == 0x60;
+  block[0] = header_version_v2;          // parity stamped below
+  block[1] = cmd_id;
+  block[2] = (uint8_t)(index & 0xFF);
+  block[3] = (uint8_t)((index >> 8) & 0xFF);
+  uint16_t len = block_byte_count_psram;
+  if (explicit_duty) { block[4] = duty; len = block_byte_count_psram_duty; }
+  stamp_header_parity(block, len);
+  return len;
 }
 
 } // namespace G6

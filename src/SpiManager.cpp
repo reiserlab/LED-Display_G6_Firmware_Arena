@@ -84,7 +84,9 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
                                uint16_t block_byte_count) {
   if (frame_buf == nullptr) return;
   if (block_byte_count != G6::block_byte_count_gs2 &&
-      block_byte_count != G6::block_byte_count_gs16) {
+      block_byte_count != G6::block_byte_count_gs16 &&
+      block_byte_count != G6::block_byte_count_psram &&
+      block_byte_count != G6::block_byte_count_psram_duty) {
     return;
   }
 
