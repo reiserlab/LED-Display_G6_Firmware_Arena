@@ -1,6 +1,7 @@
 # CIPO doesn't reach the Teensy — investigation & bench-experiment plan
 
-**Status:** root cause hypothesis identified; cheap firmware experiment defined, not yet run.
+**Status:** root cause hypothesis identified; cheap firmware experiment **implemented** behind
+build flags (`CS_IDLE_HIGH`, `FORCE_CONTENTION`) — ready to flash and run at the bench.
 **Symptom (Frank):** the panel's CIPO/MISO confirmation reaches the arena's MISO buffer but
 never makes it through to the Teensy — the controller reads `00`.
 
@@ -70,10 +71,21 @@ experiment below from this file alone.
   when **any** of its group's 4 CS is asserted. **No pull-ups on the decode inputs.** Grouping:
   P1/P6←CS_00..03, P2/P7←CS_04..07, P3/P8←CS_08..11, P4/P9←CS_12..15, P5/P10←CS_16..19.
 - There are **20 CS nets** (`TNY.CS_00..19`), each to its own Teensy GPIO. The firmware drives 10
-  of them; the other ~10 float into the decode.
-- **Confirmed-floating decode inputs** (hard pin-adjacent match in `teensy.kicad_sch`):
-  **Arduino pin 30 (`CS_15`)** and **pin 31 (`CS_14`)** — both in the P4/P9 group, not in the
-  firmware's driven set.
+  of them; the other 10 float into the decode. Authoritative map from
+  `arena_10_of_10_v1r1.kicad_pcb` (Teensy U1), `*` = driven by firmware:
+
+  | Group (bus) | CS_xx → Teensy pin | Floating (undriven) |
+  |---|---|---|
+  | P1/P6  | CS_00=0*, CS_01=2*, CS_02=3, CS_03=4 | **3, 4** |
+  | P2/P7  | CS_04=5*, CS_05=6*, CS_06=7, CS_07=8 | **7, 8** |
+  | P3/P8  | CS_08=9*, CS_09=10*, CS_10=24, CS_11=25 | **24, 25** |
+  | P4/P9  | CS_12=28*, CS_13=29*, CS_14=30, CS_15=31 | **30, 31** |
+  | P5/P10 | CS_16=32*, CS_17=23*, CS_18=22, CS_19=21 | **22, 21** |
+
+  **Full floating set = {3, 4, 7, 8, 21, 22, 24, 25, 30, 31}** (each column has 2 driven + 2
+  floating; the 2x10 build populates 2 of the 4 rows the generic arena supports).
+  **Keep-out (never drive):** SPI 11/12/13 & 26/27/1, analog 14/15, I2C 18/19, translators 35/37,
+  and **EINT on pin 33** (a panel→Teensy input).
 
 ---
 
@@ -113,41 +125,24 @@ contention. The change is **purely additive, reversible, and cannot affect the d
 4. **Record** the `[spi] CIPO setN ...` lines. Expect `B0=00 00 00` on addressed sets = the bug.
    (`debug/README.md`: all-zero = line held low at the Teensy.)
 
-### Step 1 — Get the exact idle-CS pin list (authoritative)
-Run KiCad's netlister on the hardware repo (locally):
-```
-kicad-cli sch export netlist \
-  arena_10-10/arena_10-10_v1/arena_10_of_10_v1r1.kicad_sch -o cs.net
-```
-From `cs.net`, list the Teensy `U1` pin on each net named `CS_00 … CS_19` ("… fan out to Px"),
-then compute:
+### Step 1 — Idle-CS pin list (DONE — resolved from the PCB)
+The full `CS_xx → Teensy GPIO` map was extracted from `arena_10_of_10_v1r1.kicad_pcb` (see the
+table above). The floating set is baked into the firmware as `idle_cs_pins[]` in
+`src/ArenaConfig.h`: **{3, 4, 7, 8, 21, 22, 24, 25, 30, 31}**. (To re-verify against the source,
+`kicad-cli sch export netlist arena_10-10/arena_10-10_v1/arena_10_of_10_v1r1.kicad_sch -o cs.net`
+and confirm CS_00..19 GPIOs minus the 10 `panel_sets` pins.)
 
-> **idle_cs_pins = { Teensy GPIOs on CS_00..19 }  −  { 0, 2, 5, 6, 9, 10, 23, 28, 29, 32 }**
+### Step 2 — Firmware change (DONE — implemented behind `CS_IDLE_HIGH`)
+`SpiManager::begin()` now drives `idle_cs_pins[]` HIGH when built with `-DCS_IDLE_HIGH`
+(`src/SpiManager.cpp`; list + keep-out documented in `src/ArenaConfig.h`). Baseline builds are
+unchanged. Nothing to edit unless the pin list needs correcting.
 
-Known members already: **30, 31**. Expect ~10 total. (Committing `cs.net` to the branch lets the
-exact remaining pins be read off directly.)
+### Step 3 — Build & flash (A vs B)
+- **A (baseline):** `pixi run deploy-printf`   → idle CS lines float (reproduces the bug)
+- **B (mitigation):** `pixi run deploy-csidle` → idle CS lines held HIGH
 
-### Step 2 — Minimal firmware change (`src/SpiManager.cpp`, `begin()`)
-```cpp
-// Idle CS lines: wired into the per-column MISO-enable decode in hardware but not
-// used by the 2x10 panel-set table. Held HIGH (deasserted) so a floating input
-// can't spuriously enable a column's MISO buffer and contend on MISO_Bx.
-// Fill from Step 1 (kicad netlist): CS_00..19 GPIOs minus panel_sets pins.
-constexpr uint8_t idle_cs_pins[] = { 30, 31, /* …the rest from Step 1… */ };
-
-void SpiManager::begin() {
-  // … existing setMISO + SPI.begin loop, and the panel_sets CS init loop …
-  for (uint8_t p : idle_cs_pins) {        // NEW
-    pinMode(p, OUTPUT);
-    digitalWriteFast(p, HIGH);
-  }
-}
-```
-**Keep-out — do NOT add these (confirmed functional from the PCB U1 map):** SPI B0 = 11/12/13,
-SPI B1 = 26/27/1, analog = 14/15, I²C = 18/19, level translators = 35/37.
-
-### Step 3 — Build & flash
-`pixi run deploy-printf` → `python scripts/all_on.py` → `pixi run monitor`.
+Then for each: `python scripts/all_on.py` and `pixi run monitor`, and compare the `[spi] CIPO`
+lines.
 
 ### Step 4 — A/B verdict
 | `[spi] CIPO` now shows | Meaning |
@@ -155,10 +150,12 @@ SPI B1 = 26/27/1, analog = 14/15, I²C = 18/19, level translators = 35/37.
 | `B0=?1 30 ??` (panel echo) | **Hypothesis confirmed.** Floating CS → contention; firmware mitigation works. |
 | still `00` | Not (only) floating CS. Cause is downstream: open trace to pin 12, or LPSPI receive. Go to scope tests / loopback. |
 
-### Step 5 — Positive control (proves the mechanism, pure firmware)
-Temporarily, for one capture frame, assert a **second** B0 set's `cs_pin` LOW at the same time as
-the target (two buffers enabled on `MISO_B0`). A previously-good echo should collapse back to
-`00`, directly demonstrating wired-OR contention. Revert afterward.
+### Step 5 — Positive control (DONE — implemented behind `FORCE_CONTENTION`)
+`pixi run deploy-contention` builds with idle CS lines fixed HIGH **and** a second B0 buffer
+deliberately enabled during each captured read (`src/SpiManager.cpp`, capture path). The captured
+`[spi] CIPO` for those reads should collapse back to `00` — directly demonstrating wired-OR
+contention on the shared `MISO_B0` node. (Cosmetic: one wrong-column panel briefly receives data
+every 300th frame in this build; diagnostic only.)
 
 ### Step 6 — Decision
 - Works → keep the idle-CS init (cheap firmware fix); log the durable hardware fix for the next

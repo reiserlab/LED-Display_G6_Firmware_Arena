@@ -51,4 +51,34 @@ constexpr PanelSet panel_sets[panel_set_count] = {
 // boot and drives them per panel-set during transfers.
 constexpr uint8_t panel_set_cs_pin_count = panel_set_count;
 
+// ---------------------------------------------------------------------------
+// Idle (undriven) chip-select lines — bench diagnostic for the CIPO/MISO
+// contention investigation (see debug/CIPO_investigation.md).
+//
+// The arena_10-10 hardware routes 20 CS nets (CS_00..CS_19) to the Teensy. Each
+// column's MISO-confirmation buffer (74LVC1G125) is enabled by the AND of its
+// FOUR group CS lines, so the buffer turns on if ANY of those four is asserted
+// (low). The 2x10 build only uses 2 of the 4 per column (the two populated
+// rows), so the other 2 per column are wired to a Teensy GPIO that the firmware
+// never drives -> they float into the enable decode and can spuriously enable
+// extra buffers, which then contend on the shared MISO_Bx bus and collapse the
+// readback to 0. Authoritative map from arena_10_of_10_v1r1.kicad_pcb (U1):
+//
+//   group P1/P6 : CS_00=pin0*  CS_01=pin2*  CS_02=pin3   CS_03=pin4
+//   group P2/P7 : CS_04=pin5*  CS_05=pin6*  CS_06=pin7   CS_07=pin8
+//   group P3/P8 : CS_08=pin9*  CS_09=pin10* CS_10=pin24  CS_11=pin25
+//   group P4/P9 : CS_12=pin28* CS_13=pin29* CS_14=pin30  CS_15=pin31
+//   group P5/P10: CS_16=pin32* CS_17=pin23* CS_18=pin22  CS_19=pin21
+//     (* = present in panel_sets above and driven by firmware; the rest float)
+//
+// Holding these HIGH (deasserted) makes the per-column enables strictly one-hot
+// (only the one firmware-driven CS goes low at a time). Built only when
+// CS_IDLE_HIGH is defined (env teensy41-csidle); see SpiManager::begin().
+//
+// KEEP-OUT — never add to this list (confirmed functional on U1):
+//   SPI B0 11/12/13, SPI B1 26/27/1, analog 14/15, I2C 18/19,
+//   level translators 35/37, and EINT on pin 33 (a panel->Teensy input).
+constexpr uint8_t idle_cs_pins[] = { 3, 4, 7, 8, 21, 22, 24, 25, 30, 31 };
+constexpr uint8_t idle_cs_pin_count = sizeof(idle_cs_pins) / sizeof(idle_cs_pins[0]);
+
 } // namespace AC

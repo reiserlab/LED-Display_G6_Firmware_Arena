@@ -38,6 +38,19 @@ void SpiManager::begin() {
     pinMode(panel_sets[i].cs_pin, OUTPUT);
     digitalWriteFast(panel_sets[i].cs_pin, HIGH);
   }
+
+#ifdef CS_IDLE_HIGH
+  // Bench experiment (debug/CIPO_investigation.md): the arena's per-column
+  // MISO-enable buffers are enabled by an AND of 4 CS lines; the 2x10 firmware
+  // leaves 2 of every column's 4 CS lines undriven, so they float into the
+  // decode and can spuriously enable buffers that contend on the shared MISO
+  // bus. Hold those idle lines HIGH (deasserted) so the enables are strictly
+  // one-hot. Additive and reversible — these pins are never touched again.
+  for (uint8_t i = 0; i < idle_cs_pin_count; ++i) {
+    pinMode(idle_cs_pins[i], OUTPUT);
+    digitalWriteFast(idle_cs_pins[i], HIGH);
+  }
+#endif
 }
 
 void SpiManager::armRefreshTimer(uint32_t frequency_hz) {
@@ -138,8 +151,21 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
     delayNanoseconds(cs_setup_delay_ns);
 #ifdef DEBUG_SERIAL
     if (capture) {
+#ifdef FORCE_CONTENTION
+      // Positive control (debug/CIPO_investigation.md, Step 5): also enable a
+      // SECOND B0 buffer — a different column, so a different 74LVC1G125 — for
+      // the duration of this read. With two buffers driving the shared MISO_B0
+      // node, a logic '1' collapses to a sub-threshold divider level, so the
+      // captured CIPO for this set should drop to 00. Demonstrates wired-OR
+      // contention directly. (i+2) always lands on the next column over.
+      const uint8_t contention_cs = panel_sets[(i + 2) % panel_set_count].cs_pin;
+      digitalWriteFast(contention_cs, LOW);
+#endif
       transferPanelSet(block_b0, block_b1, block_byte_count,
                        miso_scratch_b0_, miso_scratch_b1_);
+#ifdef FORCE_CONTENTION
+      digitalWriteFast(contention_cs, HIGH);
+#endif
       for (uint8_t k = 0; k < 3; ++k) {
         cipo_b0_[i][k] = miso_scratch_b0_[k];
         cipo_b1_[i][k] = miso_scratch_b1_[k];

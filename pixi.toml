@@ -8,7 +8,14 @@ version = "0.1.0"
 [tasks]
 deploy = "pio run -e teensy41 -t upload"
 deploy-printf = "pio run -e teensy41-printf -t upload"
+# CIPO/MISO contention bench experiment (debug/CIPO_investigation.md):
+#   deploy-csidle     -> mitigation build (drive idle CS lines HIGH)
+#   deploy-contention -> positive control (idle fixed + force a 2nd buffer on)
+deploy-csidle = "pio run -e teensy41-csidle -t upload"
+deploy-contention = "pio run -e teensy41-contention -t upload"
 build = "pio run -e teensy41"
+build-csidle = "pio run -e teensy41-csidle"
+build-contention = "pio run -e teensy41-contention"
 monitor = "mkdir -p log && bash -c 'pio device monitor -e teensy41 2>&1 | tee \"log/$(date +%Y%m%d_%H%M%S).log\"'"
 # Serve scripts/web-serial on http://localhost:8000 AND open a Chromium-based
 # browser in parallel. The previous one-liner used `;`, which is sequential:
