@@ -47,9 +47,18 @@ constexpr uint16_t frame_buf_byte_count_max = stream_frame_byte_count_gs16;
 // Clock per panel firmware default upper bound (g6_01-panel-protocol.md §SPI framing).
 // -----------------------------------------------------------------------------
 
-constexpr uint32_t spi_clock_speed = 10'000'000;
+constexpr uint32_t spi_clock_speed = 25'000'000;
 constexpr uint8_t  spi_bit_order   = MSBFIRST;
 constexpr uint8_t  spi_data_mode   = SPI_MODE3;
+
+// CIPO readback realignment (DEBUG_SERIAL diagnostic only).
+// The buffered, wired-OR MISO return path has a fixed round-trip delay. Above
+// ~20 MHz that delay exceeds one bit, so the captured confirmation comes back
+// right-shifted by exactly one bit (e.g. 01 30 62 reads as 00 98 31). Shifting
+// the captured stream left by this many bits recovers it. The slip is 0 at low
+// clocks and metastable (uncorrectable) around 10 MHz, so this is gated to the
+// high-speed path. See Generation 6/arena-hardware-bug.md.
+constexpr uint8_t cipo_realign_left_bits = (spi_clock_speed >= 20'000'000) ? 1 : 0;
 
 // CS-to-SCK setup and SCK-to-CS hold delays, expressed as SCK-period counts
 // and converted to nanoseconds against the current spi_clock_speed. Both

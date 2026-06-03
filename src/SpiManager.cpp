@@ -38,6 +38,16 @@ void SpiManager::begin() {
     pinMode(panel_sets[i].cs_pin, OUTPUT);
     digitalWriteFast(panel_sets[i].cs_pin, HIGH);
   }
+
+  // Hold the 2nd pair of per-column MISO OE-decode inputs HIGH. Without this
+  // they float (≈low), the OE̅ = CS0&CS1&CS2&CS3 AND can never reach all-HIGH,
+  // and every column's buffer stays enabled — shorting the wired-OR MISO bus so
+  // CIPO reads 00. Tied HIGH, OE̅ = CS_row0 & CS_row1, so one buffer per bus
+  // drives at a time. See ArenaConfig.h / arena-hardware-bug.md.
+  for (uint8_t i = 0; i < cs_decode_tie_high_count; ++i) {
+    pinMode(cs_decode_tie_high_pins[i], OUTPUT);
+    digitalWriteFast(cs_decode_tie_high_pins[i], HIGH);
+  }
 }
 
 void SpiManager::armRefreshTimer(uint32_t frequency_hz) {
@@ -100,6 +110,23 @@ void SpiManager::transferPanelSet(const uint8_t *block_b0,
   while (!dmaComplete_) { /* spin */ }
 }
 
+#ifdef DEBUG_SERIAL
+// Recover the CIPO confirmation when the buffered return path delays MISO by a
+// whole bit at high SCK (see constants::cipo_realign_left_bits). Left-shifts the
+// captured byte stream by `bits` (0..7), pulling in the MSBs of the following
+// byte; `raw` must hold at least n+1 valid bytes. bits==0 is a plain copy.
+static inline void realignCipo(const uint8_t *raw, uint8_t *out,
+                               uint8_t n, uint8_t bits) {
+  if (bits == 0) {
+    for (uint8_t k = 0; k < n; ++k) out[k] = raw[k];
+    return;
+  }
+  for (uint8_t k = 0; k < n; ++k) {
+    out[k] = (uint8_t)((raw[k] << bits) | (raw[k + 1] >> (8 - bits)));
+  }
+}
+#endif
+
 void SpiManager::transferFrame(const uint8_t *frame_buf,
                                uint16_t block_byte_count) {
   if (frame_buf == nullptr) return;
@@ -140,10 +167,10 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
     if (capture) {
       transferPanelSet(block_b0, block_b1, block_byte_count,
                        miso_scratch_b0_, miso_scratch_b1_);
-      for (uint8_t k = 0; k < 3; ++k) {
-        cipo_b0_[i][k] = miso_scratch_b0_[k];
-        cipo_b1_[i][k] = miso_scratch_b1_[k];
-      }
+      // Recover the 3-byte confirmation from the (possibly bit-delayed) return
+      // path. Reads scratch[0..3] — valid for both GS2 (53 B) and GS16 (203 B).
+      realignCipo(miso_scratch_b0_, cipo_b0_[i], 3, cipo_realign_left_bits);
+      realignCipo(miso_scratch_b1_, cipo_b1_[i], 3, cipo_realign_left_bits);
     } else {
       transferPanelSet(block_b0, block_b1, block_byte_count);
     }
@@ -162,10 +189,11 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
 
 #ifdef DEBUG_SERIAL
   if (capture) {
-    DBG_PRINTF("[spi] transferFrame count=%lu us=%lu refresh_ticks=%lu\n",
+    DBG_PRINTF("[spi] transferFrame count=%lu us=%lu refresh_ticks=%lu cipo_realign=%u\n",
                (unsigned long)tf_count,
                (unsigned long)(micros() - t0),
-               (unsigned long)isr_count_);
+               (unsigned long)isr_count_,
+               (unsigned)cipo_realign_left_bits);
     for (uint8_t i = 0; i < panel_set_count; ++i) {
       DBG_PRINTF("[spi] CIPO set%-2u cs=%-2u B0=%02X %02X %02X  B1=%02X %02X %02X\n",
                  (unsigned)i, (unsigned)panel_sets[i].cs_pin,
