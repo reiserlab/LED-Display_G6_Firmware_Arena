@@ -16,7 +16,7 @@ PORT = 62222
 
 ALL_OFF_CMD = 0x00
 ALL_ON_CMD = 0xFF
-ON_DURATION_S = 5.0
+ON_DURATION_S = 50.0
 
 
 def _printable(b):

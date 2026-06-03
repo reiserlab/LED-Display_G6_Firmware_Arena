@@ -47,9 +47,12 @@ class SpiManager {
                         uint8_t *miso_b1 = nullptr);
 
 #ifdef DEBUG_SERIAL
-  // MISO scratch — used to capture the panel CIPO confirmation slot for
-  // panel set 0 (the first transmission in each frame).
+  // MISO scratch — captures one panel set's CIPO confirmation slot per transfer.
   uint8_t miso_scratch_b0_[G6::block_byte_count_gs16];
   uint8_t miso_scratch_b1_[G6::block_byte_count_gs16];
+  // First 3 CIPO bytes for every panel set, retained for the periodic dump so
+  // edge ports (e.g. P3 = panel set 4) are visible, not just set 0.
+  uint8_t cipo_b0_[AC::panel_set_count][3];
+  uint8_t cipo_b1_[AC::panel_set_count][3];
 #endif
 };

@@ -23,10 +23,13 @@ void SpiManager::begin() {
 
   dmaEvent_.attachImmediate(dmaISR);
 
-  // Bring up both SPI buses. CIPO pin is informational; SPI.begin() owns its
-  // configured pins regardless.
+  // Bring up both SPI buses. Explicitly route each region's CIPO pin to the
+  // peripheral's SDI (MISO) input *before* begin() — otherwise the LPSPI
+  // samples a different/unconnected SDI and reads the panel's confirmation as
+  // all-zeros, even though the panel drives CIPO on this pin (confirmed on a
+  // logic analyzer). setMISO() must precede begin().
   for (uint8_t r = 0; r < region_count_per_frame; ++r) {
-    pinMode(region_cipo_pins[r], INPUT);
+    region_spi_[r]->setMISO(region_cipo_pins[r]);
     region_spi_[r]->begin();
   }
 
@@ -66,6 +69,23 @@ void SpiManager::transferPanelSet(const uint8_t *block_b0,
                                   uint16_t block_byte_count,
                                   uint8_t *miso_b0,
                                   uint8_t *miso_b1) {
+#ifdef DEBUG_SERIAL
+  // Debug CIPO capture: when a MISO buffer is requested, use blocking
+  // full-duplex transfers so the received bytes are read into the buffers by
+  // the CPU. The async-DMA path (below) does NOT reliably populate a regular
+  // RAM buffer on Teensy 4 — an eDMA write into a cached/TCM buffer is not
+  // coherent with the CPU read, so the readback returns the stale memset
+  // zeros. Sequential transfers inside the shared CS window are fine for a
+  // 1-in-300-frames diagnostic. Production passes nullptr and never hits this.
+  if (miso_b0 != nullptr || miso_b1 != nullptr) {
+    region_spi_[0]->transfer(const_cast<uint8_t *>(block_b0),
+                             miso_b0, block_byte_count);
+    region_spi_[1]->transfer(const_cast<uint8_t *>(block_b1),
+                             miso_b1, block_byte_count);
+    return;
+  }
+#endif
+
   // Async DMA on region 0 (SPI) — non-const cast is safe; SPI driver only
   // reads the buffer when retbuf is nullptr.
   dmaComplete_ = false;
@@ -95,13 +115,13 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
   const uint8_t *blocks_base = frame_buf + stream_frame_prefix_byte_count;
 
 #ifdef DEBUG_SERIAL
-  // On debug builds, capture MISO for panel set 0 so we can inspect the
-  // panel's CIPO confirmation slot (first 3 bytes). All other panel sets
-  // discard MISO as before.
-  uint8_t *miso_b0_first = miso_scratch_b0_;
-  uint8_t *miso_b1_first = miso_scratch_b1_;
-  memset(miso_b0_first, 0, block_byte_count);
-  memset(miso_b1_first, 0, block_byte_count);
+  // Capture every panel set's CIPO on the frames we print (every 300th); other
+  // frames use the fast async path. Capturing ALL sets — not just set 0 — is
+  // what makes an edge/reworked port visible: e.g. silk P3 is panel set 4
+  // (CS pin 9), not set 0 (P1, CS pin 0).
+  static uint32_t tf_count = 0;
+  ++tf_count;
+  const bool capture = (tf_count % 300) == 0;
 #endif
 
   for (uint8_t i = 0; i < panel_set_count; ++i) {
@@ -117,9 +137,13 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
     // preventing the off-by-one-bit corruption we hit early in bring-up.
     delayNanoseconds(cs_setup_delay_ns);
 #ifdef DEBUG_SERIAL
-    if (i == 0) {
+    if (capture) {
       transferPanelSet(block_b0, block_b1, block_byte_count,
-                       miso_b0_first, miso_b1_first);
+                       miso_scratch_b0_, miso_scratch_b1_);
+      for (uint8_t k = 0; k < 3; ++k) {
+        cipo_b0_[i][k] = miso_scratch_b0_[k];
+        cipo_b1_[i][k] = miso_scratch_b1_[k];
+      }
     } else {
       transferPanelSet(block_b0, block_b1, block_byte_count);
     }
@@ -137,16 +161,17 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
   }
 
 #ifdef DEBUG_SERIAL
-  static uint32_t tf_count = 0;
-  ++tf_count;
-  if ((tf_count % 300) == 0) {
+  if (capture) {
     DBG_PRINTF("[spi] transferFrame count=%lu us=%lu refresh_ticks=%lu\n",
                (unsigned long)tf_count,
                (unsigned long)(micros() - t0),
                (unsigned long)isr_count_);
-    DBG_PRINTF("[spi] CIPO set0 B0=%02X %02X %02X  B1=%02X %02X %02X\n",
-               miso_b0_first[0], miso_b0_first[1], miso_b0_first[2],
-               miso_b1_first[0], miso_b1_first[1], miso_b1_first[2]);
+    for (uint8_t i = 0; i < panel_set_count; ++i) {
+      DBG_PRINTF("[spi] CIPO set%-2u cs=%-2u B0=%02X %02X %02X  B1=%02X %02X %02X\n",
+                 (unsigned)i, (unsigned)panel_sets[i].cs_pin,
+                 cipo_b0_[i][0], cipo_b0_[i][1], cipo_b0_[i][2],
+                 cipo_b1_[i][0], cipo_b1_[i][1], cipo_b1_[i][2]);
+    }
   }
 #endif
 }

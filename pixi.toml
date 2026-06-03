@@ -38,6 +38,8 @@ numpy = "*"
 spi-capture = "python debug/spi_capture.py"
 plot-recent = "python debug/plot_capture.py"
 dump-spi    = "python debug/dump_spi.py"
+node-scope  = "python debug/measure_shared_node.py"
+compare-node = "python debug/compare_pin4_node.py"
 cs-count    = "python debug/cs_count.py"
 
 [environments]

@@ -9,7 +9,7 @@ Hook the Analog Discovery 3 flywires to the Teensy 4.1 SPI-B0 pins:
     AD3 GND    -> Teensy GND (any of pin 1 / 34 / 47 / 64)
 
 Triggers on CS falling edge, captures 16k samples at 125 MS/s (~131 us window,
-enough to swallow one 53- or 203-byte panel block at 30 MHz SPI), software-
+enough to swallow one 53- or 203-byte panel block at 25 MHz SPI), software-
 decodes Mode-3 / MSB-first SPI, and saves the raw + decoded capture so you
 can also drop it into the WaveForms GUI for visual inspection.
 
@@ -38,8 +38,20 @@ CS_BIT = 3
 # firmware SCK rate is wrong here, the AD3 oversamples at the wrong rate and
 # the SPI decoder may miss edges or capture a window that doesn't cover the
 # full 203-byte (GS16) transaction.
+# Match the controller's actual SCK. The Arena drives spi_clock_speed = 10 MHz
+# (Arena-Firmware/src/constants.h:50). NOTE: the panel's SPI_SPEED = 30 MHz
+# constant is peripheral-side and informational only — it is NOT the bus rate.
 SCK_FREQ = 10e6
-OVERSAMPLE = 5  # AD3 samples per SCK period
+# Desired AD3 samples per SCK period, capped by the 125 MS/s AD3 logic-analyzer
+# ceiling. At 25 MHz that cap limits the effective rate to 5x (2.5 samples per
+# half-period) — marginal: Mode-3 idles SCK HIGH, so the first bit's narrow LOW
+# half-period can fall between samples, dropping bit 0 and shifting the byte
+# stream by one bit (header/cmd/CIPO live in the first 3 bytes, exactly where
+# that hurts). 5x is the hardware max at 25 MHz, so an occasional 1-bit leading
+# slip is inherent — for an authoritative CIPO read, use the controller's
+# hardware MISO readback ([spi] CIPO ... on a DEBUG_SERIAL build) rather than
+# this capture. At lower SCK this value yields more oversample (12x at 10 MHz).
+OVERSAMPLE = 12
 SAMPLE_RATE = min(SCK_FREQ * OVERSAMPLE, 125e6)  # AD3 LA max = 125 MS/s
 BUFFER_SIZE = 16_384
 PRE_TRIGGER_FRACTION = 0.05  # 5 % before the CS falling edge
@@ -64,6 +76,23 @@ def decode_spi_mode3(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     idx = np.nonzero(rising)[0] + 1
     if idx.size < 8:
         return np.zeros(0, dtype=np.uint8), np.zeros(0, dtype=np.uint8)
+
+    # Debounce: reject edges closer than half an SCK period to the previous
+    # one. Oversampling jitter / SCK ringing can otherwise double-count an edge
+    # near the CS boundary and shift the whole byte stream by a bit.
+    #
+    # Key off the ACTUAL samples-per-bit (SAMPLE_RATE / SCK_FREQ), not the
+    # desired OVERSAMPLE: the AD3's 125 MS/s ceiling caps the real ratio (e.g.
+    # 5x at 25 MHz even with OVERSAMPLE=12). Using OVERSAMPLE here made min_gap
+    # exceed the bit period and dropped every other edge (decoding half the
+    # bits).
+    samples_per_bit = SAMPLE_RATE / SCK_FREQ
+    min_gap = max(1, int(round(samples_per_bit * 0.5)))
+    kept = [idx[0]]
+    for e in idx[1:]:
+        if e - kept[-1] >= min_gap:
+            kept.append(e)
+    idx = np.asarray(kept)
 
     n_bits = (idx.size // 8) * 8
     return (
