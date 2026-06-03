@@ -132,3 +132,7 @@ On any SD/CRC/parameter fault the controller shows a **"CE / NN" error glyph** o
   serves it and opens a browser. See its [README](scripts/web-serial/README.md).
 - `scripts/all_on.py`, `controller_info.py`, `play_pattern.py`, `probe.py` — standalone
   TCP clients (no `arena_interface` dependency).
+- `scripts/all_on_serial.py`, `scripts/multi_port_capture.py` — USB-CDC bench tools for the
+  CIPO diagnostic (`DEBUG_SERIAL` builds): drive all-on over serial and capture/parse the
+  `[spi] CIPO` stream on the same pipe. `multi_port_capture.py` additionally taps both panels'
+  `SPI_DIAG` heartbeats on their own ports to confirm per-panel frame reception.
