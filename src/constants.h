@@ -2,10 +2,30 @@
 #include <Arduino.h>
 #include <SPI.h>
 
-// Define DEBUG_SERIAL to enable Serial.printf diagnostics.
-// When undefined, all debug prints and their formatting are compiled out.
+// Runtime gate for DEBUG_SERIAL diagnostics (defined in main.cpp). A host flips
+// it with the SET_DIAG_OUTPUT (0xC3) command: web-serial mutes diagnostics on
+// connect for a clean command/response channel; the CIPO capture scripts turn
+// them back on. Declared in all builds so the command handler is uniform; only
+// read in DEBUG_SERIAL builds.
+extern volatile bool g_dbg_on;
+
+// Define DEBUG_SERIAL to enable Serial.printf diagnostics. When undefined, all
+// debug prints and their formatting are compiled out.
+//
+// Diagnostics share the single USB-CDC pipe with command responses, so each
+// line is prefixed with AC::constants::diag_line_sentinel (a byte larger than
+// any response length byte) — letting a host demux diagnostics from [length,
+// status, ...] response frames and never desync. The line is emitted only when
+// g_dbg_on is set AND the USB TX buffer has room for a whole line, so a slow or
+// absent reader can never block the control loop (drops the line instead).
 #ifdef DEBUG_SERIAL
-  #define DBG_PRINTF(...) do { Serial.printf("[%lu] ", millis()); Serial.printf(__VA_ARGS__); } while(0)
+  #define DBG_PRINTF(...) do { \
+      if (g_dbg_on && \
+          Serial.availableForWrite() >= AC::constants::diag_line_byte_count_max) { \
+        Serial.write(AC::constants::diag_line_sentinel); \
+        Serial.printf("[%lu] ", millis()); \
+        Serial.printf(__VA_ARGS__); \
+      } } while (0)
 #else
   #define DBG_PRINTF(...) ((void)0)
 #endif
@@ -108,8 +128,18 @@ constexpr uint8_t first_command_byte_max_value_binary = 0x32;
 
 constexpr uint16_t byte_count_per_response_max = 200;
 
+// DEBUG_SERIAL diagnostic line framing (firmware->host on the USB-CDC pipe).
+// Each diagnostic line is prefixed with diag_line_sentinel; because it exceeds
+// the largest possible response length byte (byte_count_per_response_max), a
+// host can split sentinel-prefixed diagnostic text from [length, status, ...]
+// response frames unambiguously. diag_line_byte_count_max bounds one line
+// (sentinel + "[millis] " + body + newline); DBG_PRINTF only writes when the
+// USB TX buffer has at least this much room.
+constexpr uint8_t diag_line_sentinel        = 0xFF;
+constexpr int     diag_line_byte_count_max  = 110;
+
 // -----------------------------------------------------------------------------
-// Controller identity — get-controller-info (0x67).
+// Controller identity — get-controller-info (0xC2).
 // Response payload is {version_byte, capability_bitmap} (g6_03 § 5).
 // -----------------------------------------------------------------------------
 

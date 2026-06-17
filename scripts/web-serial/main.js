@@ -23,6 +23,14 @@ const printable = (bytes) =>
     .map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "."))
     .join("");
 
+// DEBUG_SERIAL diagnostics share this pipe with command responses. The firmware
+// prefixes every diagnostic line with DIAG_SENTINEL (a byte larger than any
+// response length byte), so they can be demuxed from [length, status, ...]
+// response frames. We also mute them on connect via SET_DIAG_OUTPUT for a clean
+// channel; the sentinel handling just keeps things sane if they're re-enabled.
+const DIAG_SENTINEL = 0xff;
+const SET_DIAG_OUTPUT_CMD = 0xC3;
+
 let port = null;
 let reader = null;
 let writer = null;
@@ -72,6 +80,18 @@ function consumeIncoming(chunk) {
   // first byte is the length of everything that follows. A response from
   // the controller looks like [N, status, echo_cmd, ...N-2 ascii bytes].
   while (rxBuf.length >= 1) {
+    // Diagnostic line (DEBUG_SERIAL builds): a DIAG_SENTINEL-prefixed ASCII line
+    // ending in '\n'. The sentinel exceeds any response length byte, so it can't
+    // be mistaken for a [length, status, ...] frame. Log it and move on WITHOUT
+    // consuming a pendingResponses slot.
+    if (rxBuf[0] === DIAG_SENTINEL) {
+      const nl = rxBuf.indexOf(0x0a);
+      if (nl < 0) break;                          // incomplete line — wait
+      log(`           :: ${printable(rxBuf.subarray(1, nl))}`);
+      rxBuf = rxBuf.subarray(nl + 1);
+      continue;
+    }
+
     const claimedLen = rxBuf[0];
     const totalNeeded = 1 + claimedLen;
     if (rxBuf.length < totalNeeded) break;
@@ -127,6 +147,11 @@ async function connect() {
 
     setConnectedUI(true);
     log("-- connected to serial port");
+
+    // Mute DEBUG_SERIAL diagnostics so they don't interleave with command
+    // responses on this shared pipe. Harmless on a production build (the
+    // controller just acks the command).
+    await sendBytes("diag_off", [0x02, SET_DIAG_OUTPUT_CMD, 0x00]);
   } catch (err) {
     log(`!! connect error: ${err && err.message ? err.message : err}`);
     port = null;
@@ -206,7 +231,7 @@ async function sendBytes(label, bytes) {
   }
 }
 
-// get-controller-info (0x67) reply carries {version, capability_bitmap}.
+// get-controller-info (0xC2) reply carries {version, capability_bitmap}.
 function decodeControllerInfo(resp) {
   if (!resp || !resp.message || resp.message.length < 2) {
     log("             !! controller-info reply too short");
@@ -229,10 +254,10 @@ $("btn-disconnect").onclick = disconnect;
 $("btn-all-on").onclick  = () => sendBytes("all_on",  [0x01, 0xff]);
 $("btn-all-off").onclick = () => sendBytes("all_off", [0x01, 0x00]);
 $("btn-stop").onclick    = () => sendBytes("stop",    [0x01, 0x30]);
-$("btn-get-ip").onclick  = () => sendBytes("get_ip",  [0x01, 0x66]);
+$("btn-get-ip").onclick  = () => sendBytes("get_ip",  [0x01, 0xC1]);
 
 $("btn-get-info").onclick = async () => {
-  const resp = await sendBytes("get_info", [0x01, 0x67]);
+  const resp = await sendBytes("get_info", [0x01, 0xC2]);
   decodeControllerInfo(resp);
 };
 

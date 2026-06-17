@@ -11,6 +11,12 @@ SpiManager       spi;
 SdManager        sd;
 CommandProcessor cmdProc(net, serial, spi, sd);
 
+// DEBUG_SERIAL diagnostics default OFF so web serial clients get a clean
+// command/response channel on fresh connect without needing to send a mute
+// command first. CIPO capture scripts enable explicitly via SET_DIAG_OUTPUT
+// (0xC3). State persists across USB reconnects but resets on power cycle.
+volatile bool g_dbg_on = false;
+
 #ifdef DEBUG_SERIAL
 static bool ipPrinted = false;
 #endif

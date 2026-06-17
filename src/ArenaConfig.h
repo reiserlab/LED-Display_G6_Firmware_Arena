@@ -4,7 +4,7 @@
 
 // Hardcoded panel map for the G6_2x10 arena (arena_10-10 v1 production).
 //
-// Source: docs/development/g6_arena_configs.h + g6_07-arena-firmware-interface.md.
+// Source: docs/development/g6_arena_configs.h + g6_06-arena-firmware-interface.md.
 //
 // The 10 panel columns are split across two SPI buses:
 //   B0 (Teensy SPI):  columns 0..4 (silk P1..P5)

@@ -7,84 +7,66 @@ diagnostic prints out the same bidirectional CDC pipe, this one process both
 sends "all on" and captures the CIPO stream -- no separate `pio device monitor`
 (which would fight for the exclusive port).
 
+Requires a diagnostic arena build: the `[spi] CIPO` rows are gated on
+-DDEBUG_SERIAL (env teensy41-printf; flash via `pixi run deploy-printf`). The
+default `pixi run deploy` (env teensy41) compiles them out and nothing matches.
+
     pixi run python scripts/all_on_serial.py --port /dev/cu.usbmodem121699401 \
         --label A --duration 50
 
-Reads the captured stream, tees it to log/<ts>_<label>.log, and prints a
-classification of every `[spi] CIPO` row at the end:
+Reads the captured stream and logs it to log/<ts>_<label>.log as text: ASCII
+diagnostics stay readable and any binary framing / command-echo bytes are
+rendered as \\xNN hex escapes (not saved raw). Then prints a classification of
+every `[spi] CIPO` row at the end:
     ?1 30 ??  -> panel echo (confirmation flowing)            [ECHO]
     81 00 00  -> empty-buffer sentinel (alive, slot empty)    [SENTINEL]
     00 00 00  -> line held low at the Teensy (blocked)        [BLOCKED]
 """
 
 import argparse
-import datetime as _dt
-import os
-import re
-import sys
 import time
 
-try:
-    import serial  # pyserial, bundled with the platformio pixi env
-except ImportError:
-    sys.exit("pyserial not found -- run via `pixi run python ...`")
-
-ALL_OFF_CMD = 0x00
-ALL_ON_CMD = 0xFF
-
-# A CIPO dump row, e.g.:  [spi] CIPO set4  cs=9  B0=?1 30 62  B1=00 00 00
-CIPO_RE = re.compile(
-    r"\[spi\]\s*CIPO\s*set(\d+)\s+cs=(\S+)\s+"
-    r"B0=([0-9A-Fa-f?]{2})\s+([0-9A-Fa-f?]{2})\s+([0-9A-Fa-f?]{2})\s+"
-    r"B1=([0-9A-Fa-f?]{2})\s+([0-9A-Fa-f?]{2})\s+([0-9A-Fa-f?]{2})"
+from cipo_common import (
+    ALL_OFF_CMD,
+    ALL_ON_CMD,
+    CIPO_RE,
+    classify,
+    enable_diagnostics,
+    open_cdc,
+    safe_text,
+    timestamped_log,
 )
-
-
-def classify(b0, b1, b2):
-    """Classify a 3-byte CIPO triple (strings, may contain '?')."""
-    trip = f"{b0} {b1} {b2}".lower()
-    if trip == "00 00 00":
-        return "BLOCKED"
-    if trip == "81 00 00":
-        return "SENTINEL"
-    # Panel echo: header low-nibble = 1 (??1) and cmd byte = 0x30 (GRAY_16).
-    if b0[-1] in "1" and b1.lower() == "30":
-        return "ECHO"
-    return "OTHER"
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", required=True, help="Teensy USB-CDC device node")
     ap.add_argument("--label", default="run", help="A/B/C label for the log name")
-    ap.add_argument("--duration", type=float, default=50.0, help="ON seconds")
+    ap.add_argument("--duration", type=float, default=5.0, help="ON seconds")
     ap.add_argument("--logdir", default="log")
     args = ap.parse_args()
 
-    os.makedirs(args.logdir, exist_ok=True)
-    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    logpath = os.path.join(args.logdir, f"{ts}_{args.label}.log")
+    logpath = timestamped_log(args.logdir, args.label)
+    ser = open_cdc(args.port)
+    enable_diagnostics(ser)  # undo any prior web-serial mute so CIPO rows flow
 
-    # Teensy CDC ignores the baud rate; opening does not reset the board.
-    ser = serial.Serial(args.port, baudrate=115200, timeout=0.2)
-    time.sleep(0.3)
-    ser.reset_input_buffer()
-
-    rows = []                       # (set, cs, b0,b1,b2 / B1..., class0, class1)
+    rows = []  # (set, cs, b0,b1,b2 / B1..., class0, class1)
     buf = bytearray()
     deadline = time.time() + args.duration
 
-    print(f"[{args.label}] all_on -> 0x{ALL_ON_CMD:02X} on {args.port}; "
-          f"capturing {args.duration:.0f}s -> {logpath}")
+    print(
+        f"[{args.label}] all_on -> 0x{ALL_ON_CMD:02X} on {args.port}; "
+        f"capturing {args.duration:.0f}s -> {logpath}"
+    )
     ser.write(bytes([0x01, ALL_ON_CMD]))
     ser.flush()
 
-    with open(logpath, "wb") as raw:
+    with open(logpath, "w", encoding="ascii") as raw:
         while time.time() < deadline:
             chunk = ser.read(4096)
             if not chunk:
                 continue
-            raw.write(chunk)
+            raw.write(safe_text(chunk))
             raw.flush()
             buf += chunk
             # Decode complete text lines; binary cmd-echo bytes are tolerated
@@ -105,8 +87,9 @@ def main():
     ser.close()
 
     # ---- summary ----
-    print(f"\n[{args.label}] captured {len(rows)} CIPO rows. "
-          f"Non-zero / interesting rows:")
+    print(
+        f"\n[{args.label}] captured {len(rows)} CIPO rows. Non-zero / interesting rows:"
+    )
     tally = {}
     nonzero = []
     for setn, cs, b0, c0, b1, c1 in rows:
@@ -122,13 +105,17 @@ def main():
         if ln != seen:
             print(ln)
             seen = ln
-    print(f"\n[{args.label}] tally: " +
-          "  ".join(f"{k}={v}" for k, v in sorted(tally.items())))
-    verdict = ("ECHO present -> confirmation flowing"
-               if tally.get("ECHO") else
-               "NO echo -> CIPO blocked/empty")
+    print(
+        f"\n[{args.label}] tally: "
+        + "  ".join(f"{k}={v}" for k, v in sorted(tally.items()))
+    )
+    verdict = (
+        "ECHO present -> confirmation flowing"
+        if tally.get("ECHO")
+        else "NO echo -> CIPO blocked/empty"
+    )
     print(f"[{args.label}] verdict: {verdict}")
-    print(f"[{args.label}] raw log: {logpath}")
+    print(f"[{args.label}] log: {logpath}")
 
 
 if __name__ == "__main__":
