@@ -26,4 +26,16 @@ class MessageSource {
                  reinterpret_cast<const uint8_t *>(message),
                  message ? strlen(message) : 0);
   }
+
+  // Read up to max_len bytes from the transport into buf (non-blocking).
+  // Returns 0 if no bytes are available yet. Used by CommandProcessor to
+  // stream the body of bulk-write commands (0x85) without buffering the
+  // whole file.
+  virtual size_t readBulkBytes(uint8_t* buf, size_t max_len) { return 0; }
+
+  // Flush any queued response frame and then write `len` raw bytes directly
+  // to the transport without framing. Used by 0x84 get-pattern-file to
+  // stream file data after the header response. Default is a no-op so
+  // non-streaming MessageSource subclasses don't need to override it.
+  virtual void sendRaw(const uint8_t* buf, size_t len) {}
 };

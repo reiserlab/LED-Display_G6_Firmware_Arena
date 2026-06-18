@@ -9,7 +9,7 @@ namespace AC {
 // still recognize and explicitly reject them.
 enum ArenaCommands : uint8_t {
   ALL_OFF_CMD                 = 0x00,
-  DISPLAY_RESET_CMD           = 0x01,  // dropped for G6
+  SYSTEM_RESET_CMD            = 0x01,  // software system reset (SCB_AIRCR SYSRESETREQ)
   SWITCH_GRAYSCALE_CMD        = 0x06,  // dropped for G6
   TRIAL_PARAMS_CMD            = 0x08,  // "combined command": selects mode + pattern (Modes 2/3/4)
   SET_REFRESH_RATE_CMD        = 0x16,
@@ -18,6 +18,14 @@ enum ArenaCommands : uint8_t {
   STREAM_FRAME_CMD            = 0x32,
   GET_FRAMES_SENT_CMD         = 0x33,  // returns uint32 LE frames pushed to panels since boot/reset
   RESET_FRAMES_SENT_CMD       = 0x34,  // zeroes the frames-sent counter
+  GET_FILE_COUNT_CMD          = 0x80,  // returns pattern file count on SD as uint16 LE
+  GET_PATTERN_FILENAME_CMD    = 0x82,  // [03 82 idx_lo idx_hi] 1-based; returns 1-byte-len + filename
+  GET_PATTERN_FILE_CMD        = 0x84,  // [03 84 idx_lo idx_hi] 1-based; response: uint64 LE size, then raw bytes
+  SET_PATTERN_FILENAME_CMD    = 0x83,  // [0x83, idx_lo, idx_hi, len, chars…] rename; returns new uint16 LE index
+  SET_PATTERN_FILE_CMD        = 0x85,  // [0x85, idx_lo, idx_hi, len_b0..b7, data…] upload file (bulk stream)
+  DELETE_PATTERN_FILE_CMD     = 0x86,  // [03 86 idx_lo idx_hi] delete pattern file; idx=0 deletes pattern.temp
+  DELETE_ALL_PATTERNS_CMD     = 0x8F,  // [01 8F] delete all files in /patterns
+  GET_SD_ARCHIVE_CMD          = 0x8A,  // [01 8A] stream full SD as a ZIP; only in ALL_OFF state
   SET_ETHERNET_IP_ADDRESS_CMD = 0xC0,  // reserved — not yet implemented
   GET_ETHERNET_IP_ADDRESS_CMD = 0xC1,
   GET_CONTROLLER_INFO_CMD     = 0xC2,  // returns {version, capability_bitmap}

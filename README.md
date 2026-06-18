@@ -92,7 +92,7 @@ Same wire framing as G4.1-ArenaSlim, accepted on both TCP and USB serial:
 | `GET_CONTROLLER_INFO` | `0x67` | ✓ | Returns `{version, capability_bitmap}` (bit 0 `g6_mode` = 1) |
 | `SET_FRAME_POSITION` | `0x70` | ✓ | Mode 3 — show a specific frame of the open pattern |
 | `ALL_ON`         | `0xFF` | ✓ | Synthesizes a full-bright GS16 oneshot on every panel |
-| `DISPLAY_RESET`  | `0x01` | ✗ | Dropped for G6 — responds with a clear error message |
+| `SYSTEM_RESET`   | `0x01` | ✓ | Software system reset — acks then reboots (SCB_AIRCR SYSRESETREQ) |
 | `SWITCH_GRAYSCALE` | `0x06` | ✗ | Dropped for G6 — `gs_val` is derived from the stream size / pattern header |
 
 Unknown opcodes reply with `status = 1` and raise a `CE 01` error glyph.
