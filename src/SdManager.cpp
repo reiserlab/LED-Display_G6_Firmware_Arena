@@ -200,7 +200,7 @@ uint8_t SdManager::deleteAllPatterns() {
 
     char path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
     for (uint16_t i = 0; i < count; ++i) {
-      snprintf(path, sizeof(path), "%s/%s", pattern_dir, to_delete[i]);
+      snprintf(path, sizeof(path), "%s/%.*s", pattern_dir, (int)(pattern_name_byte_count - 1), to_delete[i]);
       SD.remove(path);
     }
   } else {
