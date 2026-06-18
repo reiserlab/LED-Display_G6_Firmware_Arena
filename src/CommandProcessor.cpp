@@ -84,12 +84,28 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
     }
 
+    case GET_REFRESH_RATE_CMD: {
+      uint16_t hz = (uint16_t)refresh_rate_hz_;
+      uint8_t payload[2] = { (uint8_t)(hz), (uint8_t)(hz >> 8) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      break;
+    }
+
     case GET_ETHERNET_IP_ADDRESS_CMD:
       current_source_->sendResponse(command_byte, 0, net_.ipAddress());
       break;
 
     case GET_CONTROLLER_INFO_CMD:
       handleGetControllerInfo();
+      break;
+
+    case SET_DIAG_OUTPUT_CMD:
+      // [len=2, 0xC3, on]: mute (0) / unmute (non-zero) DEBUG_SERIAL
+      // diagnostics on the shared USB-CDC pipe. Always accepted so the wire
+      // protocol is uniform across builds; only has an effect when DEBUG_SERIAL
+      // is compiled in. Missing arg defaults to on.
+      g_dbg_on = (claimed_len >= 2) ? (buf[pos] != 0) : true;
+      current_source_->sendResponse(command_byte, 0, g_dbg_on ? "diag on" : "diag off");
       break;
 
     case TRIAL_PARAMS_CMD:
@@ -99,6 +115,52 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     case SET_FRAME_POSITION_CMD:
       handleSetFramePosition(cmd);
       break;
+
+    case GET_FRAMES_SENT_CMD: {
+      uint32_t n = spi_.framesSent();
+      uint8_t payload[4] = {
+          (uint8_t)(n),
+          (uint8_t)(n >> 8),
+          (uint8_t)(n >> 16),
+          (uint8_t)(n >> 24),
+      };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      break;
+    }
+
+    case RESET_FRAMES_SENT_CMD:
+      spi_.resetFramesSent();
+      current_source_->sendResponse(command_byte, 0, "");
+      break;
+
+    case GET_DIAG_OUTPUT_CMD: {
+      uint8_t val = g_dbg_on ? 1 : 0;
+      current_source_->sendResponse(command_byte, 0, &val, 1);
+      break;
+    }
+
+    case SET_SPI_CLOCK_CMD: {
+      if (claimed_len < 2) {
+        current_source_->sendResponse(command_byte, 1, "Missing mhz arg");
+        break;
+      }
+      uint16_t mhz;
+      memcpy(&mhz, buf + pos, sizeof(mhz));
+      spi_.setSpiClockMhz(mhz);  // clamps 1..30 internally
+      uint16_t applied = spi_.getSpiClockMhz();
+      uint8_t payload[2] = { (uint8_t)(applied), (uint8_t)(applied >> 8) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      DBG_PRINTF("[cmd] set-spi-clock req=%u applied=%u MHz\n",
+                 (unsigned)mhz, (unsigned)applied);
+      break;
+    }
+
+    case GET_SPI_CLOCK_CMD: {
+      uint16_t mhz = spi_.getSpiClockMhz();
+      uint8_t payload[2] = { (uint8_t)(mhz), (uint8_t)(mhz >> 8) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      break;
+    }
 
     // G6-dropped commands. Echo them with an explanatory message so a legacy
     // G4 host gets a clear signal rather than silent failure.
@@ -167,7 +229,7 @@ void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// get-controller-info (0x67)
+// get-controller-info (0xC2)
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleGetControllerInfo() {
@@ -341,7 +403,7 @@ void CommandProcessor::serviceClosedLoop() {
 
   // Reconstruct the bipolar BNC input voltage from the ADC reading. The
   // OPA2277 front-end maps +/-10 V at J28 to 0..3.3 V at the ADC, midscale =
-  // 0 V (g6_07). Front-end offset/scale is hardware calibration — flagged as
+  // 0 V (g6_06). Front-end offset/scale is hardware calibration — flagged as
   // lowest priority / TBD in g6_03 § Mode 4.
   int raw = analogRead(mode4_ain_pin);
   float adc_frac = (float)raw / (float)adc_full_scale_counts;       // 0..1

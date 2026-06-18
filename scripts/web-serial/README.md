@@ -32,8 +32,8 @@ Chromium-based browser instead of serving it locally if you prefer.
    `COM*` on Windows, `/dev/cu.usbmodem*` on macOS).
 3. Drive the controller with the buttons:
    - **All On** / **All Off** / **Stop** — `0xFF` / `0x00` / `0x30`.
-   - **Get IP** (`0x66`) — prints the DHCP-resolved address.
-   - **Get Controller Info** (`0x67`) — prints `{version, capability}` and
+   - **Get IP** (`0xC1`) — prints the DHCP-resolved address.
+   - **Get Controller Info** (`0xC2`) — prints `{version, capability}` and
      decodes the capability bitmap (`g6_mode`, `v2_local_storage`, …).
    - **Set Refresh** (`0x16`) — host override of the re-transmit rate.
    - **SD pattern playback** — pick a Mode (2 open-loop / 3 show-frame /
@@ -96,11 +96,15 @@ full command list.
   again for the new origin.
 - The `baudRate` passed to `port.open()` is meaningless on USB CDC — the
   G6 Arena honors any value. We use `115200` as a conventional placeholder.
-- In `DEBUG_SERIAL` firmware builds, the same USB CDC pipe carries
-  `DBG_PRINTF` diagnostic text. The framing parser will not crash on it
-  but will treat the first byte of any unexpected text as a length and
-  log nonsense until it resyncs after a fresh command. For interactive
-  use prefer a non-`DEBUG_SERIAL` build.
+- Works with both firmware builds. In `DEBUG_SERIAL` builds the same USB
+  CDC pipe also carries `DBG_PRINTF` diagnostic text, so on connect this
+  client sends `SET_DIAG_OUTPUT` (0xC3) with on=0 to **mute** diagnostics
+  for a clean command/response channel. If diagnostics are re-enabled, each
+  line is prefixed with a `0xFF` sentinel (larger than any response length
+  byte) and the parser demuxes it — shown in the log with a `::` prefix —
+  instead of mistaking it for a response frame. (The mute is a runtime flag
+  on the controller and persists across reconnects; the CIPO capture scripts
+  re-enable diagnostics explicitly.)
 - Only one process can hold the USB serial port at a time. If `pio device
   monitor`, `dwfpy`, or another terminal is connected, disconnect it
   before clicking **Connect** in the browser.
