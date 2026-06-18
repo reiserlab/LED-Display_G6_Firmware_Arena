@@ -20,9 +20,10 @@ Current capabilities:
 ## Quickstart
 
 **You only need [pixi](https://pixi.sh/) installed.** Everything else — PlatformIO, the Teensy
-compiler, Python, the local web server — is fetched automatically the first time you run a `pixi
-run` task. The one optional extra is a **Chromium-based browser** (Chrome / Edge / Opera / Brave)
-for the Web Serial UI in step 4.
+compiler, Python — is fetched automatically the first time you run a `pixi run` task. The one
+optional extra is a **Chromium-based browser** (Chrome / Edge / Opera / Brave) for the
+[Arena Console](https://reiserlab.github.io/webDisplayTools/arena_console.html) (a browser-based
+Web Serial control panel) in step 4.
 
 1. **Connect the controller.** Plug the Teensy 4.1 on the G6 arena into your computer via USB.
 2. **Flash the controller firmware:**
@@ -31,13 +32,9 @@ for the Web Serial UI in step 4.
    ```
 3. **Install the panels.** Add G6 panels running the most recent panel firmware from
    [`reiserlab/LED-Display_G6_Firmware_Panel`](https://github.com/reiserlab/LED-Display_G6_Firmware_Panel).
-4. **Launch the Web Serial UI:**
-   ```
-   pixi run webserial
-   ```
-   This serves the page and opens a browser. If no browser opens, open a **Chromium-based**
-   browser (Chrome / Edge / Opera / Brave — Web Serial is not in Firefox or Safari) and go to
-   <http://localhost:8000>.
+4. **Open the [Arena Console](https://reiserlab.github.io/webDisplayTools/arena_console.html)**
+   in a **Chromium-based** browser (Chrome / Edge / Opera / Brave — Web Serial is not in Firefox
+   or Safari).
 5. **Connect to the arena.** Click **Connect to G6 Arena** and pick the correct serial port from
    the chooser (typically `/dev/ttyACM*` on Linux, `COM*` on Windows, `/dev/cu.usbmodem*` on
    macOS). Close any other program holding the port (e.g. `pixi run monitor`) first.
@@ -54,7 +51,6 @@ pixi run build           # compile
 pixi run deploy          # compile and upload
 pixi run deploy-printf   # compile with DEBUG_SERIAL, and upload
 pixi run monitor         # USB serial monitor (logs to log/)
-pixi run webserial       # serve scripts/web-serial and open a browser
 ```
 
 ## Source files
@@ -127,9 +123,9 @@ On any SD/CRC/parameter fault the controller shows a **"CE / NN" error glyph** o
 
 ## Host tooling
 
-- `scripts/web-serial/` — browser UI (Web Serial) with buttons for every command, the
-  webDisplayTools preset patterns, and `.bin` / `.pat` upload-and-stream. `pixi run webserial`
-  serves it and opens a browser. See its [README](scripts/web-serial/README.md).
+- **[Arena Console](https://reiserlab.github.io/webDisplayTools/arena_console.html)** — the
+  browser-based Web Serial control panel (buttons for every command, stream presets, raw-hex
+  send, and `.bin` / `.pat` upload-and-stream), in webDisplayTools.
 - `scripts/all_on.py`, `controller_info.py`, `play_pattern.py`, `probe.py` — standalone
   TCP clients (no `arena_interface` dependency).
 - `scripts/all_on_serial.py`, `scripts/multi_port_capture.py` — USB-CDC bench tools for the
