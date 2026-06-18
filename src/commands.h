@@ -18,6 +18,8 @@ enum ArenaCommands : uint8_t {
   STREAM_FRAME_CMD            = 0x32,
   GET_FRAMES_SENT_CMD         = 0x33,  // returns uint32 LE frames pushed to panels since boot/reset
   RESET_FRAMES_SENT_CMD       = 0x34,  // zeroes the frames-sent counter
+  GET_FILE_COUNT_CMD          = 0x80,  // returns pattern file count on SD as uint16 LE
+  GET_PATTERN_FILENAME_CMD    = 0x82,  // [03 82 idx_lo idx_hi] 1-based; returns 1-byte-len + filename
   SET_ETHERNET_IP_ADDRESS_CMD = 0xC0,  // reserved — not yet implemented
   GET_ETHERNET_IP_ADDRESS_CMD = 0xC1,
   GET_CONTROLLER_INFO_CMD     = 0xC2,  // returns {version, capability_bitmap}

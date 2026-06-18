@@ -39,6 +39,10 @@ class SdManager {
   // Number of *.pat files discovered in /patterns (after begin()).
   uint16_t patternCount() const { return pattern_count_; }
 
+  // Return the filename for the given 1-based pattern ID (same convention as
+  // openPattern). Returns nullptr if pattern_id is 0 or > patternCount().
+  const char* patternName(uint16_t pattern_id) const;
+
   // Open and validate the pattern with the given 1-based ID. Returns
   // AC::constants::CE_NONE on success, or a ControllerError code on failure.
   // On success info() describes the open pattern.

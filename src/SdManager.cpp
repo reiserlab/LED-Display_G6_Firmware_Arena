@@ -113,6 +113,11 @@ uint8_t SdManager::validateHeader(const uint8_t *hdr) {
   return CE_NONE;
 }
 
+const char* SdManager::patternName(uint16_t pattern_id) const {
+  if (pattern_id == 0 || pattern_id > pattern_count_) return nullptr;
+  return names_[pattern_id - 1];
+}
+
 uint8_t SdManager::openPattern(uint16_t pattern_id) {
   if (!mounted_) return CE_SD_NOT_PRESENT;
   if (pattern_id == 0 || pattern_id > pattern_count_) return CE_BAD_PARAM;

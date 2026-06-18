@@ -133,6 +133,34 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       current_source_->sendResponse(command_byte, 0, "");
       break;
 
+    case GET_FILE_COUNT_CMD: {
+      uint16_t n = sd_.patternCount();
+      uint8_t payload[2] = { (uint8_t)(n), (uint8_t)(n >> 8) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      break;
+    }
+
+    case GET_PATTERN_FILENAME_CMD: {
+      if (claimed_len < 2) {
+        current_source_->sendResponse(command_byte, 1, "Missing index");
+        break;
+      }
+      uint16_t idx;
+      memcpy(&idx, buf + pos, sizeof(idx));
+      const char *name = sd_.patternName(idx);
+      if (!name) {
+        current_source_->sendResponse(command_byte, 1, "Index out of range");
+        break;
+      }
+      // Response: 1-byte length + filename chars (no null terminator).
+      uint8_t len = (uint8_t)strlen(name);
+      uint8_t payload[1 + AC::constants::pattern_name_byte_count];
+      payload[0] = len;
+      memcpy(payload + 1, name, len);
+      current_source_->sendResponse(command_byte, 0, payload, 1 + len);
+      break;
+    }
+
     case GET_DIAG_OUTPUT_CMD: {
       uint8_t val = g_dbg_on ? 1 : 0;
       current_source_->sendResponse(command_byte, 0, &val, 1);
