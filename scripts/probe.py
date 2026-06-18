@@ -1,6 +1,6 @@
 """Liveness probe for the G6-ArenaSlim controller.
 
-Sends GET_ETHERNET_IP_ADDRESS (0x66) over the G4-compatible binary protocol
+Sends GET_ETHERNET_IP_ADDRESS (0xC1) over the G4-compatible binary protocol
 and prints the full response. If this works, TCP framing, binary-command
 parsing, and the response path are all healthy — so any subsequent failure
 to light LEDs is downstream of `CommandProcessor::handleBinaryCommand()`.
@@ -13,7 +13,7 @@ import sys
 
 IP_ADDRESS = "10.103.40.36"
 PORT = 62222
-GET_IP_CMD = 0x66
+GET_IP_CMD = 0xC1
 
 
 def _printable(b):
