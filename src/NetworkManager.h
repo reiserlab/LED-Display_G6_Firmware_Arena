@@ -12,8 +12,10 @@ struct ParsedCommand {
   uint8_t  cmd;
   uint8_t  data[AC::constants::stream_header_byte_count
                 + AC::constants::frame_buf_byte_count_max + 16];
-  uint16_t data_len;   // total bytes received (including length / stream header)
+  uint16_t data_len;        // total bytes received (including length / stream header)
   bool     is_stream;
+  bool     is_bulk;         // true for 0x85 set-pattern-file (header parsed; body streamed)
+  uint32_t bulk_payload_len; // file size in bytes (lower 32 bits of the uint64 LE wire field)
 };
 
 class NetworkManager : public MessageSource {
@@ -31,6 +33,9 @@ class NetworkManager : public MessageSource {
   using MessageSource::sendResponse;  // keep the char* convenience overload
   void sendResponse(uint8_t cmd_echo, uint8_t status,
                     const uint8_t *payload, size_t payload_len) override;
+
+  size_t readBulkBytes(uint8_t* buf, size_t max_len) override;
+  void sendRaw(const uint8_t* buf, size_t len) override;
 
   const char *ipAddress() const { return ip_str_; }
   const char *macAddress() const { return mac_str_; }

@@ -20,7 +20,9 @@ void CommandProcessor::processCommand() {
   if (net_.hasCommand()) {
     current_source_ = &net_;
     const ParsedCommand &cmd = net_.command();
-    if (cmd.is_stream) {
+    if (cmd.is_bulk) {
+      handleBulkWriteCommand(cmd);
+    } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
     } else {
       handleBinaryCommand(cmd);
@@ -30,7 +32,9 @@ void CommandProcessor::processCommand() {
   if (serial_.hasCommand()) {
     current_source_ = &serial_;
     const ParsedCommand &cmd = serial_.command();
-    if (cmd.is_stream) {
+    if (cmd.is_bulk) {
+      handleBulkWriteCommand(cmd);
+    } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
     } else {
       handleBinaryCommand(cmd);
@@ -158,6 +162,117 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       payload[0] = len;
       memcpy(payload + 1, name, len);
       current_source_->sendResponse(command_byte, 0, payload, 1 + len);
+      break;
+    }
+
+    case SET_PATTERN_FILENAME_CMD: {
+      // [len, 0x83, idx_lo, idx_hi, name_len, char0..charN]
+      if (claimed_len < 4) {
+        current_source_->sendResponse(command_byte, 1, "Too short");
+        break;
+      }
+      uint16_t idx;
+      memcpy(&idx, buf + pos, sizeof(idx));
+      pos += 2;
+
+      uint8_t name_len = buf[pos++];
+      if (name_len == 0 || name_len >= AC::constants::pattern_name_byte_count ||
+          claimed_len < (uint8_t)(4 + name_len)) {
+        current_source_->sendResponse(command_byte, 1, "Bad name length");
+        break;
+      }
+      if (idx > sd_.patternCount()) {
+        current_source_->sendResponse(command_byte, 1, "Index out of range");
+        break;
+      }
+
+      char new_name[AC::constants::pattern_name_byte_count];
+      memcpy(new_name, buf + pos, name_len);
+      new_name[name_len] = '\0';
+
+      uint16_t new_idx = 0;
+      if (!sd_.renamePattern(idx, new_name, &new_idx)) {
+        current_source_->sendResponse(command_byte, 1, "Rename failed");
+        break;
+      }
+      uint8_t payload[2] = { (uint8_t)new_idx, (uint8_t)(new_idx >> 8) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      DBG_PRINTF("[cmd] set-pattern-filename idx=%u -> '%s' new_idx=%u\n",
+                 (unsigned)idx, new_name, (unsigned)new_idx);
+      break;
+    }
+
+    case GET_PATTERN_FILE_CMD: {
+      // [03 84 idx_lo idx_hi]  Response: [0x0A, 0, 0x84, size_b0..b7], then raw bytes.
+      if (claimed_len < 3) {
+        current_source_->sendResponse(command_byte, 1, "Missing index");
+        break;
+      }
+      uint16_t idx;
+      memcpy(&idx, buf + pos, sizeof(idx));
+      if (idx == 0 || idx > sd_.patternCount()) {
+        current_source_->sendResponse(command_byte, 1, "Index out of range");
+        break;
+      }
+      const char* name = sd_.patternName(idx);
+      if (!name) {
+        current_source_->sendResponse(command_byte, 1, "Pattern not found");
+        break;
+      }
+      char path[sizeof(AC::constants::pattern_dir) + AC::constants::pattern_name_byte_count + 1];
+      snprintf(path, sizeof(path), "%s/%s", AC::constants::pattern_dir, name);
+      File f = SD.open(path, FILE_READ);
+      if (!f) {
+        current_source_->sendResponse(command_byte, 1, "File open failed");
+        break;
+      }
+      uint32_t file_size = (uint32_t)f.size();
+      // Send header: [0x0A, 0, 0x84, size_b0..b7] (8-byte uint64 LE; upper 4 bytes = 0)
+      uint8_t size_buf[8] = {};
+      memcpy(size_buf, &file_size, sizeof(file_size));
+      current_source_->sendResponse(command_byte, 0, size_buf, sizeof(size_buf));
+      // Stream raw file bytes via sendRaw (flushes the header on the first call).
+      static uint8_t chunk[512];
+      uint32_t remaining = file_size;
+      uint32_t deadline = millis() + 60000UL;
+      bool timed_out = false;
+      while (remaining > 0) {
+        if (millis() > deadline) { timed_out = true; break; }
+        size_t to_read = (remaining < sizeof(chunk)) ? (size_t)remaining : sizeof(chunk);
+        size_t n = (size_t)f.read(chunk, to_read);
+        if (n == 0) break;
+        current_source_->sendRaw(chunk, n);
+        remaining -= n;
+      }
+      f.close();
+      DBG_PRINTF("[cmd] get-pattern-file idx=%u name=%s size=%lu%s\n",
+                 (unsigned)idx, name, (unsigned long)file_size,
+                 timed_out ? " (TIMEOUT)" : "");
+      break;
+    }
+
+    case DELETE_PATTERN_FILE_CMD: {
+      // [03 86 idx_lo idx_hi]
+      if (claimed_len < 3) {
+        current_source_->sendResponse(command_byte, 1, "Missing index");
+        break;
+      }
+      uint16_t idx;
+      memcpy(&idx, buf + pos, sizeof(idx));
+      if (!sd_.deletePattern(idx)) {
+        current_source_->sendResponse(command_byte, 1,
+            idx > sd_.patternCount() ? "Index out of range" : "Delete failed");
+        break;
+      }
+      DBG_PRINTF("[cmd] delete-pattern-file idx=%u\n", (unsigned)idx);
+      current_source_->sendResponse(command_byte, 0, "");
+      break;
+    }
+
+    case DELETE_ALL_PATTERNS_CMD: {
+      sd_.deleteAllPatterns();
+      DBG_PRINTF("[cmd] delete-all-patterns\n");
+      current_source_->sendResponse(command_byte, 0, "");
       break;
     }
 
@@ -595,4 +710,94 @@ void CommandProcessor::fillFrameBufferAllOn(uint16_t block_byte_count) {
 
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + panel_count_per_frame * block_byte_count);
+}
+
+// ---------------------------------------------------------------------------
+// handleBulkWriteCommand — set-pattern-file (0x85)
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
+  if (cmd.cmd != SET_PATTERN_FILE_CMD) {
+    drainBulkData(cmd.bulk_payload_len);
+    current_source_->sendResponse(cmd.cmd, 1, "Unknown bulk command");
+    return;
+  }
+
+  // Header: [0x85, idx_lo, idx_hi, len_b0..b7] (already parsed by transport)
+  uint16_t idx;
+  memcpy(&idx, cmd.data + 1, sizeof(idx));
+  uint32_t total_len = cmd.bulk_payload_len;
+
+  if (idx > sd_.patternCount()) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Index out of range");
+    return;
+  }
+
+  // Build destination path.
+  char path[AC::constants::pattern_name_byte_count + 16];
+  if (idx == 0) {
+    snprintf(path, sizeof(path), "%s/pattern.temp", AC::constants::pattern_dir);
+  } else {
+    const char *name = sd_.patternName(idx);
+    snprintf(path, sizeof(path), "%s/%s", AC::constants::pattern_dir, name);
+  }
+
+  // Remove any existing file so we get a clean write.
+  SD.remove(path);
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "SD open failed");
+    return;
+  }
+
+  static constexpr size_t CHUNK = 512;
+  uint8_t chunk[CHUNK];
+  uint32_t remaining = total_len;
+  uint32_t t0 = millis();
+  bool ok = true;
+
+  while (remaining > 0) {
+    size_t want = (remaining < CHUNK) ? (size_t)remaining : CHUNK;
+    size_t got = current_source_->readBulkBytes(chunk, want);
+    if (got > 0) {
+      f.write(chunk, got);
+      remaining -= (uint32_t)got;
+      t0 = millis();
+    } else {
+      if ((uint32_t)(millis() - t0) > 30000U) {
+        ok = false;
+        break;
+      }
+      yield();
+    }
+  }
+
+  f.close();
+  if (!ok) {
+    SD.remove(path);
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Upload timeout");
+    return;
+  }
+
+  DBG_PRINTF("[cmd] set-pattern-file idx=%u wrote %lu bytes to %s\n",
+             (unsigned)idx, (unsigned long)total_len, path);
+  current_source_->sendResponse(SET_PATTERN_FILE_CMD, 0, "");
+}
+
+void CommandProcessor::drainBulkData(uint32_t remaining) {
+  uint8_t buf[256];
+  uint32_t t0 = millis();
+  while (remaining > 0) {
+    size_t want = (remaining < sizeof(buf)) ? (size_t)remaining : sizeof(buf);
+    size_t got = current_source_->readBulkBytes(buf, want);
+    if (got > 0) {
+      remaining -= (uint32_t)got;
+      t0 = millis();
+    } else {
+      if ((uint32_t)(millis() - t0) > 5000U) break;
+      yield();
+    }
+  }
 }

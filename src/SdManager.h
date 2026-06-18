@@ -43,6 +43,23 @@ class SdManager {
   // openPattern). Returns nullptr if pattern_id is 0 or > patternCount().
   const char* patternName(uint16_t pattern_id) const;
 
+  // Re-scan /patterns and rebuild the sorted name list. Call after any file
+  // rename, addition, or deletion.
+  void rescan();
+
+  // Delete the pattern at the given 1-based pattern_id (0 = pattern.temp).
+  // Returns false if the file does not exist or idx > patternCount(). Rescans.
+  bool deletePattern(uint16_t pattern_id);
+
+  // Delete every file in /patterns (*.pat and pattern.temp). Rescans.
+  void deleteAllPatterns();
+
+  // Rename the pattern at the given 1-based pattern_id (0 = pattern.temp) to
+  // new_name (bare filename, no directory prefix). Rescans after rename.
+  // On success, sets *new_idx_out to the 1-based index in the updated list and
+  // returns true. Returns false on SD error or out-of-range index.
+  bool renamePattern(uint16_t pattern_id, const char* new_name, uint16_t* new_idx_out);
+
   // Open and validate the pattern with the given 1-based ID. Returns
   // AC::constants::CE_NONE on success, or a ControllerError code on failure.
   // On success info() describes the open pattern.

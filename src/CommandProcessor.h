@@ -69,6 +69,8 @@ class CommandProcessor {
   void handleTrialParams(const ParsedCommand &cmd);
   void handleSetFramePosition(const ParsedCommand &cmd);
   void handleGetControllerInfo();
+  void handleBulkWriteCommand(const ParsedCommand &cmd);
+  void drainBulkData(uint32_t remaining_bytes);
 
   // State transitions.
   void enterAllOff();

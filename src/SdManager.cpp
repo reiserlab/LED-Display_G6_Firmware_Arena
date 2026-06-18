@@ -118,6 +118,118 @@ const char* SdManager::patternName(uint16_t pattern_id) const {
   return names_[pattern_id - 1];
 }
 
+void SdManager::rescan() {
+  pattern_count_ = 0;
+  memset(names_, 0, sizeof(names_));
+  if (mounted_) scanPatterns();
+}
+
+bool SdManager::deletePattern(uint16_t pattern_id) {
+  if (!mounted_) return false;
+
+  char path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
+  if (pattern_id == 0) {
+    snprintf(path, sizeof(path), "%s/pattern.temp", pattern_dir);
+    if (!SD.exists(path)) return false;
+  } else {
+    if (pattern_id > pattern_count_) return false;
+    if (file_open_ && open_id_ == pattern_id) {
+      file_.close();
+      file_open_ = false;
+    }
+    snprintf(path, sizeof(path), "%s/%s", pattern_dir, names_[pattern_id - 1]);
+  }
+
+  if (!SD.remove(path)) return false;
+  rescan();
+  return true;
+}
+
+void SdManager::deleteAllPatterns() {
+  if (!mounted_) return;
+
+  if (file_open_) {
+    file_.close();
+    file_open_ = false;
+  }
+
+  File dir = SD.open(pattern_dir);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    rescan();
+    return;
+  }
+
+  // Collect filenames first (can't remove while iterating on all SD libs).
+  char to_delete[pattern_max_count + 1][pattern_name_byte_count];
+  uint16_t count = 0;
+  for (;;) {
+    File entry = dir.openNextFile();
+    if (!entry) break;
+    if (!entry.isDirectory() && count <= pattern_max_count) {
+      strncpy(to_delete[count], entry.name(), pattern_name_byte_count - 1);
+      to_delete[count][pattern_name_byte_count - 1] = '\0';
+      ++count;
+    }
+    entry.close();
+  }
+  dir.close();
+
+  char path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
+  for (uint16_t i = 0; i < count; ++i) {
+    snprintf(path, sizeof(path), "%s/%s", pattern_dir, to_delete[i]);
+    SD.remove(path);
+  }
+
+  rescan();
+}
+
+bool SdManager::renamePattern(uint16_t pattern_id, const char* new_name,
+                              uint16_t* new_idx_out) {
+  if (!mounted_) return false;
+
+  char old_path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
+  if (pattern_id == 0) {
+    snprintf(old_path, sizeof(old_path), "%s/pattern.temp", pattern_dir);
+  } else {
+    if (pattern_id > pattern_count_) return false;
+    // Close if it's currently open for reading.
+    if (file_open_ && open_id_ == pattern_id) {
+      file_.close();
+      file_open_ = false;
+    }
+    snprintf(old_path, sizeof(old_path), "%s/%s", pattern_dir,
+             names_[pattern_id - 1]);
+  }
+
+  // Resolve a unique target name: if new_name already exists, prepend an
+  // increasing run of '0' chars followed by '_' until the name is free.
+  // e.g. "foo.pat" → "0_foo.pat" → "00_foo.pat" → …
+  char candidate[pattern_name_byte_count];
+  strncpy(candidate, new_name, sizeof(candidate) - 1);
+  candidate[sizeof(candidate) - 1] = '\0';
+
+  char new_path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
+  snprintf(new_path, sizeof(new_path), "%s/%s", pattern_dir, candidate);
+
+  for (uint16_t n = 1; SD.exists(new_path) && n <= 999; ++n) {
+    snprintf(candidate, sizeof(candidate), "X%03u_%s", (unsigned)n, new_name);
+    snprintf(new_path, sizeof(new_path), "%s/%s", pattern_dir, candidate);
+  }
+
+  if (!SD.rename(old_path, new_path)) return false;
+
+  rescan();
+
+  for (uint16_t i = 0; i < pattern_count_; ++i) {
+    if (strncmp(names_[i], candidate, pattern_name_byte_count) == 0) {
+      if (new_idx_out) *new_idx_out = i + 1;
+      return true;
+    }
+  }
+  return false;
+}
+
 uint8_t SdManager::openPattern(uint16_t pattern_id) {
   if (!mounted_) return CE_SD_NOT_PRESENT;
   if (pattern_id == 0 || pattern_id > pattern_count_) return CE_BAD_PARAM;
