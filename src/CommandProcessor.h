@@ -70,6 +70,7 @@ class CommandProcessor {
   void handleSetFramePosition(const ParsedCommand &cmd);
   void handleGetControllerInfo();
   void handleBulkWriteCommand(const ParsedCommand &cmd);
+  void handleGetSdArchive();
   void drainBulkData(uint32_t remaining_bytes);
 
   // State transitions.

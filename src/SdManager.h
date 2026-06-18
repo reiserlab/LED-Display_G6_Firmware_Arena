@@ -43,22 +43,30 @@ class SdManager {
   // openPattern). Returns nullptr if pattern_id is 0 or > patternCount().
   const char* patternName(uint16_t pattern_id) const;
 
+  // Return the origin name for the given 1-based pattern ID. Origin is set to
+  // the first name assigned when pattern.temp was renamed (0x83 idx=0); preserved
+  // across subsequent renames. For files present at boot, origin == name.
+  const char* patternOrigin(uint16_t pattern_id) const;
+
   // Re-scan /patterns and rebuild the sorted name list. Call after any file
-  // rename, addition, or deletion.
+  // rename, addition, or deletion. Origins are reset to filenames (no history).
   void rescan();
 
   // Delete the pattern at the given 1-based pattern_id (0 = pattern.temp).
-  // Returns false if the file does not exist or idx > patternCount(). Rescans.
-  bool deletePattern(uint16_t pattern_id);
+  // Returns CE_NONE on success, CE_BAD_PARAM if idx out of range,
+  // CE_SD_FILE_ERROR on delete failure, CE_MANIFEST_WRITE_ERROR if manifest
+  // write fails after a successful delete.
+  uint8_t deletePattern(uint16_t pattern_id);
 
-  // Delete every file in /patterns (*.pat and pattern.temp). Rescans.
-  void deleteAllPatterns();
+  // Delete every file in /patterns (*.pat and pattern.temp).
+  // Returns CE_NONE or CE_MANIFEST_WRITE_ERROR.
+  uint8_t deleteAllPatterns();
 
   // Rename the pattern at the given 1-based pattern_id (0 = pattern.temp) to
-  // new_name (bare filename, no directory prefix). Rescans after rename.
-  // On success, sets *new_idx_out to the 1-based index in the updated list and
-  // returns true. Returns false on SD error or out-of-range index.
-  bool renamePattern(uint16_t pattern_id, const char* new_name, uint16_t* new_idx_out);
+  // new_name (bare filename, no directory prefix).
+  // On success, sets *new_idx_out to the new 1-based sorted index and returns
+  // CE_NONE. Returns CE_BAD_PARAM, CE_SD_FILE_ERROR, or CE_MANIFEST_WRITE_ERROR.
+  uint8_t renamePattern(uint16_t pattern_id, const char* new_name, uint16_t* new_idx_out);
 
   // Open and validate the pattern with the given 1-based ID. Returns
   // AC::constants::CE_NONE on success, or a ControllerError code on failure.
@@ -81,6 +89,12 @@ class SdManager {
   char names_[AC::constants::pattern_max_count]
              [AC::constants::pattern_name_byte_count];
 
+  // Origin name parallel to names_[]. Set to the first name assigned when
+  // pattern.temp was renamed (0x83 idx=0); preserved across subsequent renames.
+  // For files present at boot, origin equals the filename.
+  char origin_names_[AC::constants::pattern_max_count]
+                    [AC::constants::pattern_name_byte_count];
+
   File     file_;
   bool     file_open_ = false;
   uint16_t open_id_   = 0;
@@ -88,4 +102,7 @@ class SdManager {
 
   void scanPatterns();
   uint8_t validateHeader(const uint8_t *hdr);
+  bool writeManifest();
+  void insertSorted(const char *name, const char *origin);
+  void removeAt(uint16_t pos);
 };

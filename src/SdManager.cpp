@@ -19,6 +19,18 @@ bool hasPatExtension(const char *name) {
 
 uint16_t le16(const uint8_t *p) { return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
 
+// FNV-1a 32-bit hash over all sorted pattern filenames (each followed by '\n').
+// Produces the Pattern Set ID written to MANIFEST.txt.
+uint32_t patternSetId(const char (*names)[AC::constants::pattern_name_byte_count],
+                      uint16_t count) {
+  uint32_t h = 2166136261u;
+  for (uint16_t i = 0; i < count; ++i) {
+    for (const char *p = names[i]; *p; ++p) { h ^= (uint8_t)*p; h *= 16777619u; }
+    h ^= (uint8_t)'\n'; h *= 16777619u;
+  }
+  return h;
+}
+
 }  // namespace
 
 bool SdManager::begin() {
@@ -26,6 +38,10 @@ bool SdManager::begin() {
   pattern_count_ = 0;
   if (mounted_) {
     scanPatterns();
+    for (uint16_t i = 0; i < pattern_count_; ++i)
+      strcpy(origin_names_[i], names_[i]);
+    if (!writeManifest())
+      DBG_PRINTF("[sd] manifest write failed at boot\n");
     DBG_PRINTF("[sd] mounted, %u pattern(s) in %s\n",
                (unsigned)pattern_count_, pattern_dir);
   } else {
@@ -118,21 +134,30 @@ const char* SdManager::patternName(uint16_t pattern_id) const {
   return names_[pattern_id - 1];
 }
 
+const char* SdManager::patternOrigin(uint16_t pattern_id) const {
+  if (pattern_id == 0 || pattern_id > pattern_count_) return nullptr;
+  return origin_names_[pattern_id - 1];
+}
+
 void SdManager::rescan() {
   pattern_count_ = 0;
   memset(names_, 0, sizeof(names_));
-  if (mounted_) scanPatterns();
+  if (mounted_) {
+    scanPatterns();
+    for (uint16_t i = 0; i < pattern_count_; ++i)
+      strcpy(origin_names_[i], names_[i]);
+  }
 }
 
-bool SdManager::deletePattern(uint16_t pattern_id) {
-  if (!mounted_) return false;
+uint8_t SdManager::deletePattern(uint16_t pattern_id) {
+  if (!mounted_) return CE_SD_NOT_PRESENT;
 
   char path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
   if (pattern_id == 0) {
-    snprintf(path, sizeof(path), "%s/pattern.temp", pattern_dir);
-    if (!SD.exists(path)) return false;
+    snprintf(path, sizeof(path), "%s/%s", pattern_dir, pattern_temp_name);
+    if (!SD.exists(path)) return CE_BAD_PARAM;
   } else {
-    if (pattern_id > pattern_count_) return false;
+    if (pattern_id > pattern_count_) return CE_BAD_PARAM;
     if (file_open_ && open_id_ == pattern_id) {
       file_.close();
       file_open_ = false;
@@ -140,13 +165,16 @@ bool SdManager::deletePattern(uint16_t pattern_id) {
     snprintf(path, sizeof(path), "%s/%s", pattern_dir, names_[pattern_id - 1]);
   }
 
-  if (!SD.remove(path)) return false;
-  rescan();
-  return true;
+  if (!SD.remove(path)) return CE_SD_FILE_ERROR;
+
+  if (pattern_id > 0) removeAt(pattern_id - 1);
+
+  if (!writeManifest()) return CE_MANIFEST_WRITE_ERROR;
+  return CE_NONE;
 }
 
-void SdManager::deleteAllPatterns() {
-  if (!mounted_) return;
+uint8_t SdManager::deleteAllPatterns() {
+  if (!mounted_) return CE_SD_NOT_PRESENT;
 
   if (file_open_) {
     file_.close();
@@ -154,57 +182,60 @@ void SdManager::deleteAllPatterns() {
   }
 
   File dir = SD.open(pattern_dir);
-  if (!dir || !dir.isDirectory()) {
-    if (dir) dir.close();
-    rescan();
-    return;
-  }
-
-  // Collect filenames first (can't remove while iterating on all SD libs).
-  char to_delete[pattern_max_count + 1][pattern_name_byte_count];
-  uint16_t count = 0;
-  for (;;) {
-    File entry = dir.openNextFile();
-    if (!entry) break;
-    if (!entry.isDirectory() && count <= pattern_max_count) {
-      strncpy(to_delete[count], entry.name(), pattern_name_byte_count - 1);
-      to_delete[count][pattern_name_byte_count - 1] = '\0';
-      ++count;
+  if (dir && dir.isDirectory()) {
+    // Collect filenames first (can't remove while iterating on all SD libs).
+    char to_delete[pattern_max_count + 1][pattern_name_byte_count];
+    uint16_t count = 0;
+    for (;;) {
+      File entry = dir.openNextFile();
+      if (!entry) break;
+      if (!entry.isDirectory() && count <= pattern_max_count) {
+        strncpy(to_delete[count], entry.name(), pattern_name_byte_count - 1);
+        to_delete[count][pattern_name_byte_count - 1] = '\0';
+        ++count;
+      }
+      entry.close();
     }
-    entry.close();
-  }
-  dir.close();
+    dir.close();
 
-  char path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
-  for (uint16_t i = 0; i < count; ++i) {
-    snprintf(path, sizeof(path), "%s/%s", pattern_dir, to_delete[i]);
-    SD.remove(path);
+    char path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
+    for (uint16_t i = 0; i < count; ++i) {
+      snprintf(path, sizeof(path), "%s/%s", pattern_dir, to_delete[i]);
+      SD.remove(path);
+    }
+  } else {
+    if (dir) dir.close();
   }
 
-  rescan();
+  pattern_count_ = 0;
+
+  if (!writeManifest()) return CE_MANIFEST_WRITE_ERROR;
+  return CE_NONE;
 }
 
-bool SdManager::renamePattern(uint16_t pattern_id, const char* new_name,
-                              uint16_t* new_idx_out) {
-  if (!mounted_) return false;
+uint8_t SdManager::renamePattern(uint16_t pattern_id, const char* new_name,
+                                  uint16_t* new_idx_out) {
+  if (!mounted_) return CE_SD_NOT_PRESENT;
 
   char old_path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
+  char saved_origin[pattern_name_byte_count];
+
   if (pattern_id == 0) {
-    snprintf(old_path, sizeof(old_path), "%s/pattern.temp", pattern_dir);
+    snprintf(old_path, sizeof(old_path), "%s/%s", pattern_dir, pattern_temp_name);
+    saved_origin[0] = '\0';  // filled in below with resolved candidate name
   } else {
-    if (pattern_id > pattern_count_) return false;
-    // Close if it's currently open for reading.
+    if (pattern_id > pattern_count_) return CE_BAD_PARAM;
     if (file_open_ && open_id_ == pattern_id) {
       file_.close();
       file_open_ = false;
     }
     snprintf(old_path, sizeof(old_path), "%s/%s", pattern_dir,
              names_[pattern_id - 1]);
+    strcpy(saved_origin, origin_names_[pattern_id - 1]);  // preserve origin
   }
 
   // Resolve a unique target name: if new_name already exists, prepend an
-  // increasing run of '0' chars followed by '_' until the name is free.
-  // e.g. "foo.pat" → "0_foo.pat" → "00_foo.pat" → …
+  // increasing counter prefix until the name is free.
   char candidate[pattern_name_byte_count];
   strncpy(candidate, new_name, sizeof(candidate) - 1);
   candidate[sizeof(candidate) - 1] = '\0';
@@ -217,17 +248,27 @@ bool SdManager::renamePattern(uint16_t pattern_id, const char* new_name,
     snprintf(new_path, sizeof(new_path), "%s/%s", pattern_dir, candidate);
   }
 
-  if (!SD.rename(old_path, new_path)) return false;
+  if (!SD.rename(old_path, new_path)) return CE_SD_FILE_ERROR;
 
-  rescan();
+  // Update in-memory list: remove old entry, insert at new sorted position.
+  if (pattern_id > 0) removeAt(pattern_id - 1);
 
-  for (uint16_t i = 0; i < pattern_count_; ++i) {
-    if (strncmp(names_[i], candidate, pattern_name_byte_count) == 0) {
-      if (new_idx_out) *new_idx_out = i + 1;
-      return true;
+  // Origin: first name assigned when coming from pattern.temp; preserved otherwise.
+  const char* origin = (pattern_id == 0) ? candidate : saved_origin;
+  insertSorted(candidate, origin);
+
+  if (new_idx_out) {
+    *new_idx_out = 0;
+    for (uint16_t i = 0; i < pattern_count_; ++i) {
+      if (strncmp(names_[i], candidate, pattern_name_byte_count) == 0) {
+        *new_idx_out = i + 1;
+        break;
+      }
     }
   }
-  return false;
+
+  if (!writeManifest()) return CE_MANIFEST_WRITE_ERROR;
+  return CE_NONE;
 }
 
 uint8_t SdManager::openPattern(uint16_t pattern_id) {
@@ -303,4 +344,82 @@ uint8_t SdManager::readFrame(uint16_t frame_index, uint8_t *dest,
   if (G6::crc16_ccitt_false(dest, body_len) != want) return CE_FRAME_CRC;
 
   return CE_NONE;
+}
+
+// ---------------------------------------------------------------------------
+// Manifest and in-memory list helpers
+// ---------------------------------------------------------------------------
+
+void SdManager::insertSorted(const char *name, const char *origin) {
+  if (pattern_count_ >= pattern_max_count) return;
+  uint16_t pos = pattern_count_;
+  while (pos > 0 && strcmp(names_[pos - 1], name) > 0) {
+    strcpy(names_[pos],        names_[pos - 1]);
+    strcpy(origin_names_[pos], origin_names_[pos - 1]);
+    --pos;
+  }
+  strcpy(names_[pos],        name);
+  strcpy(origin_names_[pos], origin);
+  ++pattern_count_;
+}
+
+void SdManager::removeAt(uint16_t pos) {
+  if (pos >= pattern_count_) return;
+  for (uint16_t i = pos; i + 1 < pattern_count_; ++i) {
+    strcpy(names_[i],        names_[i + 1]);
+    strcpy(origin_names_[i], origin_names_[i + 1]);
+  }
+  --pattern_count_;
+}
+
+bool SdManager::writeManifest() {
+  if (!mounted_) return false;
+
+  // MANIFEST.bin: [uint16 LE count][uint32 LE timestamp=0]
+  SD.remove(manifest_bin_path);
+  {
+    File f = SD.open(manifest_bin_path, FILE_WRITE);
+    if (!f) { DBG_PRINTF("[sd] manifest.bin open failed\n"); return false; }
+    uint8_t bin[6] = {
+      (uint8_t)(pattern_count_),
+      (uint8_t)(pattern_count_ >> 8),
+      0, 0, 0, 0  // timestamp = 0 (no RTC on Teensy)
+    };
+    bool ok = (f.write(bin, 6) == 6);
+    f.close();
+    if (!ok) { SD.remove(manifest_bin_path); return false; }
+  }
+
+  // MANIFEST.txt: human-readable; no SD Drive line (Teensy doesn't know it)
+  SD.remove(manifest_txt_path);
+  {
+    File f = SD.open(manifest_txt_path, FILE_WRITE);
+    if (!f) { DBG_PRINTF("[sd] manifest.txt open failed\n"); return false; }
+
+    // name (63) + " <- " (4) + origin (63) + "\r\n" (2) + NUL (1) = 133
+    char line[133];
+    bool ok = true;
+
+    ok = ok && (f.print("Timestamp: 0\r\n") > 0);
+    snprintf(line, sizeof(line), "Pattern Count: %u\r\n", (unsigned)pattern_count_);
+    ok = ok && (f.print(line) > 0);
+    snprintf(line, sizeof(line), "Pattern Set ID: %08X\r\n",
+             (unsigned)patternSetId(names_, pattern_count_));
+    ok = ok && (f.print(line) > 0);
+    ok = ok && (f.print("\r\n") > 0);
+    ok = ok && (f.print("Mapping:\r\n") > 0);
+
+    for (uint16_t i = 0; i < pattern_count_ && ok; ++i) {
+      int n = snprintf(line, sizeof(line), "%s <- %s\r\n",
+                       names_[i], origin_names_[i]);
+      ok = ok && (n > 0) &&
+           (f.write((const uint8_t *)line, (size_t)n) == (size_t)n);
+    }
+
+    f.close();
+    if (!ok) { SD.remove(manifest_txt_path); return false; }
+  }
+
+  DBG_PRINTF("[sd] manifest written count=%u\n", (unsigned)pattern_count_);
+  return true;
 }

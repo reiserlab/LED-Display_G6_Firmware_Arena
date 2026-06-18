@@ -25,6 +25,7 @@ enum ArenaCommands : uint8_t {
   SET_PATTERN_FILE_CMD        = 0x85,  // [0x85, idx_lo, idx_hi, len_b0..b7, data…] upload file (bulk stream)
   DELETE_PATTERN_FILE_CMD     = 0x86,  // [03 86 idx_lo idx_hi] delete pattern file; idx=0 deletes pattern.temp
   DELETE_ALL_PATTERNS_CMD     = 0x8F,  // [01 8F] delete all files in /patterns
+  GET_SD_ARCHIVE_CMD          = 0x8A,  // [01 8A] stream full SD as a ZIP; only in ALL_OFF state
   SET_ETHERNET_IP_ADDRESS_CMD = 0xC0,  // reserved — not yet implemented
   GET_ETHERNET_IP_ADDRESS_CMD = 0xC1,
   GET_CONTROLLER_INFO_CMD     = 0xC2,  // returns {version, capability_bitmap}

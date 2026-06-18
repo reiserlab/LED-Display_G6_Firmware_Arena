@@ -155,6 +155,9 @@ constexpr uint8_t controller_capability_bitmap = 0x01;
 // -----------------------------------------------------------------------------
 
 constexpr char     pattern_dir[]                    = "/patterns";
+constexpr char     pattern_temp_name[]              = "pattern.temp";  // staging file in /patterns
+constexpr char     manifest_bin_path[]              = "/MANIFEST.bin";
+constexpr char     manifest_txt_path[]              = "/MANIFEST.txt";
 constexpr uint16_t pattern_max_count                = 256;   // listing capacity
 constexpr uint8_t  pattern_name_byte_count          = 64;    // incl. NUL
 constexpr uint8_t  pattern_header_byte_count        = 18;
@@ -205,7 +208,9 @@ enum ControllerError : uint8_t {
   CE_SD_FILE_ERROR   = 5,   // pattern file missing / unreadable
   CE_HEADER_CRC      = 6,   // pattern header CRC-8 mismatch / bad magic
   CE_FRAME_CRC       = 7,   // per-frame CRC-16 mismatch / bad FR magic
-  CE_ARENA_MISMATCH  = 8,   // pattern geometry != this controller's arena
+  CE_ARENA_MISMATCH       = 8,   // pattern geometry != this controller's arena
+  CE_MANIFEST_WRITE_ERROR = 9,   // MANIFEST.bin or MANIFEST.txt write failed
+  CE_DISPLAY_ACTIVE       = 10,  // command refused: display is running; stop first
 };
 
 // -----------------------------------------------------------------------------
