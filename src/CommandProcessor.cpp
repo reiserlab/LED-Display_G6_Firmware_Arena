@@ -320,11 +320,17 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
     }
 
-    // G6-dropped commands. Echo them with an explanatory message so a legacy
-    // G4 host gets a clear signal rather than silent failure.
-    case DISPLAY_RESET_CMD:
-      current_source_->sendResponse(command_byte, 1, "DISPLAY_RESET dropped for G6");
+    case SYSTEM_RESET_CMD:
+      // Ack first so the host receives confirmation before the USB/TCP link drops.
+      current_source_->sendResponse(command_byte, 0, "rebooting");
+      net_.flushResponses();
+      serial_.flushResponses();
+      delay(10);
+      SCB_AIRCR = 0x05FA0004;  // ARM AIRCR SYSRESETREQ
       break;
+
+    // G6-dropped command. Echo with an explanatory message so a legacy G4 host
+    // gets a clear signal rather than silent failure.
     case SWITCH_GRAYSCALE_CMD:
       current_source_->sendResponse(command_byte, 1,
                         "SWITCH_GRAYSCALE dropped for G6; mode inferred from stream size");

@@ -9,7 +9,7 @@ namespace AC {
 // still recognize and explicitly reject them.
 enum ArenaCommands : uint8_t {
   ALL_OFF_CMD                 = 0x00,
-  DISPLAY_RESET_CMD           = 0x01,  // dropped for G6
+  SYSTEM_RESET_CMD            = 0x01,  // software system reset (SCB_AIRCR SYSRESETREQ)
   SWITCH_GRAYSCALE_CMD        = 0x06,  // dropped for G6
   TRIAL_PARAMS_CMD            = 0x08,  // "combined command": selects mode + pattern (Modes 2/3/4)
   SET_REFRESH_RATE_CMD        = 0x16,
