@@ -28,8 +28,8 @@ enum ArenaCommands : uint8_t {
   GET_SD_ARCHIVE_CMD          = 0x8A,  // [01 8A] stream full SD as a ZIP; only in ALL_OFF state
   SET_AO_VOLTAGE_CMD          = 0xA0,  // [03 A0 mv_lo mv_hi] set BNC J27 (MCP4725 DAC) 0-5000 mV
   GET_AO_VOLTAGE_CMD          = 0xA1,  // [01 A1] returns last commanded AO level as uint16 LE mV
-  GET_DIGITAL_OUT_CMD         = 0xAA,  // [01 AA] returns current state of DO1 and DO2 as two bytes
-  SET_DIGITAL_OUT_CMD         = 0xAB,  // [03 AB channel state] set DO1 (ch=1, J3) or DO2 (ch=2, J4) HIGH/LOW
+  SET_DIGITAL_OUT_CMD         = 0xAA,  // [03 AA channel state] set DO1 (ch=1, J3) or DO2 (ch=2, J4) HIGH/LOW
+  GET_DIGITAL_OUT_CMD         = 0xAB,  // [01 AB] returns current state of DO1 and DO2 as two bytes
   SET_ETHERNET_IP_ADDRESS_CMD = 0xC0,  // reserved — not yet implemented
   GET_ETHERNET_IP_ADDRESS_CMD = 0xC1,
   GET_CONTROLLER_INFO_CMD     = 0xC2,  // returns {version, capability_bitmap}
