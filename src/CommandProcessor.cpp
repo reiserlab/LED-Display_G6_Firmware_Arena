@@ -1,12 +1,20 @@
 #include "CommandProcessor.h"
 #include "Crc.h"
 #include "ErrorGlyph.h"
+#include <Wire.h>
 
 using namespace AC;
 using namespace AC::constants;
 
 void CommandProcessor::begin() {
-  // No-op; state is default-initialized. SD is mounted by main() via sd_.begin().
+  Wire.begin();
+  Wire.setClock(400000);
+
+  // Digital outputs: both channels start driving LOW, direction = Teensy→BNC.
+  pinMode(do1_data_pin, OUTPUT); digitalWrite(do1_data_pin, LOW);
+  pinMode(do1_dir_pin,  OUTPUT); digitalWrite(do1_dir_pin,  HIGH);
+  pinMode(do2_data_pin, OUTPUT); digitalWrite(do2_data_pin, LOW);
+  pinMode(do2_dir_pin,  OUTPUT); digitalWrite(do2_dir_pin,  HIGH);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +336,95 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       delay(10);
       SCB_AIRCR = 0x05FA0004;  // ARM AIRCR SYSRESETREQ
       break;
+
+    case GET_DIGITAL_OUT_CMD: {
+      uint8_t state1 = digitalRead(do1_data_pin) ? 1 : 0;
+      uint8_t state2 = digitalRead(do2_data_pin) ? 1 : 0;
+      uint8_t payload[2] = { state1, state2 };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      DBG_PRINTF("[cmd] get-digital-out do1=%u do2=%u\n",
+                 (unsigned)state1, (unsigned)state2);
+      break;
+    }
+
+    case SET_DIGITAL_OUT_CMD: {
+      if (claimed_len < 2) {
+        current_source_->sendResponse(command_byte, 1, "Missing args");
+        break;
+      }
+      uint8_t channel = buf[pos++];
+      uint8_t state   = buf[pos];
+      uint8_t data_pin, dir_pin;
+      if (channel == 1) {
+        data_pin = do1_data_pin;
+        dir_pin  = do1_dir_pin;
+      } else if (channel == 2) {
+        data_pin = do2_data_pin;
+        dir_pin  = do2_dir_pin;
+      } else {
+        current_source_->sendResponse(command_byte, 1, "channel must be 1 or 2");
+        break;
+      }
+      digitalWrite(dir_pin,  HIGH);
+      digitalWrite(data_pin, state ? HIGH : LOW);
+      current_source_->sendResponse(command_byte, 0, "");
+      DBG_PRINTF("[cmd] set-digital-out ch=%u state=%u\n",
+                 (unsigned)channel, (unsigned)state);
+      break;
+    }
+
+    case SET_AO_VOLTAGE_CMD: {
+      if (claimed_len < 2) {
+        current_source_->sendResponse(command_byte, 1, "Missing mv arg");
+        break;
+      }
+      uint16_t mv;
+      memcpy(&mv, buf + pos, sizeof(mv));
+      if (mv > 5000) {
+        current_source_->sendResponse(command_byte, 1, "mv out of range (0-5000)");
+        break;
+      }
+      uint16_t dac_code = (uint16_t)((uint32_t)mv * 4095 / 5000);
+      Wire.beginTransmission(0x60);
+      Wire.write((uint8_t)((dac_code >> 8) & 0x0F));
+      Wire.write((uint8_t)(dac_code & 0xFF));
+      uint8_t i2c_err = Wire.endTransmission();
+      if (i2c_err != 0) {
+        current_source_->sendResponse(command_byte, 1, "I2C write failed");
+        break;
+      }
+      ao_mv_ = mv;
+      uint8_t payload[2] = { (uint8_t)(mv), (uint8_t)(mv >> 8) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      DBG_PRINTF("[cmd] set-ao-voltage mv=%u dac=%u\n",
+                 (unsigned)mv, (unsigned)dac_code);
+      break;
+    }
+
+    case GET_AO_VOLTAGE_CMD: {
+      // Read back directly from MCP4725 DAC register (3-byte read response):
+      //   byte 0: [RDY, POR, x, x, PD1, PD0, x, x]
+      //   byte 1: [D11..D4]
+      //   byte 2: [D3..D0, x, x, x, x]
+      uint8_t n = Wire.requestFrom((uint8_t)0x60, (uint8_t)3);
+      if (n < 3) {
+        current_source_->sendResponse(command_byte, 1, "I2C read failed");
+        break;
+      }
+      uint8_t status = Wire.read();     // [RDY, POR, x, x, PD1, PD0, x, x]
+      uint8_t hi = Wire.read();         // D11..D4
+      uint8_t lo = Wire.read();         // D3..D0 in upper nibble
+      uint16_t dac_code = ((uint16_t)hi << 4) | (lo >> 4);
+      uint16_t mv = (uint16_t)((uint32_t)dac_code * 5000 / 4095);
+      uint8_t pd = (status >> 2) & 0x03;  // PD1:PD0 from bits 3:2
+      ao_mv_ = mv;
+      uint8_t payload[2] = { (uint8_t)(mv), (uint8_t)(mv >> 8) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      DBG_PRINTF("[cmd] get-ao-voltage hw_dac=%u hw_mv=%u status=0x%02X pd=%u%s\n",
+                 (unsigned)dac_code, (unsigned)mv, (unsigned)status, (unsigned)pd,
+                 pd ? " POWER-DOWN!" : "");
+      break;
+    }
 
     // G6-dropped command. Echo with an explanatory message so a legacy G4 host
     // gets a clear signal rather than silent failure.

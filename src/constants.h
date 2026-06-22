@@ -185,6 +185,14 @@ constexpr uint8_t display_mode_streaming   = 5;
 // carrying 10x the actual fps/V scaling factor (g6_03 § 6 Mode 4).
 // -----------------------------------------------------------------------------
 
+// Digital outputs — bidirectional 5 V via SN74LVC1T45 level translators.
+// DIR pin HIGH = A→B (Teensy drives BNC); LOW = B→A (BNC drives Teensy).
+// Firmware initialises both channels as outputs driving LOW.
+constexpr uint8_t do1_data_pin = 37;  // DO1 BNC J3 data  (D37, Teensy pad 29, via U2)
+constexpr uint8_t do1_dir_pin  = 36;  // DO1 U2 direction (D36, Teensy pad 28)
+constexpr uint8_t do2_data_pin = 35;  // DO2 BNC J4 data  (D35, Teensy pad 27, via U3)
+constexpr uint8_t do2_dir_pin  = 34;  // DO2 U3 direction (D34, Teensy pad 26)
+
 constexpr uint8_t  mode4_ain_pin        = 14;     // AIN0 / Teensy D14
 constexpr uint32_t mode4_sample_rate_hz = 500;
 constexpr uint16_t adc_full_scale_counts = 1023;  // 10-bit analogRead default
