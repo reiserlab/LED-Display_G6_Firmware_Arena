@@ -23,10 +23,13 @@ void SpiManager::begin() {
 
   dmaEvent_.attachImmediate(dmaISR);
 
-  // Bring up both SPI buses. CIPO pin is informational; SPI.begin() owns its
-  // configured pins regardless.
+  // Bring up both SPI buses. Explicitly route each region's CIPO pin to the
+  // peripheral's SDI (MISO) input *before* begin() — otherwise the LPSPI
+  // samples a different/unconnected SDI and reads the panel's confirmation as
+  // all-zeros, even though the panel drives CIPO on this pin (confirmed on a
+  // logic analyzer). setMISO() must precede begin().
   for (uint8_t r = 0; r < region_count_per_frame; ++r) {
-    pinMode(region_cipo_pins[r], INPUT);
+    region_spi_[r]->setMISO(region_cipo_pins[r]);
     region_spi_[r]->begin();
   }
 
@@ -34,6 +37,16 @@ void SpiManager::begin() {
   for (uint8_t i = 0; i < panel_set_count; ++i) {
     pinMode(panel_sets[i].cs_pin, OUTPUT);
     digitalWriteFast(panel_sets[i].cs_pin, HIGH);
+  }
+
+  // Hold the 2nd pair of per-column MISO OE-decode inputs HIGH. Without this
+  // they float (≈low), the OE̅ = CS0&CS1&CS2&CS3 AND can never reach all-HIGH,
+  // and every column's buffer stays enabled — shorting the wired-OR MISO bus so
+  // CIPO reads 00. Tied HIGH, OE̅ = CS_row0 & CS_row1, so one buffer per bus
+  // drives at a time. See ArenaConfig.h / arena-hardware-bug.md.
+  for (uint8_t i = 0; i < cs_decode_tie_high_count; ++i) {
+    pinMode(cs_decode_tie_high_pins[i], OUTPUT);
+    digitalWriteFast(cs_decode_tie_high_pins[i], HIGH);
   }
 }
 
@@ -48,8 +61,19 @@ void SpiManager::disarmRefreshTimer() {
   refreshFlag = false;
 }
 
+void SpiManager::setSpiClockMhz(uint16_t mhz) {
+  if (mhz < 1)  mhz = 1;
+  if (mhz > 30) mhz = 30;
+  spi_clock_hz_      = (uint32_t)mhz * 1'000'000UL;
+  cs_setup_delay_ns_ = (uint32_t)((1'000'000'000ULL * cs_setup_sck_periods) / spi_clock_hz_);
+  cs_hold_delay_ns_  = (uint32_t)((1'000'000'000ULL * cs_hold_sck_periods)  / spi_clock_hz_);
+#ifdef DEBUG_SERIAL
+  cipo_realign_bits_ = (spi_clock_hz_ >= 20'000'000UL) ? 1 : 0;
+#endif
+}
+
 void SpiManager::beginPanelSetTransaction() {
-  SPISettings settings(spi_clock_speed, spi_bit_order, spi_data_mode);
+  SPISettings settings(spi_clock_hz_, spi_bit_order, spi_data_mode);
   for (uint8_t r = 0; r < region_count_per_frame; ++r) {
     region_spi_[r]->beginTransaction(settings);
   }
@@ -66,6 +90,23 @@ void SpiManager::transferPanelSet(const uint8_t *block_b0,
                                   uint16_t block_byte_count,
                                   uint8_t *miso_b0,
                                   uint8_t *miso_b1) {
+#ifdef DEBUG_SERIAL
+  // Debug CIPO capture: when a MISO buffer is requested, use blocking
+  // full-duplex transfers so the received bytes are read into the buffers by
+  // the CPU. The async-DMA path (below) does NOT reliably populate a regular
+  // RAM buffer on Teensy 4 — an eDMA write into a cached/TCM buffer is not
+  // coherent with the CPU read, so the readback returns the stale memset
+  // zeros. Sequential transfers inside the shared CS window are fine for a
+  // 1-in-300-frames diagnostic. Production passes nullptr and never hits this.
+  if (miso_b0 != nullptr || miso_b1 != nullptr) {
+    region_spi_[0]->transfer(const_cast<uint8_t *>(block_b0),
+                             miso_b0, block_byte_count);
+    region_spi_[1]->transfer(const_cast<uint8_t *>(block_b1),
+                             miso_b1, block_byte_count);
+    return;
+  }
+#endif
+
   // Async DMA on region 0 (SPI) — non-const cast is safe; SPI driver only
   // reads the buffer when retbuf is nullptr.
   dmaComplete_ = false;
@@ -80,6 +121,23 @@ void SpiManager::transferPanelSet(const uint8_t *block_b0,
   while (!dmaComplete_) { /* spin */ }
 }
 
+#ifdef DEBUG_SERIAL
+// Recover the CIPO confirmation when the buffered return path delays MISO by a
+// whole bit at high SCK (see constants::cipo_realign_bits_). Left-shifts the
+// captured byte stream by `bits` (0..7), pulling in the MSBs of the following
+// byte; `raw` must hold at least n+1 valid bytes. bits==0 is a plain copy.
+static inline void realignCipo(const uint8_t *raw, uint8_t *out,
+                               uint8_t n, uint8_t bits) {
+  if (bits == 0) {
+    for (uint8_t k = 0; k < n; ++k) out[k] = raw[k];
+    return;
+  }
+  for (uint8_t k = 0; k < n; ++k) {
+    out[k] = (uint8_t)((raw[k] << bits) | (raw[k + 1] >> (8 - bits)));
+  }
+}
+#endif
+
 void SpiManager::transferFrame(const uint8_t *frame_buf,
                                uint16_t block_byte_count) {
   if (frame_buf == nullptr) return;
@@ -89,6 +147,7 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
       block_byte_count != G6::block_byte_count_psram_duty) {
     return;
   }
+  ++frames_sent_;
 
 #ifdef DEBUG_SERIAL
   uint32_t t0 = micros();
@@ -97,13 +156,16 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
   const uint8_t *blocks_base = frame_buf + stream_frame_prefix_byte_count;
 
 #ifdef DEBUG_SERIAL
-  // On debug builds, capture MISO for panel set 0 so we can inspect the
-  // panel's CIPO confirmation slot (first 3 bytes). All other panel sets
-  // discard MISO as before.
-  uint8_t *miso_b0_first = miso_scratch_b0_;
-  uint8_t *miso_b1_first = miso_scratch_b1_;
-  memset(miso_b0_first, 0, block_byte_count);
-  memset(miso_b1_first, 0, block_byte_count);
+  // Capture every panel set's CIPO on the frames we print (every 300th); other
+  // frames use the fast async path. Capturing ALL sets — not just set 0 — is
+  // what makes an edge/reworked port visible: e.g. silk P3 is panel set 4
+  // (CS pin 9), not set 0 (P1, CS pin 0).
+  // Gate the blocking full-duplex capture on the runtime diag flag: when
+  // diagnostics are muted, every frame takes the fast async-DMA path, so a
+  // DEBUG_SERIAL build idles at the same timing as a production build.
+  static uint32_t tf_count = 0;
+  ++tf_count;
+  const bool capture = g_dbg_on && (tf_count % 300) == 0;
 #endif
 
   for (uint8_t i = 0; i < panel_set_count; ++i) {
@@ -117,11 +179,15 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
     // currently configured spi_clock_speed (see constants.h). Lets the
     // PL022 peripheral's TX shift register load bit 0 before the first edge,
     // preventing the off-by-one-bit corruption we hit early in bring-up.
-    delayNanoseconds(cs_setup_delay_ns);
+    delayNanoseconds(cs_setup_delay_ns_);
 #ifdef DEBUG_SERIAL
-    if (i == 0) {
+    if (capture) {
       transferPanelSet(block_b0, block_b1, block_byte_count,
-                       miso_b0_first, miso_b1_first);
+                       miso_scratch_b0_, miso_scratch_b1_);
+      // Recover the 3-byte confirmation from the (possibly bit-delayed) return
+      // path. Reads scratch[0..3] — valid for both GS2 (53 B) and GS16 (203 B).
+      realignCipo(miso_scratch_b0_, cipo_b0_[i], 3, cipo_realign_bits_);
+      realignCipo(miso_scratch_b1_, cipo_b1_[i], 3, cipo_realign_bits_);
     } else {
       transferPanelSet(block_b0, block_b1, block_byte_count);
     }
@@ -133,22 +199,24 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
     // the PL022 shift-register-to-FIFO transfer for the final byte AND a
     // few polling-loop iterations on the peripheral to actually drain the FIFO
     // before the peripheral sees cs_pin go HIGH and exits its read loop.
-    delayNanoseconds(cs_hold_delay_ns);
+    delayNanoseconds(cs_hold_delay_ns_);
     digitalWriteFast(ps.cs_pin, HIGH);
     endPanelSetTransaction();
   }
 
 #ifdef DEBUG_SERIAL
-  static uint32_t tf_count = 0;
-  ++tf_count;
-  if ((tf_count % 300) == 0) {
-    DBG_PRINTF("[spi] transferFrame count=%lu us=%lu refresh_ticks=%lu\n",
+  if (capture) {
+    DBG_PRINTF("[spi] transferFrame count=%lu us=%lu refresh_ticks=%lu cipo_realign=%u\n",
                (unsigned long)tf_count,
                (unsigned long)(micros() - t0),
-               (unsigned long)isr_count_);
-    DBG_PRINTF("[spi] CIPO set0 B0=%02X %02X %02X  B1=%02X %02X %02X\n",
-               miso_b0_first[0], miso_b0_first[1], miso_b0_first[2],
-               miso_b1_first[0], miso_b1_first[1], miso_b1_first[2]);
+               (unsigned long)isr_count_,
+               (unsigned)cipo_realign_bits_);
+    for (uint8_t i = 0; i < panel_set_count; ++i) {
+      DBG_PRINTF("[spi] CIPO set%-2u cs=%-2u B0=%02X %02X %02X  B1=%02X %02X %02X\n",
+                 (unsigned)i, (unsigned)panel_sets[i].cs_pin,
+                 cipo_b0_[i][0], cipo_b0_[i][1], cipo_b0_[i][2],
+                 cipo_b1_[i][0], cipo_b1_[i][1], cipo_b1_[i][2]);
+    }
   }
 #endif
 }

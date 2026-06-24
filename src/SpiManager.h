@@ -22,11 +22,30 @@ class SpiManager {
   void armRefreshTimer(uint32_t frequency_hz);
   void disarmRefreshTimer();
 
+  // SPI clock — runtime-adjustable in whole MHz (1..30). CS setup/hold delays
+  // and the CIPO realign shift are recomputed proportionally on each change.
+  void     setSpiClockMhz(uint16_t mhz);
+  uint16_t getSpiClockMhz() const { return (uint16_t)(spi_clock_hz_ / 1'000'000UL); }
+
+  // Frames-sent counter — incremented by transferFrame(); zeroed by host command.
+  uint32_t framesSent() const { return frames_sent_; }
+  void     resetFramesSent()  { frames_sent_ = 0; }
+
   volatile bool refreshFlag = false;
   volatile uint32_t isr_count_ = 0;  // refresh ISRs since boot (debug counter)
 
  private:
   SPIClass *region_spi_[AC::constants::region_count_per_frame] = { &SPI, &SPI1 };
+
+  // Runtime SPI timing — all derived from spi_clock_hz_; updated together by
+  // setSpiClockMhz() so the invariant (delays == f(clock)) always holds.
+  uint32_t spi_clock_hz_      = AC::constants::spi_clock_speed;
+  uint32_t cs_setup_delay_ns_ = AC::constants::cs_setup_delay_ns;
+  uint32_t cs_hold_delay_ns_  = AC::constants::cs_hold_delay_ns;
+  uint32_t frames_sent_       = 0;
+#ifdef DEBUG_SERIAL
+  uint8_t  cipo_realign_bits_ = AC::constants::cipo_realign_left_bits;
+#endif
 
   IntervalTimer refreshTimer_;
 
@@ -47,9 +66,12 @@ class SpiManager {
                         uint8_t *miso_b1 = nullptr);
 
 #ifdef DEBUG_SERIAL
-  // MISO scratch — used to capture the panel CIPO confirmation slot for
-  // panel set 0 (the first transmission in each frame).
+  // MISO scratch — captures one panel set's CIPO confirmation slot per transfer.
   uint8_t miso_scratch_b0_[G6::block_byte_count_gs16];
   uint8_t miso_scratch_b1_[G6::block_byte_count_gs16];
+  // First 3 CIPO bytes for every panel set, retained for the periodic dump so
+  // edge ports (e.g. P3 = panel set 4) are visible, not just set 0.
+  uint8_t cipo_b0_[AC::panel_set_count][3];
+  uint8_t cipo_b1_[AC::panel_set_count][3];
 #endif
 };

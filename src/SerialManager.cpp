@@ -45,9 +45,11 @@ void SerialManager::parseIncoming() {
     }
     if (rx_len_ < total_needed) return;
 
-    parsed_cmd_.cmd       = AC::STREAM_FRAME_CMD;
-    parsed_cmd_.is_stream = true;
-    parsed_cmd_.data_len  = (uint16_t)total_needed;
+    parsed_cmd_.cmd              = AC::STREAM_FRAME_CMD;
+    parsed_cmd_.is_stream        = true;
+    parsed_cmd_.is_bulk          = false;
+    parsed_cmd_.bulk_payload_len = 0;
+    parsed_cmd_.data_len         = (uint16_t)total_needed;
     memcpy(parsed_cmd_.data, rx_buf_, total_needed);
     cmd_ready_ = true;
 
@@ -61,10 +63,64 @@ void SerialManager::parseIncoming() {
     uint16_t total_needed = 1 + remaining_len;
     if (rx_len_ < total_needed) return;
 
-    parsed_cmd_.is_stream = false;
-    parsed_cmd_.data_len  = total_needed;
+    parsed_cmd_.is_stream        = false;
+    parsed_cmd_.is_bulk          = false;
+    parsed_cmd_.bulk_payload_len = 0;
+    parsed_cmd_.data_len         = total_needed;
     memcpy(parsed_cmd_.data, rx_buf_, total_needed);
     parsed_cmd_.cmd = rx_buf_[1];
+    cmd_ready_ = true;
+
+    if (total_needed < rx_len_) {
+      memmove(rx_buf_, rx_buf_ + total_needed, rx_len_ - total_needed);
+    }
+    rx_len_ -= total_needed;
+  } else if (first_byte == AC::SET_PATTERN_FILE_CMD) {
+    // [0x85, idx_lo, idx_hi, len_b0..b7, file_data...]
+    // Need the 11-byte header before signaling cmd_ready; file data
+    // stays in rx_buf_ for readBulkBytes() to drain.
+    static constexpr size_t BULK_HDR = 11;
+    if (rx_len_ < BULK_HDR) return;
+
+    uint16_t idx;
+    memcpy(&idx, rx_buf_ + 1, sizeof(idx));
+    uint32_t len_lo;
+    memcpy(&len_lo, rx_buf_ + 3, sizeof(len_lo));  // lower 32 bits; upper 32 ignored
+
+    parsed_cmd_.cmd              = AC::SET_PATTERN_FILE_CMD;
+    parsed_cmd_.is_stream        = false;
+    parsed_cmd_.is_bulk          = true;
+    parsed_cmd_.bulk_payload_len = len_lo;
+    parsed_cmd_.data_len         = (uint16_t)BULK_HDR;
+    memcpy(parsed_cmd_.data, rx_buf_, BULK_HDR);
+
+    memmove(rx_buf_, rx_buf_ + BULK_HDR, rx_len_ - BULK_HDR);
+    rx_len_ -= BULK_HDR;
+    cmd_ready_ = true;
+  } else if (first_byte == AC::SET_PATTERN_FILENAME_CMD) {
+    // Opcode-first framing: [0x83, idx_lo, idx_hi, name_len, chars…]
+    // The standard binary framing can't carry this command for filenames > 45 chars
+    // because the length byte would equal or exceed STREAM_FRAME_CMD (0x32).
+    static constexpr uint8_t LONG_HDR = 4;  // opcode + 2 idx + name_len
+    if (rx_len_ < LONG_HDR) return;
+
+    uint8_t name_len = rx_buf_[3];
+    if (name_len == 0 || name_len >= AC::constants::pattern_name_byte_count) {
+      rx_len_ = 0;  // bad name_len — resync
+      return;
+    }
+    uint16_t total_needed = LONG_HDR + name_len;
+    if (rx_len_ < total_needed) return;
+
+    // Re-pack into binary-frame layout so handleBinaryCommand works unchanged:
+    // data[0] = total_needed (the binary length byte), then the opcode-first bytes.
+    parsed_cmd_.cmd              = AC::SET_PATTERN_FILENAME_CMD;
+    parsed_cmd_.is_stream        = false;
+    parsed_cmd_.is_bulk          = false;
+    parsed_cmd_.bulk_payload_len = 0;
+    parsed_cmd_.data_len         = (uint16_t)(total_needed + 1);
+    parsed_cmd_.data[0]          = (uint8_t)total_needed;
+    memcpy(parsed_cmd_.data + 1, rx_buf_, total_needed);
     cmd_ready_ = true;
 
     if (total_needed < rx_len_) {
@@ -89,6 +145,34 @@ void SerialManager::flushResponses() {
   Serial.write(resp_buf_, resp_len_);
   Serial.flush();
   resp_len_ = 0;
+}
+
+size_t SerialManager::readBulkBytes(uint8_t* buf, size_t max_len) {
+  // Top up rx_buf_ from USB CDC.
+  int avail = Serial.available();
+  if (avail > 0) {
+    size_t space = RX_BUF_SIZE - rx_len_;
+    size_t to_read = min((size_t)avail, space);
+    if (to_read > 0) {
+      int n = Serial.readBytes(reinterpret_cast<char *>(rx_buf_ + rx_len_), to_read);
+      if (n > 0) rx_len_ += (size_t)n;
+    }
+  }
+  size_t n = min(rx_len_, max_len);
+  if (n > 0) {
+    memcpy(buf, rx_buf_, n);
+    if (n < rx_len_) memmove(rx_buf_, rx_buf_ + n, rx_len_ - n);
+    rx_len_ -= n;
+  }
+  return n;
+}
+
+void SerialManager::sendRaw(const uint8_t* buf, size_t len) {
+  // Flush any queued response frame (e.g. the 0x84 size header) first.
+  // Spin-wait up to 5 s in case the TX buffer is momentarily full.
+  uint32_t deadline = millis() + 5000UL;
+  while (resp_len_ > 0 && millis() < deadline) flushResponses();
+  if (buf && len > 0) Serial.write(buf, len);
 }
 
 void SerialManager::sendResponse(uint8_t cmd_echo, uint8_t status,

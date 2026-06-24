@@ -61,6 +61,9 @@ class CommandProcessor {
   uint32_t last_sample_us_  = 0;   // Mode 4 AIN sample clock
   float    frame_accum_     = 0.0f;// Mode 4 fractional-frame accumulator
 
+  // Analog output — last commanded level (mV). 0 = DAC code 0 (power-up default).
+  uint16_t ao_mv_ = 0;
+
   // Error display.
   uint32_t error_until_ms_ = 0;
 
@@ -81,6 +84,9 @@ class CommandProcessor {
   void handleGetControllerInfo();
   void handleDisplayPsramIndex(const ParsedCommand &cmd);
   void handlePsramPlay(const ParsedCommand &cmd);
+  void handleBulkWriteCommand(const ParsedCommand &cmd);
+  void handleGetSdArchive();
+  void drainBulkData(uint32_t remaining_bytes);
 
   // State transitions.
   void enterAllOff();

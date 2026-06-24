@@ -30,6 +30,8 @@ class SerialManager : public MessageSource {
   using MessageSource::sendResponse;  // keep the char* convenience overload
   void sendResponse(uint8_t cmd_echo, uint8_t status,
                     const uint8_t *payload, size_t payload_len) override;
+  size_t readBulkBytes(uint8_t* buf, size_t max_len) override;
+  void sendRaw(const uint8_t* buf, size_t len) override;
 
  private:
   static constexpr size_t RX_BUF_SIZE
