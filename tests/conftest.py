@@ -39,6 +39,10 @@ def pytest_addoption(parser):
         "--ip", default=None,
         help="Controller IP address (required for --transport=tcp)",
     )
+    parser.addoption(
+        "--pat", default=None,
+        help="Path to a .pat file for the T5 SD playback test in test_lab79_sd.py",
+    )
 
 
 def pytest_configure(config):
@@ -71,3 +75,13 @@ def transport(pytestconfig):
     t.open()
     yield t
     t.close()
+
+
+@pytest.fixture(scope="session")
+def pat_data(pytestconfig):
+    """Raw bytes from the --pat file, or None if --pat was not supplied."""
+    path = pytestconfig.getoption("--pat")
+    if path is None:
+        return None
+    with open(path, "rb") as f:
+        return f.read()

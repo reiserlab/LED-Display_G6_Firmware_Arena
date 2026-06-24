@@ -175,7 +175,26 @@ void NetworkManager::flushResponses() {
 void NetworkManager::sendRaw(const uint8_t* buf, size_t len) {
   // Flush any queued response frame first, then write raw bytes.
   flushResponses();
-  if (buf && len > 0 && client_ && client_.connected()) client_.write(buf, len);
+  if (!buf || len == 0 || !client_ || !client_.connected()) return;
+  // Loop until every byte is handed to the TCP stack. QNEthernet's write()
+  // returns fewer bytes than requested when the LWIP send buffer is full
+  // (ERR_MEM from tcp_write). A 1 ms delay lets the network timer fire and
+  // drain the send queue before we retry.
+  const uint8_t *p = buf;
+  size_t remaining = len;
+  while (remaining > 0 && client_.connected()) {
+    size_t n = client_.write(p, remaining);
+    if (n > 0) {
+      p         += n;
+      remaining -= n;
+    } else {
+      // LWIP send queue full — flush queued segments so the network interrupt
+      // can transmit them, then spin briefly for the receiver ACK to open the
+      // window before retrying.
+      client_.flush();
+      delayMicroseconds(250);
+    }
+  }
 }
 
 void NetworkManager::sendResponse(uint8_t cmd_echo, uint8_t status,
@@ -194,22 +213,24 @@ void NetworkManager::sendResponse(uint8_t cmd_echo, uint8_t status,
 }
 
 size_t NetworkManager::readBulkBytes(uint8_t* buf, size_t max_len) {
-  if (client_ && client_.connected()) {
-    int avail = client_.available();
-    if (avail > 0) {
-      size_t space = RX_BUF_SIZE - rx_len_;
-      size_t to_read = min((size_t)avail, space);
-      if (to_read > 0) {
-        int n = client_.read(rx_buf_ + rx_len_, to_read);
-        if (n > 0) rx_len_ += (size_t)n;
-      }
-    }
-  }
-  size_t n = min(rx_len_, max_len);
-  if (n > 0) {
+  // First drain any bytes already buffered from the initial protocol parse.
+  if (rx_len_ > 0) {
+    size_t n = min(rx_len_, max_len);
     memcpy(buf, rx_buf_, n);
     if (n < rx_len_) memmove(rx_buf_, rx_buf_ + n, rx_len_ - n);
     rx_len_ -= n;
+    return n;
   }
-  return n;
+  // Read directly into the caller's buffer — no intermediate copy.
+  // Larger reads (≥ 2 × MSS) cause LWIP to send an immediate ACK rather than
+  // waiting for the 200 ms delayed-ACK timer, which is the bottleneck for
+  // host-to-controller (upload) throughput.
+  if (client_ && client_.connected()) {
+    int avail = client_.available();
+    if (avail > 0) {
+      int n = client_.read(buf, min((size_t)avail, max_len));
+      if (n > 0) return (size_t)n;
+    }
+  }
+  return 0;
 }
