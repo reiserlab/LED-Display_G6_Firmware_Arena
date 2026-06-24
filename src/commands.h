@@ -38,6 +38,10 @@ enum ArenaCommands : uint8_t {
   SET_SPI_CLOCK_CMD           = 0xC5,  // [len=3,0xC5,lo,hi] uint16 LE MHz; echoes applied MHz
   GET_SPI_CLOCK_CMD           = 0xC6,  // returns current SPI clock as uint16 LE MHz
   SET_FRAME_POSITION_CMD      = 0x70,  // Mode 3: host-commanded frame index
+  // V2 PSRAM display (LAB-41/42): drive panels to render their locally-stored
+  // PSRAM frame(s) via the V2 panel-protocol command (header 0x02).
+  DISPLAY_PSRAM_INDEX_CMD     = 0x71,  // payload: uint16 LE index — show one PSRAM frame
+  PSRAM_PLAY_CMD              = 0x72,  // payload: start(2) count(2) fps(2) LE — auto-advance
   ALL_ON_CMD                  = 0xFF,
 };
 

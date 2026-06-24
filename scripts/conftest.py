@@ -1,7 +1,8 @@
 import glob
+import time
+
 import pytest
 import serial
-import time
 
 
 def _find_teensy_port():
@@ -10,7 +11,9 @@ def _find_teensy_port():
 
 
 def pytest_addoption(parser):
-    parser.addoption("--port", default=_find_teensy_port(), help="Teensy USB-CDC device node")
+    parser.addoption(
+        "--port", default=_find_teensy_port(), help="Teensy USB-CDC device node"
+    )
 
 
 @pytest.fixture(scope="session")

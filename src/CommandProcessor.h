@@ -14,6 +14,7 @@ enum class ArenaState : uint8_t {
   OPEN_LOOP,        // Mode 2 — auto-advance frames from SD at frame_rate
   SHOW_FRAME,       // Mode 3 — host-commanded frame index
   CLOSED_LOOP,      // Mode 4 — AIN0 velocity integration
+  PSRAM_PLAY,       // V2 — show/auto-advance panel-resident PSRAM frames (LAB-41/42)
   ERROR_DISPLAY,    // transient "CE / NN" diagnostic glyph
 };
 
@@ -66,12 +67,23 @@ class CommandProcessor {
   // Error display.
   uint32_t error_until_ms_ = 0;
 
+  // V2 PSRAM playback (LAB-41/42). The arena streams a tiny V2 "display PSRAM
+  // index" command per frame; the panel renders its locally-stored frame.
+  // count==1 => static single index; count>1 + frame_rate_hz_>0 => auto-advance
+  // [start, start+count) (reuses frame_rate_hz_ / last_advance_us_).
+  uint16_t psram_start_index_ = 0;
+  uint16_t psram_play_count_  = 1;
+  uint16_t psram_play_offset_ = 0;   // 0..count-1
+  uint8_t  psram_cmd_id_      = G6::cmd_disp_psram_persist;
+
   // Handlers.
   void handleBinaryCommand(const ParsedCommand &cmd);
   void handleStreamCommand(const ParsedCommand &cmd);
   void handleTrialParams(const ParsedCommand &cmd);
   void handleSetFramePosition(const ParsedCommand &cmd);
   void handleGetControllerInfo();
+  void handleDisplayPsramIndex(const ParsedCommand &cmd);
+  void handlePsramPlay(const ParsedCommand &cmd);
   void handleBulkWriteCommand(const ParsedCommand &cmd);
   void handleGetSdArchive();
   void drainBulkData(uint32_t remaining_bytes);
@@ -89,9 +101,11 @@ class CommandProcessor {
   void transmitOnRefresh();
   void serviceOpenLoop();
   void serviceClosedLoop();
+  void servicePsramPlay();               // V2 auto-advance (LAB-41/42)
   bool loadFrame(uint16_t frame_index);  // false on SD/CRC error (shows glyph)
 
   // Helpers.
   void fillFrameBufferAllOn(uint16_t block_byte_count);
+  void buildPsramFrame(uint16_t index);  // fill frame_buf_ with V2 index blocks
   uint32_t defaultRefreshFor(uint16_t block_byte_count) const;
 };

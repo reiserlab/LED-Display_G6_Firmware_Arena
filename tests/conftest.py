@@ -28,26 +28,35 @@ def _find_teensy() -> str | None:
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--transport", default="serial", choices=["serial", "tcp"],
+        "--transport",
+        default="serial",
+        choices=["serial", "tcp"],
         help="Transport backend to use (default: serial)",
     )
     parser.addoption(
-        "--port", default=None,
+        "--port",
+        default=None,
         help="Teensy USB-CDC device node (auto-detected if omitted)",
     )
     parser.addoption(
-        "--ip", default=None,
+        "--ip",
+        default=None,
         help="Controller IP address (required for --transport=tcp)",
     )
     parser.addoption(
-        "--pat", default=None,
+        "--pat",
+        default=None,
         help="Path to a .pat file for the T5 SD playback test in test_lab79_sd.py",
     )
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "serial_only: skip when TCP transport is selected")
-    config.addinivalue_line("markers", "tcp_only: skip when serial transport is selected")
+    config.addinivalue_line(
+        "markers", "serial_only: skip when TCP transport is selected"
+    )
+    config.addinivalue_line(
+        "markers", "tcp_only: skip when serial transport is selected"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
