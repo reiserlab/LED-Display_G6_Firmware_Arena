@@ -1,16 +1,19 @@
 import glob
+import time
+
 import pytest
 import serial
-import time
 
 
 def _find_teensy_port():
-    matches = glob.glob("/dev/serial/by-id/usb-Teensyduino_USB_Serial_*-if00")
+    matches = glob.glob("/dev/serial/by-id/usb-Reiser_Lab_G6_Arena_*-if00")
     return matches[0] if matches else None
 
 
 def pytest_addoption(parser):
-    parser.addoption("--port", default=_find_teensy_port(), help="Teensy USB-CDC device node")
+    parser.addoption(
+        "--port", default=_find_teensy_port(), help="Teensy USB-CDC device node"
+    )
 
 
 @pytest.fixture(scope="session")

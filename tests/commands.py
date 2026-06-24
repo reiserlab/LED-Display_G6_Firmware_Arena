@@ -20,6 +20,10 @@ SET_PATTERN_FILE_CMD        = 0x85
 DELETE_PATTERN_FILE_CMD     = 0x86
 GET_SD_ARCHIVE_CMD          = 0x8A
 DELETE_ALL_PATTERNS_CMD     = 0x8F
+SET_AO_VOLTAGE_CMD          = 0xA0   # [03 A0 mv_lo mv_hi] set BNC J27 (MCP4725) 0-5000 mV
+GET_AO_VOLTAGE_CMD          = 0xA1   # [01 A1] returns hardware DAC readback as uint16 LE mV
+SET_DIGITAL_OUT_CMD         = 0xAA   # [03 AA ch state] DO1 (ch=1, J3) or DO2 (ch=2, J4)
+GET_DIGITAL_OUT_CMD         = 0xAB   # [01 AB] returns DO1 and DO2 state as two bytes
 SET_ETHERNET_IP_ADDRESS_CMD = 0xC0   # reserved, not yet implemented
 GET_ETHERNET_IP_ADDRESS_CMD = 0xC1
 GET_CONTROLLER_INFO_CMD     = 0xC2   # returns {version, capability_bitmap}

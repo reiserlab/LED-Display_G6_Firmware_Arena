@@ -242,9 +242,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       memcpy(size_buf, &file_size, sizeof(file_size));
       current_source_->sendResponse(command_byte, 0, size_buf, sizeof(size_buf));
       // Stream raw file bytes via sendRaw (flushes the header on the first call).
-      static uint8_t chunk[512];
+      static uint8_t chunk[4096];
       uint32_t remaining = file_size;
       uint32_t deadline = millis() + 60000UL;
+      uint32_t t_start = millis();
       bool timed_out = false;
       while (remaining > 0) {
         if (millis() > deadline) { timed_out = true; break; }
@@ -254,9 +255,12 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         current_source_->sendRaw(chunk, n);
         remaining -= n;
       }
+      uint32_t elapsed_ms = millis() - t_start;
+      uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(file_size / elapsed_ms) : 0;
       f.close();
-      DBG_PRINTF("[cmd] get-pattern-file idx=%u name=%s size=%lu%s\n",
+      DBG_PRINTF("[cmd] get-pattern-file idx=%u name=%s size=%lu elapsed=%lu ms (%lu kB/s)%s\n",
                  (unsigned)idx, name, (unsigned long)file_size,
+                 (unsigned long)elapsed_ms, (unsigned long)kbps,
                  timed_out ? " (TIMEOUT)" : "");
       break;
     }
@@ -846,6 +850,13 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   memcpy(&idx, cmd.data + 1, sizeof(idx));
   uint32_t total_len = cmd.bulk_payload_len;
 
+  if (state_ != ArenaState::ALL_OFF) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, CE_DISPLAY_ACTIVE,
+                                  "Stop display before writing to SD");
+    return;
+  }
+
   if (idx > sd_.patternCount()) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Index out of range");
@@ -870,21 +881,28 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
     return;
   }
 
-  static constexpr size_t CHUNK = 512;
-  uint8_t chunk[CHUNK];
+  static constexpr size_t CHUNK = 4096;
+  static uint8_t chunk[CHUNK];
   uint32_t remaining = total_len;
-  uint32_t t0 = millis();
+  uint32_t t_idle = millis();   // tracks last data arrival (timeout)
+  uint32_t t_start = millis();  // start of write phase (throughput)
   bool ok = true;
+  const char *fail_msg = "Upload timeout";
 
   while (remaining > 0) {
     size_t want = (remaining < CHUNK) ? (size_t)remaining : CHUNK;
     size_t got = current_source_->readBulkBytes(chunk, want);
     if (got > 0) {
-      f.write(chunk, got);
+      size_t written = f.write(chunk, got);
+      if (written != got) {
+        fail_msg = "SD write error (card full?)";
+        ok = false;
+        break;
+      }
       remaining -= (uint32_t)got;
-      t0 = millis();
+      t_idle = millis();
     } else {
-      if ((uint32_t)(millis() - t0) > 30000U) {
+      if ((uint32_t)(millis() - t_idle) > 30000U) {
         ok = false;
         break;
       }
@@ -892,15 +910,18 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
     }
   }
 
+  uint32_t elapsed_ms = millis() - t_start;
   f.close();
   if (!ok) {
     SD.remove(path);
-    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Upload timeout");
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, fail_msg);
     return;
   }
 
-  DBG_PRINTF("[cmd] set-pattern-file idx=%u wrote %lu bytes to %s\n",
-             (unsigned)idx, (unsigned long)total_len, path);
+  uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(total_len / elapsed_ms) : 0;
+  DBG_PRINTF("[cmd] set-pattern-file idx=%u wrote %lu bytes in %lu ms (%lu kB/s) to %s\n",
+             (unsigned)idx, (unsigned long)total_len,
+             (unsigned long)elapsed_ms, (unsigned long)kbps, path);
   current_source_->sendResponse(SET_PATTERN_FILE_CMD, 0, "");
 }
 
