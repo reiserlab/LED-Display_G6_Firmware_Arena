@@ -28,3 +28,41 @@ def test_diag_off_no_lines(transport):
     transport.command(SET_DIAG_OUTPUT_CMD, bytes([0x00]))
     _, _, _, diag = transport.command(ALL_OFF_CMD)
     assert not diag, f"unexpected diag lines: {diag!r}"
+
+
+# ── SET_DIAG_OUTPUT_CMD argument handling ─────────────────────────────────────
+
+def test_diag_arg_zero_turns_off(transport):
+    st, echo, payload, _ = transport.command(SET_DIAG_OUTPUT_CMD, bytes([0x00]))
+    assert st == 0
+    assert echo == SET_DIAG_OUTPUT_CMD
+    assert payload == b"diag off"
+
+
+def test_diag_arg_one_turns_on(transport):
+    transport.command(SET_DIAG_OUTPUT_CMD, bytes([0x00]))
+    st, echo, payload, _ = transport.command(SET_DIAG_OUTPUT_CMD, bytes([0x01]))
+    assert st == 0
+    assert echo == SET_DIAG_OUTPUT_CMD
+    assert payload == b"diag on"
+
+
+def test_diag_nonzero_arg_turns_on(transport):
+    transport.command(SET_DIAG_OUTPUT_CMD, bytes([0x00]))
+    st, echo, payload, _ = transport.command(SET_DIAG_OUTPUT_CMD, bytes([0xFF]))
+    assert st == 0
+    assert payload == b"diag on"
+
+
+def test_diag_missing_arg_defaults_on(transport):
+    transport.command(SET_DIAG_OUTPUT_CMD, bytes([0x00]))
+    st, echo, payload, _ = transport.command(SET_DIAG_OUTPUT_CMD)
+    assert st == 0
+    assert payload == b"diag on"
+
+
+def test_diag_all_off_preserves_diag_state(transport):
+    transport.command(SET_DIAG_OUTPUT_CMD, bytes([0x00]))
+    transport.command(ALL_OFF_CMD)
+    _, _, _, diag = transport.command(ALL_OFF_CMD)
+    assert not diag, f"diag leaked on: {diag!r}"

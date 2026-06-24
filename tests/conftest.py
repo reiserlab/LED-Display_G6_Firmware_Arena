@@ -22,7 +22,7 @@ from .transport import SerialTransport, TcpTransport
 
 
 def _find_teensy() -> str | None:
-    matches = glob.glob("/dev/serial/by-id/usb-Teensyduino_USB_Serial_*-if00")
+    matches = glob.glob("/dev/serial/by-id/usb-Reiser_Lab_G6_Arena_*-if00")
     return matches[0] if matches else None
 
 

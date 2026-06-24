@@ -20,7 +20,7 @@ webserial = "bash scripts/web-serial/serve.sh"
 # USB-CDC CIPO bench tools (pyserial ships with the platformio env). Forward args
 # after `--`, e.g.  pixi run all-on-serial -- --port /dev/ttyACM0 --label A
 all-on-serial = "python scripts/all_on_serial.py"
-test-diag    = "pytest scripts/test_diag_flag.py -v"
+test-diag    = "pytest tests/test_serial_only.py -v --transport=serial"
 test-serial  = "pytest tests -v --transport=serial"
 # Pass controller address after --: pixi run test-tcp -- --ip 10.0.0.x
 test-tcp     = "pytest tests -v --transport=tcp"
