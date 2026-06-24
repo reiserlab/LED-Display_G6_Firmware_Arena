@@ -129,6 +129,14 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       handleSetFramePosition(cmd);
       break;
 
+    case DISPLAY_PSRAM_INDEX_CMD:
+      handleDisplayPsramIndex(cmd);
+      break;
+
+    case PSRAM_PLAY_CMD:
+      handlePsramPlay(cmd);
+      break;
+
     case GET_FRAMES_SENT_CMD: {
       uint32_t n = spi_.framesSent();
       uint8_t payload[4] = {
@@ -600,6 +608,89 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
 }
 
 // ---------------------------------------------------------------------------
+// V2 PSRAM display (0x71 single index / 0x72 auto-advance play) — LAB-41/42.
+//
+// The panel holds the frames in its own PSRAM (loaded locally for the demo).
+// We synthesize a frame of identical V2 "display PSRAM index N" blocks (one per
+// panel, all the same index → whole arena shows frame N) and let the refresh
+// timer retransmit it. 0x72 advances the index at frame_rate_hz_, exactly like
+// the Mode-2 open-loop player but with no SD access.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::buildPsramFrame(uint16_t index) {
+  memset(frame_buf_, 0, sizeof(frame_buf_));
+  frame_buf_[0] = 'F';
+  frame_buf_[1] = 'R';
+  frame_buf_[2] = (uint8_t)(index & 0xFF);
+  frame_buf_[3] = (uint8_t)(index >> 8);
+
+  uint16_t blk = G6::block_byte_count_psram;
+  for (uint8_t p = 0; p < panel_count_per_frame; ++p) {
+    uint8_t *block = frame_buf_ + stream_frame_prefix_byte_count
+                     + (uint32_t)p * G6::block_byte_count_psram;
+    blk = G6::build_psram_index_block(block, index, psram_cmd_id_, 0);
+  }
+  block_byte_count_ = blk;
+  frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
+                                 + panel_count_per_frame * block_byte_count_);
+}
+
+void CommandProcessor::handleDisplayPsramIndex(const ParsedCommand &cmd) {
+  uint8_t param_len = cmd.data[0] - 1;
+  if (param_len < 2) {
+    showError(CE_BAD_PAYLOAD_LEN);
+    current_source_->sendResponse(DISPLAY_PSRAM_INDEX_CMD, 1, "DISPLAY_PSRAM too short");
+    return;
+  }
+  uint16_t index = (uint16_t)cmd.data[2] | ((uint16_t)cmd.data[3] << 8);
+
+  spi_.disarmRefreshTimer();
+  psram_cmd_id_      = G6::cmd_disp_psram_persist;
+  psram_start_index_ = index;
+  psram_play_count_  = 1;          // static single index
+  psram_play_offset_ = 0;
+  buildPsramFrame(index);
+  state_ = ArenaState::PSRAM_PLAY;
+  if (!refresh_rate_explicit_) refresh_rate_hz_ = defaultRefreshFor(block_byte_count_);
+  spi_.armRefreshTimer(refresh_rate_hz_);
+  current_source_->sendResponse(DISPLAY_PSRAM_INDEX_CMD, 0, "");
+  DBG_PRINTF("[cmd] DISPLAY_PSRAM index=%u\n", (unsigned)index);
+}
+
+void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
+  uint8_t param_len = cmd.data[0] - 1;
+  if (param_len < 6) {
+    showError(CE_BAD_PAYLOAD_LEN);
+    current_source_->sendResponse(PSRAM_PLAY_CMD, 1, "PSRAM_PLAY too short");
+    return;
+  }
+  const uint8_t *p = cmd.data + 2;
+  uint16_t start = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+  uint16_t count = (uint16_t)p[2] | ((uint16_t)p[3] << 8);
+  uint16_t fps   = (uint16_t)p[4] | ((uint16_t)p[5] << 8);
+  if (count == 0) count = 1;
+
+  spi_.disarmRefreshTimer();
+  psram_cmd_id_      = G6::cmd_disp_psram_persist;
+  psram_start_index_ = start;
+  psram_play_count_  = count;
+  psram_play_offset_ = 0;
+  frame_rate_hz_     = fps;          // animation advance rate (separate from refresh)
+  buildPsramFrame(start);
+  state_ = ArenaState::PSRAM_PLAY;
+  last_advance_us_ = micros();
+  // Retransmit (refresh) faster than the animation advances so each index is
+  // sent several times; the panel renders Persistent so a missed retransmit
+  // just holds the last frame.
+  uint32_t r = refresh_rate_explicit_ ? refresh_rate_hz_
+                                      : defaultRefreshFor(block_byte_count_);
+  spi_.armRefreshTimer(r);
+  current_source_->sendResponse(PSRAM_PLAY_CMD, 0, "");
+  DBG_PRINTF("[cmd] PSRAM_PLAY start=%u count=%u fps=%u\n",
+             (unsigned)start, (unsigned)count, (unsigned)fps);
+}
+
+// ---------------------------------------------------------------------------
 // Display service — called every loop iteration
 // ---------------------------------------------------------------------------
 
@@ -631,6 +722,11 @@ void CommandProcessor::serviceDisplay() {
       transmitOnRefresh();
       break;
 
+    case ArenaState::PSRAM_PLAY:
+      servicePsramPlay();
+      transmitOnRefresh();
+      break;
+
     case ArenaState::ERROR_DISPLAY:
       transmitOnRefresh();
       if ((int32_t)(millis() - error_until_ms_) >= 0) {
@@ -655,6 +751,22 @@ void CommandProcessor::serviceOpenLoop() {
   }
   cur_frame_index_ = (uint16_t)((cur_frame_index_ + steps) % frame_count_);
   loadFrame(cur_frame_index_);
+}
+
+void CommandProcessor::servicePsramPlay() {
+  if (frame_rate_hz_ == 0 || psram_play_count_ <= 1) return;  // static index
+  uint32_t period_us = microseconds_per_second / frame_rate_hz_;
+  uint32_t now = micros();
+  if ((now - last_advance_us_) < period_us) return;
+
+  uint16_t steps = 0;
+  while ((now - last_advance_us_) >= period_us) {
+    last_advance_us_ += period_us;
+    if (++steps >= psram_play_count_) { steps = psram_play_count_; break; }
+  }
+  psram_play_offset_ =
+      (uint16_t)((psram_play_offset_ + steps) % psram_play_count_);
+  buildPsramFrame((uint16_t)(psram_start_index_ + psram_play_offset_));
 }
 
 void CommandProcessor::serviceClosedLoop() {
