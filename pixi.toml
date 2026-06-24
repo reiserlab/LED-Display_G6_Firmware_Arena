@@ -7,7 +7,7 @@ version = "0.1.0"
 
 [tasks]
 deploy = "pio run -e teensy41 -t upload"
-deploy-printf = "pio run -e teensy41-printf -t upload"
+deploy-performance = "pio run -e teensy41-performance -t upload"
 build = "pio run -e teensy41"
 monitor = "mkdir -p log && bash -c 'pio device monitor -e teensy41 2>&1 | tee \"log/$(date +%Y%m%d_%H%M%S).log\"'"
 # Serve scripts/web-serial on http://localhost:8000 AND open a Chromium-based
@@ -17,9 +17,19 @@ monitor = "mkdir -p log && bash -c 'pio device monitor -e teensy41 2>&1 | tee \"
 # NOTE: chromium is NOT on conda-forge, so it can't be a pixi dependency — the
 # script uses a system Chromium/Chrome (override with BROWSER=/path/to/chrome).
 webserial = "bash scripts/web-serial/serve.sh"
+# USB-CDC CIPO bench tools (pyserial ships with the platformio env). Forward args
+# after `--`, e.g.  pixi run all-on-serial -- --port /dev/ttyACM0 --label A
+all-on-serial = "python scripts/all_on_serial.py"
+test-diag    = "pytest scripts/test_diag_flag.py -v"
+test-serial  = "pytest tests -v --transport=serial"
+# Pass controller address after --: pixi run test-tcp -- --ip 10.0.0.x
+test-tcp     = "pytest tests -v --transport=tcp"
+test         = { depends-on = ["test-serial"] }
+multi-capture = "python scripts/multi_port_capture.py"
 
 [dependencies]
 platformio = ">=6.1.19,<7"
+pytest = ">=8"
 
 # ── Isolated AD3 / dwfpy debug environment ─────────────────────────────────
 # Used for bench-side SPI / logic-analyzer captures. Solves independently of

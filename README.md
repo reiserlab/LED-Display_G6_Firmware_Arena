@@ -20,9 +20,10 @@ Current capabilities:
 ## Quickstart
 
 **You only need [pixi](https://pixi.sh/) installed.** Everything else — PlatformIO, the Teensy
-compiler, Python, the local web server — is fetched automatically the first time you run a `pixi
-run` task. The one optional extra is a **Chromium-based browser** (Chrome / Edge / Opera / Brave)
-for the Web Serial UI in step 4.
+compiler, Python — is fetched automatically the first time you run a `pixi run` task. The one
+optional extra is a **Chromium-based browser** (Chrome / Edge / Opera / Brave) for the
+[Arena Console](https://reiserlab.github.io/webDisplayTools/arena_console.html) (a browser-based
+Web Serial control panel) in step 4.
 
 1. **Connect the controller.** Plug the Teensy 4.1 on the G6 arena into your computer via USB.
 2. **Flash the controller firmware:**
@@ -31,13 +32,9 @@ for the Web Serial UI in step 4.
    ```
 3. **Install the panels.** Add G6 panels running the most recent panel firmware from
    [`reiserlab/LED-Display_G6_Firmware_Panel`](https://github.com/reiserlab/LED-Display_G6_Firmware_Panel).
-4. **Launch the Web Serial UI:**
-   ```
-   pixi run webserial
-   ```
-   This serves the page and opens a browser. If no browser opens, open a **Chromium-based**
-   browser (Chrome / Edge / Opera / Brave — Web Serial is not in Firefox or Safari) and go to
-   <http://localhost:8000>.
+4. **Open the [Arena Console](https://reiserlab.github.io/webDisplayTools/arena_console.html)**
+   in a **Chromium-based** browser (Chrome / Edge / Opera / Brave — Web Serial is not in Firefox
+   or Safari).
 5. **Connect to the arena.** Click **Connect to G6 Arena** and pick the correct serial port from
    the chooser (typically `/dev/ttyACM*` on Linux, `COM*` on Windows, `/dev/cu.usbmodem*` on
    macOS). Close any other program holding the port (e.g. `pixi run monitor`) first.
@@ -54,7 +51,6 @@ pixi run build           # compile
 pixi run deploy          # compile and upload
 pixi run deploy-printf   # compile with DEBUG_SERIAL, and upload
 pixi run monitor         # USB serial monitor (logs to log/)
-pixi run webserial       # serve scripts/web-serial and open a browser
 ```
 
 ## Source files
@@ -96,7 +92,7 @@ Same wire framing as G4.1-ArenaSlim, accepted on both TCP and USB serial:
 | `GET_CONTROLLER_INFO` | `0x67` | ✓ | Returns `{version, capability_bitmap}` (bit 0 `g6_mode` = 1) |
 | `SET_FRAME_POSITION` | `0x70` | ✓ | Mode 3 — show a specific frame of the open pattern |
 | `ALL_ON`         | `0xFF` | ✓ | Synthesizes a full-bright GS16 oneshot on every panel |
-| `DISPLAY_RESET`  | `0x01` | ✗ | Dropped for G6 — responds with a clear error message |
+| `SYSTEM_RESET`   | `0x01` | ✓ | Software system reset — acks then reboots (SCB_AIRCR SYSRESETREQ) |
 | `SWITCH_GRAYSCALE` | `0x06` | ✗ | Dropped for G6 — `gs_val` is derived from the stream size / pattern header |
 
 Unknown opcodes reply with `status = 1` and raise a `CE 01` error glyph.
@@ -127,8 +123,16 @@ On any SD/CRC/parameter fault the controller shows a **"CE / NN" error glyph** o
 
 ## Host tooling
 
-- `scripts/web-serial/` — browser UI (Web Serial) with buttons for every command, the
-  webDisplayTools preset patterns, and `.bin` / `.pat` upload-and-stream. `pixi run webserial`
-  serves it and opens a browser. See its [README](scripts/web-serial/README.md).
+- **[Arena Console](https://reiserlab.github.io/webDisplayTools/arena_console.html)** — the
+  browser-based Web Serial control panel (buttons for every command, stream presets, raw-hex
+  send, and `.bin` / `.pat` upload-and-stream), in webDisplayTools.
 - `scripts/all_on.py`, `controller_info.py`, `play_pattern.py`, `probe.py` — standalone
   TCP clients (no `arena_interface` dependency).
+- `scripts/all_on_serial.py`, `scripts/multi_port_capture.py` — USB-CDC bench tools for the
+  CIPO diagnostic (`DEBUG_SERIAL` builds): drive all-on over serial and capture/parse the
+  `[spi] CIPO` stream on the same pipe. `multi_port_capture.py` additionally taps both panels'
+  `SPI_DIAG` heartbeats on their own ports to confirm per-panel frame reception.
+
+## TCP transport — known throughput limitation
+
+TCP upload throughput (host → controller → SD) is capped at approximately **84 kB/s** — around 6× slower than the USB-CDC serial path (~1370 kB/s) — and is unaffected by reducing LWIP's delayed-ACK timer (`TCP_TMR_INTERVAL`). The root cause lies inside QNEthernet's connection receive-buffer management: each call to `client_.available()` / `client_.read()` appears to expose only one LWIP pbuf worth of data at a time (~1 TCP segment ≈ 1460 bytes), regardless of how many segments have actually arrived from the host. Because the firmware must cycle through `readBulkBytes` → SD write (~3 ms) → `readBulkBytes` for every such chunk, and each cycle triggers two `Ethernet.loop()` passes whose overhead is non-trivial, throughput stalls well below what the network or SD card could sustain. The download direction (controller → host, ~5000 kB/s) is unaffected because there the bottleneck is the 100 Mbps Ethernet link, not the receive path. Closing the upload gap would require either patching QNEthernet's `ConnectionManager` to deliver all buffered pbufs in a single `read()` call, or restructuring the file-transfer path to use UDP datagrams (eliminating the receive-buffer issue entirely at the cost of application-level sequencing).

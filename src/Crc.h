@@ -36,4 +36,22 @@ inline uint16_t crc16_ccitt_false(const uint8_t *data, size_t len) {
   return crc;
 }
 
+// CRC-32/ISO-HDLC (PKZIP): poly 0xEDB88320 (reflected), init 0xFFFFFFFF,
+// xorout 0xFFFFFFFF. 4-bit nibble table (~64 B).
+// Usage: crc = crc32_update(0xFFFFFFFFu, data, len) ^ 0xFFFFFFFFu
+// Universal check value 0xCBF43926 over "123456789".
+inline uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len) {
+  static const uint32_t T[16] = {
+    0x00000000u, 0x1db71064u, 0x3b6e20c8u, 0x26d930acu,
+    0x76dc4190u, 0x6b6b51f4u, 0x4db26158u, 0x505da5bcu,
+    0xedb88320u, 0xf00f9344u, 0xd6d6a3e8u, 0xcb61b38cu,
+    0x9b64c2b0u, 0x86d3d2d4u, 0xa00ae278u, 0xbdbdf21cu,
+  };
+  for (size_t i = 0; i < len; ++i) {
+    crc = T[(crc ^ data[i]) & 0xfu] ^ (crc >> 4);
+    crc = T[(crc ^ (data[i] >> 4)) & 0xfu] ^ (crc >> 4);
+  }
+  return crc;
+}
+
 } // namespace G6

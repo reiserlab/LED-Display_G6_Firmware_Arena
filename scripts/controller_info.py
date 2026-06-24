@@ -1,6 +1,6 @@
 """Query the G6-ArenaSlim controller's identity / capabilities.
 
-Sends GET_CONTROLLER_INFO (0x67) over the G4-compatible binary protocol
+Sends GET_CONTROLLER_INFO (0xC2) over the G4-compatible binary protocol
 (port 62222) and decodes the {version, capability_bitmap} reply. Standalone
 counterpart to all_on.py — no arena_interface package required.
 
@@ -12,7 +12,7 @@ import socket
 import sys
 
 PORT = 62222
-GET_CONTROLLER_INFO_CMD = 0x67
+GET_CONTROLLER_INFO_CMD = 0xC2
 
 # Capability bitmap bits (g6_03-controller.md § 5).
 CAPABILITY_BITS = [

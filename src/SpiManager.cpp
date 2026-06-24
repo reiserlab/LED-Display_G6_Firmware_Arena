@@ -61,8 +61,19 @@ void SpiManager::disarmRefreshTimer() {
   refreshFlag = false;
 }
 
+void SpiManager::setSpiClockMhz(uint16_t mhz) {
+  if (mhz < 1)  mhz = 1;
+  if (mhz > 30) mhz = 30;
+  spi_clock_hz_      = (uint32_t)mhz * 1'000'000UL;
+  cs_setup_delay_ns_ = (uint32_t)((1'000'000'000ULL * cs_setup_sck_periods) / spi_clock_hz_);
+  cs_hold_delay_ns_  = (uint32_t)((1'000'000'000ULL * cs_hold_sck_periods)  / spi_clock_hz_);
+#ifdef DEBUG_SERIAL
+  cipo_realign_bits_ = (spi_clock_hz_ >= 20'000'000UL) ? 1 : 0;
+#endif
+}
+
 void SpiManager::beginPanelSetTransaction() {
-  SPISettings settings(spi_clock_speed, spi_bit_order, spi_data_mode);
+  SPISettings settings(spi_clock_hz_, spi_bit_order, spi_data_mode);
   for (uint8_t r = 0; r < region_count_per_frame; ++r) {
     region_spi_[r]->beginTransaction(settings);
   }
@@ -112,7 +123,7 @@ void SpiManager::transferPanelSet(const uint8_t *block_b0,
 
 #ifdef DEBUG_SERIAL
 // Recover the CIPO confirmation when the buffered return path delays MISO by a
-// whole bit at high SCK (see constants::cipo_realign_left_bits). Left-shifts the
+// whole bit at high SCK (see constants::cipo_realign_bits_). Left-shifts the
 // captured byte stream by `bits` (0..7), pulling in the MSBs of the following
 // byte; `raw` must hold at least n+1 valid bytes. bits==0 is a plain copy.
 static inline void realignCipo(const uint8_t *raw, uint8_t *out,
@@ -134,6 +145,7 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
       block_byte_count != G6::block_byte_count_gs16) {
     return;
   }
+  ++frames_sent_;
 
 #ifdef DEBUG_SERIAL
   uint32_t t0 = micros();
@@ -146,9 +158,12 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
   // frames use the fast async path. Capturing ALL sets — not just set 0 — is
   // what makes an edge/reworked port visible: e.g. silk P3 is panel set 4
   // (CS pin 9), not set 0 (P1, CS pin 0).
+  // Gate the blocking full-duplex capture on the runtime diag flag: when
+  // diagnostics are muted, every frame takes the fast async-DMA path, so a
+  // DEBUG_SERIAL build idles at the same timing as a production build.
   static uint32_t tf_count = 0;
   ++tf_count;
-  const bool capture = (tf_count % 300) == 0;
+  const bool capture = g_dbg_on && (tf_count % 300) == 0;
 #endif
 
   for (uint8_t i = 0; i < panel_set_count; ++i) {
@@ -162,15 +177,15 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
     // currently configured spi_clock_speed (see constants.h). Lets the
     // PL022 peripheral's TX shift register load bit 0 before the first edge,
     // preventing the off-by-one-bit corruption we hit early in bring-up.
-    delayNanoseconds(cs_setup_delay_ns);
+    delayNanoseconds(cs_setup_delay_ns_);
 #ifdef DEBUG_SERIAL
     if (capture) {
       transferPanelSet(block_b0, block_b1, block_byte_count,
                        miso_scratch_b0_, miso_scratch_b1_);
       // Recover the 3-byte confirmation from the (possibly bit-delayed) return
       // path. Reads scratch[0..3] — valid for both GS2 (53 B) and GS16 (203 B).
-      realignCipo(miso_scratch_b0_, cipo_b0_[i], 3, cipo_realign_left_bits);
-      realignCipo(miso_scratch_b1_, cipo_b1_[i], 3, cipo_realign_left_bits);
+      realignCipo(miso_scratch_b0_, cipo_b0_[i], 3, cipo_realign_bits_);
+      realignCipo(miso_scratch_b1_, cipo_b1_[i], 3, cipo_realign_bits_);
     } else {
       transferPanelSet(block_b0, block_b1, block_byte_count);
     }
@@ -182,7 +197,7 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
     // the PL022 shift-register-to-FIFO transfer for the final byte AND a
     // few polling-loop iterations on the peripheral to actually drain the FIFO
     // before the peripheral sees cs_pin go HIGH and exits its read loop.
-    delayNanoseconds(cs_hold_delay_ns);
+    delayNanoseconds(cs_hold_delay_ns_);
     digitalWriteFast(ps.cs_pin, HIGH);
     endPanelSetTransaction();
   }
@@ -193,7 +208,7 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
                (unsigned long)tf_count,
                (unsigned long)(micros() - t0),
                (unsigned long)isr_count_,
-               (unsigned)cipo_realign_left_bits);
+               (unsigned)cipo_realign_bits_);
     for (uint8_t i = 0; i < panel_set_count; ++i) {
       DBG_PRINTF("[spi] CIPO set%-2u cs=%-2u B0=%02X %02X %02X  B1=%02X %02X %02X\n",
                  (unsigned)i, (unsigned)panel_sets[i].cs_pin,
