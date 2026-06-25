@@ -64,6 +64,17 @@ class CommandProcessor {
   // Analog output — last commanded level (mV). 0 = DAC code 0 (power-up default).
   uint16_t ao_mv_ = 0;
 
+  // AO LUT playback (LAB-82). mode 0 = frame-locked (advances with cur_frame_index_);
+  // mode 1 = time-based (steps at ao_lut_step_hz_, max 1000 Hz).
+  // ao_lut_len_ == 0 means the LUT is inactive. Send SET_AO_VOLTAGE (0xA0) to stop.
+  static constexpr uint16_t kAoLutMaxLen = 4096;
+  uint16_t ao_lut_[kAoLutMaxLen];
+  uint16_t ao_lut_len_     = 0;
+  uint8_t  ao_lut_mode_    = 0;
+  uint16_t ao_lut_step_hz_ = 0;
+  uint16_t ao_lut_idx_     = 0;
+  uint32_t ao_lut_last_us_ = 0;
+
   // Error display.
   uint32_t error_until_ms_ = 0;
 
@@ -108,4 +119,5 @@ class CommandProcessor {
   void fillFrameBufferAllOn(uint16_t block_byte_count);
   void buildPsramFrame(uint16_t index);  // fill frame_buf_ with V2 index blocks
   uint32_t defaultRefreshFor(uint16_t block_byte_count) const;
+  bool applyAoLut(uint16_t idx);         // write ao_lut_[idx % ao_lut_len_] to DAC; false = I²C error
 };
