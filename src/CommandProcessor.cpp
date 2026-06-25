@@ -406,6 +406,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         break;
       }
       ao_mv_ = mv;
+      ao_lut_len_ = 0;  // stop any active LUT playback
       uint8_t payload[2] = { (uint8_t)(mv), (uint8_t)(mv >> 8) };
       current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
       DBG_PRINTF("[cmd] set-ao-voltage mv=%u dac=%u\n",
@@ -435,6 +436,69 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       DBG_PRINTF("[cmd] get-ao-voltage hw_dac=%u hw_mv=%u status=0x%02X pd=%u%s\n",
                  (unsigned)dac_code, (unsigned)mv, (unsigned)status, (unsigned)pd,
                  pd ? " POWER-DOWN!" : "");
+      break;
+    }
+
+    case SET_AO_LUT_CMD: {
+      // [len, 0xA2, mode, step_hz_lo, step_hz_hi, count_lo, count_hi, mv[0..n-1]×2]
+      //   mode     uint8:  0 = frame-locked, 1 = time-based
+      //   step_hz  uint16 LE: step rate for mode 1 (ignored for mode 0; max 1000 Hz)
+      //   count    uint16 LE: LUT entry count
+      //   mv[i]    uint16 LE each: 0–5000 mV
+      // claimed_len = 1(cmd) + 1(mode) + 2(step_hz) + 2(count) + 2*count = 6 + 2*count
+      if (claimed_len < 6) {
+        current_source_->sendResponse(command_byte, 1, "Too short (need mode+step_hz+count)");
+        break;
+      }
+      uint8_t  lut_mode = buf[pos++];
+      uint16_t step_hz;
+      memcpy(&step_hz, buf + pos, sizeof(step_hz)); pos += 2;
+      uint16_t count;
+      memcpy(&count,   buf + pos, sizeof(count));   pos += 2;
+
+      if (lut_mode > 1) {
+        current_source_->sendResponse(command_byte, 1, "mode must be 0 (frame-locked) or 1 (time-based)");
+        break;
+      }
+      if (count == 0 || count > kAoLutMaxLen) {
+        current_source_->sendResponse(command_byte, 1, "count out of range (1-4096)");
+        break;
+      }
+      // Verify the framing length matches the declared count.
+      uint32_t needed = 6u + (uint32_t)count * 2;
+      if (needed > 255u || (uint8_t)needed != claimed_len) {
+        current_source_->sendResponse(command_byte, 1, "count/length mismatch");
+        break;
+      }
+      bool mv_error = false;
+      for (uint16_t i = 0; i < count; ++i) {
+        uint16_t mv;
+        memcpy(&mv, buf + pos, sizeof(mv)); pos += 2;
+        if (mv > 5000) {
+          current_source_->sendResponse(command_byte, 1, "mv out of range (0-5000)");
+          mv_error = true;
+          break;
+        }
+        ao_lut_[i] = mv;
+      }
+      if (mv_error) break;
+
+      ao_lut_len_     = count;
+      ao_lut_mode_    = lut_mode;
+      ao_lut_step_hz_ = step_hz;
+      ao_lut_idx_     = 0;
+      ao_lut_last_us_ = micros();
+      if (!applyAoLut(0)) {
+        ao_lut_len_ = 0;  // undo — DAC not responding
+        current_source_->sendResponse(command_byte, 1, "I2C error writing LUT[0]");
+        break;
+      }
+
+      uint8_t payload[2] = { (uint8_t)count, (uint8_t)(count >> 8) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      DBG_PRINTF("[cmd] set-ao-lut mode=%u step=%u count=%u lut[0]=%u mV\n",
+                 (unsigned)lut_mode, (unsigned)step_hz,
+                 (unsigned)count, (unsigned)ao_lut_[0]);
       break;
     }
 
@@ -702,6 +766,17 @@ void CommandProcessor::transmitOnRefresh() {
 }
 
 void CommandProcessor::serviceDisplay() {
+  // Service time-based AO LUT regardless of display state (independent of frames).
+  if (ao_lut_len_ > 0 && ao_lut_mode_ == 1 && ao_lut_step_hz_ > 0) {
+    uint32_t now = micros();
+    uint32_t period_us = 1000000UL / ao_lut_step_hz_;
+    if (now - ao_lut_last_us_ >= period_us) {
+      ao_lut_last_us_ += period_us;
+      ao_lut_idx_ = (uint16_t)((ao_lut_idx_ + 1) % ao_lut_len_);
+      applyAoLut(ao_lut_idx_);
+    }
+  }
+
   switch (state_) {
     case ArenaState::ALL_OFF:
       break;
@@ -814,6 +889,10 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   }
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + (uint32_t)sd_.info().num_panels * block_byte_count_);
+  if (ao_lut_len_ > 0 && ao_lut_mode_ == 0) {
+    ao_lut_idx_ = (uint16_t)(frame_index % ao_lut_len_);
+    applyAoLut(ao_lut_idx_);
+  }
   return true;
 }
 
@@ -906,6 +985,23 @@ void CommandProcessor::showError(uint8_t code) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+bool CommandProcessor::applyAoLut(uint16_t idx) {
+  if (ao_lut_len_ == 0) return true;
+  uint16_t mv = ao_lut_[idx % ao_lut_len_];
+  uint16_t dac_code = (uint16_t)((uint32_t)mv * 4095 / 5000);
+  Wire.beginTransmission(0x60);
+  Wire.write((uint8_t)((dac_code >> 8) & 0x0F));
+  Wire.write((uint8_t)(dac_code & 0xFF));
+  uint8_t err = Wire.endTransmission();
+  if (err != 0) {
+    DBG_PRINTF("[ao_lut] I2C error %u at idx=%u mv=%u\n",
+               (unsigned)err, (unsigned)idx, (unsigned)mv);
+    return false;
+  }
+  ao_mv_ = mv;
+  return true;
+}
 
 uint32_t CommandProcessor::defaultRefreshFor(uint16_t block_byte_count) const {
   return (block_byte_count == G6::block_byte_count_gs2)
