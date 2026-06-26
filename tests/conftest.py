@@ -48,6 +48,13 @@ def pytest_addoption(parser):
         default=None,
         help="Path to a .pat file for the T5 SD playback test in test_lab79_sd.py",
     )
+    parser.addoption(
+        "--visual",
+        action="store_true",
+        default=False,
+        help="Run opt-in guided visual tests (need a human observing the arena; "
+             "pair with -s so prompts/output are shown).",
+    )
 
 
 def pytest_configure(config):
@@ -56,6 +63,9 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "tcp_only: skip when serial transport is selected"
+    )
+    config.addinivalue_line(
+        "markers", "visual: opt-in guided visual test (needs a human + --visual)"
     )
 
 
@@ -66,6 +76,9 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.skip(reason="--transport=serial not selected"))
         if "tcp_only" in item.keywords and tr != "tcp":
             item.add_marker(pytest.mark.skip(reason="--transport=tcp not selected"))
+        if "visual" in item.keywords and not config.getoption("--visual"):
+            item.add_marker(pytest.mark.skip(
+                reason="guided visual test — pass --visual (with -s) to run"))
 
 
 @pytest.fixture(scope="session")
@@ -94,3 +107,21 @@ def pat_data(pytestconfig):
         return None
     with open(path, "rb") as f:
         return f.read()
+
+
+@pytest.fixture(scope="session")
+def pat(transport, pat_data):
+    """Upload --pat to the SD card and return its 1-based pattern index.
+
+    Skips the test if --pat was not supplied.  Uploads once per session and
+    leaves the file on the SD card (named 'conftest.pat').
+    """
+    if pat_data is None:
+        pytest.skip("--pat not provided; pass a .pat file path to run this test")
+    st, _, _, _ = transport.upload_file(0, pat_data, timeout=120.0)
+    assert st == 0, "upload of --pat file failed"
+    st2, _, payload, _ = transport.rename_file(0, "conftest.pat")
+    assert st2 == 0, "rename of --pat file failed"
+    import struct
+    idx = struct.unpack_from("<H", bytes(payload[:2]))[0]
+    return idx

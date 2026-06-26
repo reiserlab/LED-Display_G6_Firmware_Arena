@@ -83,6 +83,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
 
     case SET_REFRESH_RATE_CMD: {
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 16 hz_lo hz_hi]");
+        break;
+      }
       uint16_t rate;
       memcpy(&rate, buf + pos, sizeof(rate));
       if (rate > 0) {
@@ -103,6 +107,29 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
       break;
     }
+
+    case SET_PANEL_DISPLAY_MODE_CMD: {
+      // [02, 1B, mode]  mode uint8: 0=oneshot 1=persist 2=triggered 3=gated
+      if (claimed_len != 2) {
+        current_source_->sendResponse(command_byte, 1, "Expected [02 1B mode]");
+        break;
+      }
+      uint8_t mode = buf[pos];
+      if (mode > 3) {
+        current_source_->sendResponse(command_byte, 1,
+                                      "mode must be 0-3 (oneshot/persist/triggered/gated)");
+        break;
+      }
+      panel_disp_mode_ = mode;
+      patchDispMode();  // apply immediately to the currently-buffered frame
+      current_source_->sendResponse(command_byte, 0, &mode, 1);
+      DBG_PRINTF("[cmd] set-panel-display-mode mode=%u\n", (unsigned)mode);
+      break;
+    }
+
+    case GET_PANEL_DISPLAY_MODE_CMD:
+      current_source_->sendResponse(command_byte, 0, &panel_disp_mode_, 1);
+      break;
 
     case GET_ETHERNET_IP_ADDRESS_CMD:
       current_source_->sendResponse(command_byte, 0, net_.ipAddress());
@@ -128,6 +155,20 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     case SET_FRAME_POSITION_CMD:
       handleSetFramePosition(cmd);
       break;
+
+    case GET_FRAME_POSITION_CMD: {
+      // [01 72] → payload: cur_frame_index (uint16 LE), frame_count (uint16 LE).
+      // Reflects the live index in any pattern mode (2/3/4) and 0/0 when no
+      // pattern is open. Lets a host poll playback position and direction.
+      uint16_t idx = cur_frame_index_;
+      uint16_t n   = frame_count_;
+      uint8_t payload[4] = {
+          (uint8_t)(idx), (uint8_t)(idx >> 8),
+          (uint8_t)(n),   (uint8_t)(n >> 8),
+      };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      break;
+    }
 
     case DISPLAY_PSRAM_INDEX_CMD:
       handleDisplayPsramIndex(cmd);
@@ -162,8 +203,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case GET_PATTERN_FILENAME_CMD: {
-      if (claimed_len < 2) {
-        current_source_->sendResponse(command_byte, 1, "Missing index");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 82 idx_lo idx_hi]");
         break;
       }
       uint16_t idx;
@@ -222,8 +263,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
 
     case GET_PATTERN_FILE_CMD: {
       // [03 84 idx_lo idx_hi]  Response: [0x0A, 0, 0x84, size_b0..b7], then raw bytes.
-      if (claimed_len < 3) {
-        current_source_->sendResponse(command_byte, 1, "Missing index");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 84 idx_lo idx_hi]");
         break;
       }
       uint16_t idx;
@@ -275,8 +316,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
 
     case DELETE_PATTERN_FILE_CMD: {
       // [03 86 idx_lo idx_hi]
-      if (claimed_len < 3) {
-        current_source_->sendResponse(command_byte, 1, "Missing index");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 86 idx_lo idx_hi]");
         break;
       }
       uint16_t idx;
@@ -318,8 +359,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case SET_SPI_CLOCK_CMD: {
-      if (claimed_len < 2) {
-        current_source_->sendResponse(command_byte, 1, "Missing mhz arg");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 C5 mhz_lo mhz_hi]");
         break;
       }
       uint16_t mhz;
@@ -337,6 +378,27 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       uint16_t mhz = spi_.getSpiClockMhz();
       uint8_t payload[2] = { (uint8_t)(mhz), (uint8_t)(mhz >> 8) };
       current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      break;
+    }
+
+    case SET_PATTERN_ID_CMD: {
+      // [03, 0x03, id_lo, id_hi] — load a 1-based pattern ID into SHOW_FRAME
+      // (Mode 3) parked at frame 0, without starting auto-advance.
+      // Pairs with SET_FRAME_POSITION (0x70) for clean G4-style frame addressing.
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 03 id_lo id_hi]");
+        break;
+      }
+      uint16_t pattern_id;
+      memcpy(&pattern_id, buf + pos, sizeof(pattern_id));
+      if (!enterPatternMode(ArenaState::SHOW_FRAME, pattern_id, 0, 0, 0)) {
+        current_source_->sendResponse(command_byte, 1, "SET_PATTERN_ID: load failed");
+        break;
+      }
+      uint8_t payload[2] = { (uint8_t)pattern_id, (uint8_t)(pattern_id >> 8) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      DBG_PRINTF("[cmd] set-pattern-id id=%u frames=%u\n",
+                 (unsigned)pattern_id_, (unsigned)frame_count_);
       break;
     }
 
@@ -360,8 +422,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case SET_DIGITAL_OUT_CMD: {
-      if (claimed_len < 2) {
-        current_source_->sendResponse(command_byte, 1, "Missing args");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 AA channel state]");
         break;
       }
       uint8_t channel = buf[pos++];
@@ -386,8 +448,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case SET_AO_VOLTAGE_CMD: {
-      if (claimed_len < 2) {
-        current_source_->sendResponse(command_byte, 1, "Missing mv arg");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 A0 mv_lo mv_hi]");
         break;
       }
       uint16_t mv;
@@ -543,6 +605,7 @@ void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
   memcpy(frame_buf_, buf + stream_header_byte_count, frame_byte_count);
   frame_byte_count_  = (uint16_t)frame_byte_count;
   block_byte_count_  = block_size;
+  patchDispMode();
 
   // First-time entry into streaming, or grayscale-mode change → re-arm timer.
   bool need_rearm = (state_ != ArenaState::STREAMING_FRAME);
@@ -586,7 +649,7 @@ void CommandProcessor::handleGetControllerInfo() {
 // Payload layout (after the [len, 0x08] framing), parsed defensively:
 //   param[0]   mode        (2 = open loop, 3 = show frame, 4 = closed loop)
 //   param[1:2] pattern_id  uint16 LE (1-based index into /patterns/*.pat)
-//   param[3:4] frame_rate  uint16 LE (Hz; Mode 2 frame-advance rate)
+//   param[3:4] frame_rate  int16 LE  (Hz; Mode 2: positive = forward, negative = reverse)
 //   param[5]   gain        int8       (Mode 4 velocity scaling, 10x fps/V)
 //   param[6:7] init_pos    uint16 LE  (initial frame index, 0-based)
 //   param[8:]  reserved    (legacy G4 fields; ignored)
@@ -607,7 +670,7 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
 
   uint8_t  mode       = p[0];
   uint16_t pattern_id = (uint16_t)p[1] | ((uint16_t)p[2] << 8);
-  uint16_t frame_rate = (uint16_t)p[3] | ((uint16_t)p[4] << 8);
+  int16_t  frame_rate = (int16_t)((uint16_t)p[3] | ((uint16_t)p[4] << 8));
   int8_t   gain       = (int8_t)p[5];
   uint16_t init_pos   = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
 
@@ -672,12 +735,12 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// V2 PSRAM display (0x71 single index / 0x72 auto-advance play) — LAB-41/42.
+// V2 PSRAM display (0x3A single index / 0x3B auto-advance play) — LAB-41/42.
 //
 // The panel holds the frames in its own PSRAM (loaded locally for the demo).
 // We synthesize a frame of identical V2 "display PSRAM index N" blocks (one per
 // panel, all the same index → whole arena shows frame N) and let the refresh
-// timer retransmit it. 0x72 advances the index at frame_rate_hz_, exactly like
+// timer retransmit it. 0x3B advances the index at frame_rate_hz_, exactly like
 // the Mode-2 open-loop player but with no SD access.
 // ---------------------------------------------------------------------------
 
@@ -709,7 +772,8 @@ void CommandProcessor::handleDisplayPsramIndex(const ParsedCommand &cmd) {
   uint16_t index = (uint16_t)cmd.data[2] | ((uint16_t)cmd.data[3] << 8);
 
   spi_.disarmRefreshTimer();
-  psram_cmd_id_      = G6::cmd_disp_psram_persist;
+  psram_cmd_id_      = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
+                                                 panel_disp_mode_);
   psram_start_index_ = index;
   psram_play_count_  = 1;          // static single index
   psram_play_offset_ = 0;
@@ -735,7 +799,8 @@ void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
   if (count == 0) count = 1;
 
   spi_.disarmRefreshTimer();
-  psram_cmd_id_      = G6::cmd_disp_psram_persist;
+  psram_cmd_id_      = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
+                                                 panel_disp_mode_);
   psram_start_index_ = start;
   psram_play_count_  = count;
   psram_play_offset_ = 0;
@@ -813,7 +878,9 @@ void CommandProcessor::serviceDisplay() {
 
 void CommandProcessor::serviceOpenLoop() {
   if (frame_rate_hz_ == 0 || frame_count_ <= 1) return;  // static frame
-  uint32_t period_us = microseconds_per_second / frame_rate_hz_;
+  uint32_t rate_hz   = (frame_rate_hz_ < 0) ? (uint32_t)(-frame_rate_hz_)
+                                             : (uint32_t)frame_rate_hz_;
+  uint32_t period_us = microseconds_per_second / rate_hz;
   uint32_t now = micros();
   if ((now - last_advance_us_) < period_us) return;
 
@@ -824,13 +891,17 @@ void CommandProcessor::serviceOpenLoop() {
     last_advance_us_ += period_us;
     if (++steps >= frame_count_) { steps = frame_count_; break; }  // clamp
   }
-  cur_frame_index_ = (uint16_t)((cur_frame_index_ + steps) % frame_count_);
+  int32_t idx = (int32_t)cur_frame_index_
+                + (frame_rate_hz_ > 0 ? (int32_t)steps : -(int32_t)steps);
+  idx %= (int32_t)frame_count_;
+  if (idx < 0) idx += (int32_t)frame_count_;
+  cur_frame_index_ = (uint16_t)idx;
   loadFrame(cur_frame_index_);
 }
 
 void CommandProcessor::servicePsramPlay() {
-  if (frame_rate_hz_ == 0 || psram_play_count_ <= 1) return;  // static index
-  uint32_t period_us = microseconds_per_second / frame_rate_hz_;
+  if (frame_rate_hz_ <= 0 || psram_play_count_ <= 1) return;  // static index
+  uint32_t period_us = microseconds_per_second / (uint32_t)frame_rate_hz_;
   uint32_t now = micros();
   if ((now - last_advance_us_) < period_us) return;
 
@@ -889,6 +960,7 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   }
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + (uint32_t)sd_.info().num_panels * block_byte_count_);
+  patchDispMode();
   if (ao_lut_len_ > 0 && ao_lut_mode_ == 0) {
     ao_lut_idx_ = (uint16_t)(frame_index % ao_lut_len_);
     applyAoLut(ao_lut_idx_);
@@ -934,7 +1006,7 @@ void CommandProcessor::enterStreamingFrame(uint16_t block_byte_count) {
 }
 
 bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
-                                        uint16_t frame_rate_hz, int8_t gain,
+                                        int16_t frame_rate_hz, int8_t gain,
                                         uint16_t init_frame) {
   spi_.disarmRefreshTimer();
 
@@ -986,6 +1058,26 @@ void CommandProcessor::showError(uint8_t code) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+uint8_t CommandProcessor::dispOpcodeFor(bool gs16) const {
+  uint8_t base = gs16 ? G6::cmd_disp_16lvl_oneshot : G6::cmd_disp_2lvl_oneshot;
+  return G6::disp_opcode_with_mode(base, panel_disp_mode_);
+}
+
+void CommandProcessor::patchDispMode() {
+  if (block_byte_count_ == 0 || frame_byte_count_ <= stream_frame_prefix_byte_count) return;
+  uint8_t *base = frame_buf_ + stream_frame_prefix_byte_count;
+  uint16_t count = (uint16_t)((frame_byte_count_ - stream_frame_prefix_byte_count)
+                               / block_byte_count_);
+  for (uint16_t p = 0; p < count; ++p) {
+    uint8_t *block = base + (uint32_t)p * block_byte_count_;
+    // Preserve the opcode family (high 6 bits — GS2 0x1x / GS16 0x3x / PSRAM
+    // 0x5x / 0x6x); rewrite only the mode in the low 2 bits. Works for any
+    // display block without assuming the grayscale level from block size.
+    block[1] = G6::disp_opcode_with_mode((uint8_t)(block[1] & 0xFC), panel_disp_mode_);
+    G6::stamp_header_parity(block, block_byte_count_);
+  }
+}
+
 bool CommandProcessor::applyAoLut(uint16_t idx) {
   if (ao_lut_len_ == 0) return true;
   uint16_t mv = ao_lut_[idx % ao_lut_len_];
@@ -1010,8 +1102,8 @@ uint32_t CommandProcessor::defaultRefreshFor(uint16_t block_byte_count) const {
 }
 
 void CommandProcessor::fillFrameBufferAllOn(uint16_t block_byte_count) {
-  // Synthesize a frame of GS16 oneshot blocks with all-max pixels.
-  // Block layout: [header][cmd=0x30][200 pixel bytes = 0xFF][duty_cycle=0xFF].
+  // Synthesize an all-max-pixel frame using the current panel display mode.
+  // Block layout: [header][cmd][200 pixel bytes = 0xFF][duty_cycle=0xFF].
   // Parity is recomputed per block.
   memset(frame_buf_, 0, sizeof(frame_buf_));
 
@@ -1022,9 +1114,7 @@ void CommandProcessor::fillFrameBufferAllOn(uint16_t block_byte_count) {
   frame_buf_[2] = 0;
   frame_buf_[3] = 0;
 
-  uint8_t cmd = (block_byte_count == G6::block_byte_count_gs2)
-                    ? G6::cmd_disp_2lvl_oneshot
-                    : G6::cmd_disp_16lvl_oneshot;
+  uint8_t cmd = dispOpcodeFor(block_byte_count == G6::block_byte_count_gs16);
 
   for (uint8_t p = 0; p < panel_count_per_frame; ++p) {
     uint8_t *block = frame_buf_ + stream_frame_prefix_byte_count

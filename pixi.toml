@@ -21,9 +21,17 @@ webserial = "bash scripts/web-serial/serve.sh"
 # after `--`, e.g.  pixi run all-on-serial -- --port /dev/ttyACM0 --label A
 all-on-serial = "python scripts/all_on_serial.py"
 test-diag    = "pytest tests/test_serial_only.py -v --transport=serial"
-test-serial  = "pytest tests -v --transport=serial"
+# Automated suite excludes guided visual tests (they need a human at the arena).
+test-serial  = "pytest tests -v --transport=serial -m 'not visual'"
 # Pass controller address after --: pixi run test-tcp -- --ip 10.0.0.x
-test-tcp     = "pytest tests -v --transport=tcp"
+test-tcp     = "pytest tests -v --transport=tcp -m 'not visual'"
+# Guided VISUAL tests only — needs an observer at the arena. Supply a multi-frame
+# pattern after --, e.g.:
+#   pixi run test-serial-visual -- --pat ../webDisplayTools/patterns/g6_2x10/patterns/002_grating_sq.pat
+#   pixi run test-tcp-visual    -- --ip 10.0.0.x --pat .../002_grating_sq.pat
+# NOTE: keep the serial/tcp task pair in sync — any change to one must mirror in the other.
+test-serial-visual = "pytest tests -v --transport=serial -m visual --visual -s"
+test-tcp-visual    = "pytest tests -v --transport=tcp -m visual --visual -s"
 test         = { depends-on = ["test-serial"] }
 multi-capture = "python scripts/multi_port_capture.py"
 
