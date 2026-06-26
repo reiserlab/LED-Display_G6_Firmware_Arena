@@ -21,6 +21,11 @@ enum ArenaCommands : uint8_t {
   STREAM_FRAME_CMD            = 0x32,
   GET_FRAMES_SENT_CMD         = 0x33,  // returns uint32 LE frames pushed to panels since boot/reset
   RESET_FRAMES_SENT_CMD       = 0x34,  // zeroes the frames-sent counter
+  // PSRAM display (LAB-41/42): drive panels to render their locally-stored
+  // PSRAM frame(s) via the V2 panel-protocol command (header 0x02). Grouped
+  // here with the other display run-control / streaming commands.
+  DISPLAY_PSRAM_INDEX_CMD     = 0x3A,  // payload: uint16 LE index — show one PSRAM frame
+  PSRAM_PLAY_CMD              = 0x3B,  // payload: start(2) count(2) fps(2) LE — auto-advance
   GET_FILE_COUNT_CMD          = 0x80,  // returns pattern file count on SD as uint16 LE
   GET_PATTERN_FILENAME_CMD    = 0x82,  // [03 82 idx_lo idx_hi] 1-based; returns 1-byte-len + filename
   GET_PATTERN_FILE_CMD        = 0x84,  // [03 84 idx_lo idx_hi] 1-based; response: uint64 LE size, then raw bytes
@@ -41,11 +46,14 @@ enum ArenaCommands : uint8_t {
   GET_DIAG_OUTPUT_CMD         = 0xC4,  // returns current g_dbg_on state (0/1)
   SET_SPI_CLOCK_CMD           = 0xC5,  // [len=3,0xC5,lo,hi] uint16 LE MHz; echoes applied MHz
   GET_SPI_CLOCK_CMD           = 0xC6,  // returns current SPI clock as uint16 LE MHz
-  SET_FRAME_POSITION_CMD      = 0x70,  // Mode 3: host-commanded frame index
-  // V2 PSRAM display (LAB-41/42): drive panels to render their locally-stored
-  // PSRAM frame(s) via the V2 panel-protocol command (header 0x02).
-  DISPLAY_PSRAM_INDEX_CMD     = 0x71,  // payload: uint16 LE index — show one PSRAM frame
-  PSRAM_PLAY_CMD              = 0x72,  // payload: start(2) count(2) fps(2) LE — auto-advance
+  G6_PANEL_STORAGE_MODE_CMD   = 0xC7,  // reserved — not yet implemented; [02 C7 mode] 0=SD 1=local storage
+  G6_PROGRAM_PANEL_CMD        = 0xC8,  // reserved — not yet implemented; reflash a panel from /firmware on SD
+  // Frame-position block (G4-compatible X axis at 0x70; Y axis reserved for a
+  // future G6 version, mirroring G4 setPositionX/setPositionY at 0x70/0x71).
+  SET_FRAME_POSITION_CMD      = 0x70,  // Mode 3: host-commanded frame index (set-position-x; G4 setPositionX)
+  SET_POSITION_Y_CMD          = 0x71,  // reserved — not yet implemented (future set-position-y; G4 setPositionY)
+  GET_FRAME_POSITION_CMD      = 0x72,  // [01 72] returns cur_frame_index + frame_count (get-position-x), both uint16 LE
+  GET_POSITION_Y_CMD          = 0x73,  // reserved — not yet implemented (future get-position-y)
   ALL_ON_CMD                  = 0xFF,
 };
 

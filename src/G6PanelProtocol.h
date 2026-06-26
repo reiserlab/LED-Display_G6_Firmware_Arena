@@ -40,6 +40,15 @@ constexpr uint8_t cmd_disp_psram_triggered = 0x52;
 constexpr uint8_t cmd_disp_psram_gated     = 0x53;
 constexpr uint8_t cmd_disp_psram_duty_oneshot = 0x60;  // +duty; 0x61..0x63 follow modes
 
+// Every display-opcode family encodes the panel display mode in the low 2 bits:
+//   base+0 = oneshot, +1 = persist, +2 = triggered, +3 = gated.
+// `base` is the family's oneshot opcode (cmd_disp_2lvl_oneshot / _16lvl_oneshot /
+// _psram_oneshot). `mode` is the SET_PANEL_DISPLAY_MODE value (0-3); out-of-range
+// falls back to persist (1). This is the single point that maps mode → opcode.
+inline uint8_t disp_opcode_with_mode(uint8_t base, uint8_t mode) {
+  return base | (uint8_t)((mode < 4) ? mode : 1);
+}
+
 // V2 block sizes: header + cmd + 16-bit LE index [+ 1 duty byte].
 constexpr uint16_t block_byte_count_psram      = 4;
 constexpr uint16_t block_byte_count_psram_duty = 5;

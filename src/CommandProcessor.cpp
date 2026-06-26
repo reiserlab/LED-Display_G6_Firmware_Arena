@@ -83,6 +83,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
 
     case SET_REFRESH_RATE_CMD: {
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 16 hz_lo hz_hi]");
+        break;
+      }
       uint16_t rate;
       memcpy(&rate, buf + pos, sizeof(rate));
       if (rate > 0) {
@@ -152,6 +156,20 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       handleSetFramePosition(cmd);
       break;
 
+    case GET_FRAME_POSITION_CMD: {
+      // [01 72] → payload: cur_frame_index (uint16 LE), frame_count (uint16 LE).
+      // Reflects the live index in any pattern mode (2/3/4) and 0/0 when no
+      // pattern is open. Lets a host poll playback position and direction.
+      uint16_t idx = cur_frame_index_;
+      uint16_t n   = frame_count_;
+      uint8_t payload[4] = {
+          (uint8_t)(idx), (uint8_t)(idx >> 8),
+          (uint8_t)(n),   (uint8_t)(n >> 8),
+      };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      break;
+    }
+
     case DISPLAY_PSRAM_INDEX_CMD:
       handleDisplayPsramIndex(cmd);
       break;
@@ -185,8 +203,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case GET_PATTERN_FILENAME_CMD: {
-      if (claimed_len < 2) {
-        current_source_->sendResponse(command_byte, 1, "Missing index");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 82 idx_lo idx_hi]");
         break;
       }
       uint16_t idx;
@@ -245,8 +263,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
 
     case GET_PATTERN_FILE_CMD: {
       // [03 84 idx_lo idx_hi]  Response: [0x0A, 0, 0x84, size_b0..b7], then raw bytes.
-      if (claimed_len < 3) {
-        current_source_->sendResponse(command_byte, 1, "Missing index");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 84 idx_lo idx_hi]");
         break;
       }
       uint16_t idx;
@@ -298,8 +316,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
 
     case DELETE_PATTERN_FILE_CMD: {
       // [03 86 idx_lo idx_hi]
-      if (claimed_len < 3) {
-        current_source_->sendResponse(command_byte, 1, "Missing index");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 86 idx_lo idx_hi]");
         break;
       }
       uint16_t idx;
@@ -341,8 +359,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case SET_SPI_CLOCK_CMD: {
-      if (claimed_len < 2) {
-        current_source_->sendResponse(command_byte, 1, "Missing mhz arg");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 C5 mhz_lo mhz_hi]");
         break;
       }
       uint16_t mhz;
@@ -404,8 +422,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case SET_DIGITAL_OUT_CMD: {
-      if (claimed_len < 2) {
-        current_source_->sendResponse(command_byte, 1, "Missing args");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 AA channel state]");
         break;
       }
       uint8_t channel = buf[pos++];
@@ -430,8 +448,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case SET_AO_VOLTAGE_CMD: {
-      if (claimed_len < 2) {
-        current_source_->sendResponse(command_byte, 1, "Missing mv arg");
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 A0 mv_lo mv_hi]");
         break;
       }
       uint16_t mv;
@@ -717,12 +735,12 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// V2 PSRAM display (0x71 single index / 0x72 auto-advance play) — LAB-41/42.
+// V2 PSRAM display (0x3A single index / 0x3B auto-advance play) — LAB-41/42.
 //
 // The panel holds the frames in its own PSRAM (loaded locally for the demo).
 // We synthesize a frame of identical V2 "display PSRAM index N" blocks (one per
 // panel, all the same index → whole arena shows frame N) and let the refresh
-// timer retransmit it. 0x72 advances the index at frame_rate_hz_, exactly like
+// timer retransmit it. 0x3B advances the index at frame_rate_hz_, exactly like
 // the Mode-2 open-loop player but with no SD access.
 // ---------------------------------------------------------------------------
 
@@ -754,7 +772,8 @@ void CommandProcessor::handleDisplayPsramIndex(const ParsedCommand &cmd) {
   uint16_t index = (uint16_t)cmd.data[2] | ((uint16_t)cmd.data[3] << 8);
 
   spi_.disarmRefreshTimer();
-  psram_cmd_id_      = G6::cmd_disp_psram_persist;
+  psram_cmd_id_      = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
+                                                 panel_disp_mode_);
   psram_start_index_ = index;
   psram_play_count_  = 1;          // static single index
   psram_play_offset_ = 0;
@@ -780,7 +799,8 @@ void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
   if (count == 0) count = 1;
 
   spi_.disarmRefreshTimer();
-  psram_cmd_id_      = G6::cmd_disp_psram_persist;
+  psram_cmd_id_      = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
+                                                 panel_disp_mode_);
   psram_start_index_ = start;
   psram_play_count_  = count;
   psram_play_offset_ = 0;
@@ -1039,26 +1059,21 @@ void CommandProcessor::showError(uint8_t code) {
 // ---------------------------------------------------------------------------
 
 uint8_t CommandProcessor::dispOpcodeFor(bool gs16) const {
-  static const uint8_t tbl[2][4] = {
-    { G6::cmd_disp_2lvl_oneshot,   G6::cmd_disp_2lvl_persist,
-      G6::cmd_disp_2lvl_triggered, G6::cmd_disp_2lvl_gated   },
-    { G6::cmd_disp_16lvl_oneshot,  G6::cmd_disp_16lvl_persist,
-      G6::cmd_disp_16lvl_triggered, G6::cmd_disp_16lvl_gated },
-  };
-  uint8_t mode = (panel_disp_mode_ < 4) ? panel_disp_mode_ : 1;
-  return tbl[gs16 ? 1 : 0][mode];
+  uint8_t base = gs16 ? G6::cmd_disp_16lvl_oneshot : G6::cmd_disp_2lvl_oneshot;
+  return G6::disp_opcode_with_mode(base, panel_disp_mode_);
 }
 
 void CommandProcessor::patchDispMode() {
   if (block_byte_count_ == 0 || frame_byte_count_ <= stream_frame_prefix_byte_count) return;
-  bool gs16 = (block_byte_count_ == G6::block_byte_count_gs16);
-  uint8_t cmd = dispOpcodeFor(gs16);
   uint8_t *base = frame_buf_ + stream_frame_prefix_byte_count;
   uint16_t count = (uint16_t)((frame_byte_count_ - stream_frame_prefix_byte_count)
                                / block_byte_count_);
   for (uint16_t p = 0; p < count; ++p) {
     uint8_t *block = base + (uint32_t)p * block_byte_count_;
-    block[1] = cmd;
+    // Preserve the opcode family (high 6 bits — GS2 0x1x / GS16 0x3x / PSRAM
+    // 0x5x / 0x6x); rewrite only the mode in the low 2 bits. Works for any
+    // display block without assuming the grayscale level from block size.
+    block[1] = G6::disp_opcode_with_mode((uint8_t)(block[1] & 0xFC), panel_disp_mode_);
     G6::stamp_header_parity(block, block_byte_count_);
   }
 }

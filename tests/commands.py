@@ -15,6 +15,7 @@ STREAM_FRAME_CMD            = 0x32
 GET_FRAMES_SENT_CMD         = 0x33   # returns uint32 LE
 RESET_FRAMES_SENT_CMD       = 0x34
 SET_FRAME_POSITION_CMD      = 0x70
+GET_FRAME_POSITION_CMD      = 0x72   # [01 72] returns cur_frame_index + frame_count, both uint16 LE
 GET_FILE_COUNT_CMD          = 0x80   # returns uint16 LE
 GET_PATTERN_FILENAME_CMD    = 0x82
 SET_PATTERN_FILENAME_CMD    = 0x83

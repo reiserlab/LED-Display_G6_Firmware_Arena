@@ -12,6 +12,7 @@ from .commands import (
     GET_CONTROLLER_INFO_CMD,
     GET_DIAG_OUTPUT_CMD,
     GET_FILE_COUNT_CMD,
+    GET_FRAME_POSITION_CMD,
     GET_FRAMES_SENT_CMD,
     GET_REFRESH_RATE_CMD,
     GET_SPI_CLOCK_CMD,
@@ -111,6 +112,24 @@ def test_get_file_count(transport):
     assert st == 0
     assert echo == GET_FILE_COUNT_CMD
     assert len(payload) == 2
+
+
+def test_get_frame_position_shape(transport):
+    """get-frame-position returns a well-formed, self-consistent (idx, count).
+
+    Does not assume a fresh boot: the device persists state across runs and
+    ALL_OFF does not clear the open pattern, so we only assert the response
+    shape and that the index is within the reported frame count.
+    """
+    st, echo, payload, _ = transport.command(GET_FRAME_POSITION_CMD)
+    assert st == 0
+    assert echo == GET_FRAME_POSITION_CMD
+    assert len(payload) == 4
+    idx, count = struct.unpack("<HH", bytes(payload))
+    if count == 0:
+        assert idx == 0, f"count=0 but idx={idx}"
+    else:
+        assert idx < count, f"idx {idx} out of range for count {count}"
 
 
 def test_switch_grayscale_dropped(transport):
