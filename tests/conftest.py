@@ -94,3 +94,21 @@ def pat_data(pytestconfig):
         return None
     with open(path, "rb") as f:
         return f.read()
+
+
+@pytest.fixture(scope="session")
+def pat(transport, pat_data):
+    """Upload --pat to the SD card and return its 1-based pattern index.
+
+    Skips the test if --pat was not supplied.  Uploads once per session and
+    leaves the file on the SD card (named 'conftest.pat').
+    """
+    if pat_data is None:
+        pytest.skip("--pat not provided; pass a .pat file path to run this test")
+    st, _, _, _ = transport.upload_file(0, pat_data, timeout=120.0)
+    assert st == 0, "upload of --pat file failed"
+    st2, _, payload, _ = transport.rename_file(0, "conftest.pat")
+    assert st2 == 0, "rename of --pat file failed"
+    import struct
+    idx = struct.unpack_from("<H", bytes(payload[:2]))[0]
+    return idx

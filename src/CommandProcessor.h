@@ -46,6 +46,12 @@ class CommandProcessor {
   uint32_t refresh_rate_hz_  = AC::constants::refresh_rate_gs16_default;
   bool     refresh_rate_explicit_ = false;  // host set via SET_REFRESH_RATE
 
+  // Panel display mode: 0=oneshot, 1=persist (default), 2=triggered, 3=gated.
+  // Governs the DISP_* opcode stamped into every panel block the controller
+  // synthesises or patches (SD frames, streamed frames, ALL_ON).
+  // Error-glyph frames are exempt — they always use the opcode from buildErrorFrame.
+  uint8_t panel_disp_mode_ = 1;
+
   // Frame buffer holds the current frame (streamed, SD-loaded, all-on, or
   // error glyph) including the 4-byte prefix the SPI dispatcher skips.
   uint8_t frame_buf_[AC::constants::frame_buf_byte_count_max];
@@ -55,7 +61,7 @@ class CommandProcessor {
   uint16_t pattern_id_      = 0;   // 1-based; 0 = none open
   uint16_t frame_count_     = 0;   // frames in the open pattern
   uint16_t cur_frame_index_ = 0;   // 0-based
-  uint16_t frame_rate_hz_   = 0;   // frame-advance rate (Mode 2 base)
+  int16_t  frame_rate_hz_   = 0;   // frame-advance rate (Mode 2); negative = reverse
   int8_t   gain_            = 0;   // Mode 4 velocity scaling (10x fps/V)
   uint32_t last_advance_us_ = 0;   // Mode 2 frame-advance clock
   uint32_t last_sample_us_  = 0;   // Mode 4 AIN sample clock
@@ -104,7 +110,7 @@ class CommandProcessor {
   void enterAllOn();
   void enterStreamingFrame(uint16_t block_byte_count);
   bool enterPatternMode(ArenaState mode, uint16_t pattern_id,
-                        uint16_t frame_rate_hz, int8_t gain,
+                        int16_t frame_rate_hz, int8_t gain,
                         uint16_t init_frame);
   void showError(uint8_t code);
 
@@ -119,5 +125,7 @@ class CommandProcessor {
   void fillFrameBufferAllOn(uint16_t block_byte_count);
   void buildPsramFrame(uint16_t index);  // fill frame_buf_ with V2 index blocks
   uint32_t defaultRefreshFor(uint16_t block_byte_count) const;
-  bool applyAoLut(uint16_t idx);         // write ao_lut_[idx % ao_lut_len_] to DAC; false = I²C error
+  bool applyAoLut(uint16_t idx);          // write ao_lut_[idx % ao_lut_len_] to DAC; false = I²C error
+  uint8_t dispOpcodeFor(bool gs16) const; // pick DISP_* opcode for panel_disp_mode_ × gs level
+  void    patchDispMode();                // rewrite block[1]+parity in every panel block in frame_buf_
 };

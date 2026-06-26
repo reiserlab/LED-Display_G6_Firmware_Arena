@@ -11,13 +11,16 @@ namespace G6 {
 constexpr uint8_t header_version_v1                  = 0x01;  // parity 0
 constexpr uint8_t header_version_v1_with_parity_bit  = 0x81;  // parity 1
 
-// Display opcodes used by this build. Other v1 opcodes (Persistent / Triggered /
-// Gated, COMM_CHECK) are recognized passively when present in pre-formatted
-// host blocks; the controller does not synthesize them.
-constexpr uint8_t cmd_disp_2lvl_oneshot   = 0x10;
-constexpr uint8_t cmd_disp_2lvl_persist   = 0x11;
-constexpr uint8_t cmd_disp_16lvl_oneshot  = 0x30;
-constexpr uint8_t cmd_disp_16lvl_persist  = 0x31;
+// V1 display opcodes — all four panel display modes at both grayscale levels.
+// The active mode is selected by SET_PANEL_DISPLAY_MODE (0x1B); default = persist.
+constexpr uint8_t cmd_disp_2lvl_oneshot    = 0x10;
+constexpr uint8_t cmd_disp_2lvl_persist    = 0x11;
+constexpr uint8_t cmd_disp_2lvl_triggered  = 0x12;
+constexpr uint8_t cmd_disp_2lvl_gated      = 0x13;
+constexpr uint8_t cmd_disp_16lvl_oneshot   = 0x30;
+constexpr uint8_t cmd_disp_16lvl_persist   = 0x31;
+constexpr uint8_t cmd_disp_16lvl_triggered = 0x32;
+constexpr uint8_t cmd_disp_16lvl_gated     = 0x33;
 
 // Block sizes (header + cmd + pixel data + duty_cycle).
 constexpr uint16_t block_byte_count_gs2  = 53;
