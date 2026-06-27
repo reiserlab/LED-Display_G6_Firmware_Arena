@@ -214,7 +214,7 @@ bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len)
     // Panel is rebooting; the OTA stub copies the staged image into flash and boots.
     delay(kRebootWaitMs);
     snprintf(msg, msg_len, "panel %u flashed via OTA (%lu bytes); rebooting + applying update",
-             (unsigned)panel_index, (unsigned long)image_size);
+             (unsigned)(panel_index + 1), (unsigned long)image_size);  // report 1-based
     ok = true;
   } while (false);
 
@@ -279,7 +279,7 @@ bool IspController::verifyPanel(uint8_t panel_index, char *msg, size_t msg_len) 
     bool match = (status == 0);
     snprintf(msg, msg_len,
              "panel %u running-app CRC=0x%08lX expected=0x%08lX -> %s",
-             (unsigned)panel_index, (unsigned long)got, (unsigned long)image_crc32,
+             (unsigned)(panel_index + 1), (unsigned long)got, (unsigned long)image_crc32,  // 1-based
              match ? "MATCH (this firmware is installed)"
                    : "MISMATCH (a different firmware is running)");
     ok = match;

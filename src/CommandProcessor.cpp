@@ -1390,33 +1390,47 @@ void CommandProcessor::handleGetFirmwareInfo() {
 
 void CommandProcessor::handleProgramPanel(const ParsedCommand &cmd) {
   if (cmd.data_len < 3) {
-    current_source_->sendResponse(G6_PROGRAM_PANEL_CMD, 1, "Expected [02 C8 panel_index]");
+    current_source_->sendResponse(G6_PROGRAM_PANEL_CMD, 1, "Expected [02 C8 panel_number]");
     return;
   }
-  uint8_t panel_index = cmd.data[2];
-  DBG_PRINTF("[cmd] g6-program-panel idx=%u — starting ISP\n", (unsigned)panel_index);
+  // Payload is the 1-based panel NUMBER (matches the panel-map labels); the arena
+  // config is 0-based (panel_index = row*10 + col), so convert here.
+  uint8_t panel_number = cmd.data[2];
+  if (panel_number < 1) {
+    current_source_->sendResponse(G6_PROGRAM_PANEL_CMD, 1, "panel numbers are 1-based (1..N)");
+    return;
+  }
+  uint8_t panel_index = (uint8_t)(panel_number - 1);
+  DBG_PRINTF("[cmd] g6-program-panel panel=%u (idx=%u) — starting ISP\n",
+             (unsigned)panel_number, (unsigned)panel_index);
   char msg[160];  // room for a raw-CIPO hex dump on garbled-reply diagnostics
   bool ok = isp_.programPanel(panel_index, msg, sizeof(msg));
-  DBG_PRINTF("[cmd] g6-program-panel idx=%u %s: %s\n",
-             (unsigned)panel_index, ok ? "OK" : "FAIL", msg);
+  DBG_PRINTF("[cmd] g6-program-panel panel=%u %s: %s\n",
+             (unsigned)panel_number, ok ? "OK" : "FAIL", msg);
   current_source_->sendResponse(G6_PROGRAM_PANEL_CMD, ok ? 0 : 1, msg);
 }
 
 // ---------------------------------------------------------------------------
 // handleVerifyPanel — g6-verify-panel (0xC9): CRC the panel's RUNNING app flash
 // against /firmware/panel.bin (ISP_ENTER + ISP_VERIFY_CRC). Confirms an OTA took.
-// [0x02, 0xC9, panel_index]. Caller (the switch) has already required ALL_OFF.
+// [0x02, 0xC9, panel_number]. Caller (the switch) has already required ALL_OFF.
 // ---------------------------------------------------------------------------
 void CommandProcessor::handleVerifyPanel(const ParsedCommand &cmd) {
   if (cmd.data_len < 3) {
-    current_source_->sendResponse(G6_VERIFY_PANEL_CMD, 1, "Expected [02 C9 panel_index]");
+    current_source_->sendResponse(G6_VERIFY_PANEL_CMD, 1, "Expected [02 C9 panel_number]");
     return;
   }
-  uint8_t panel_index = cmd.data[2];
+  // 1-based panel number (matches the panel-map) → 0-based arena index.
+  uint8_t panel_number = cmd.data[2];
+  if (panel_number < 1) {
+    current_source_->sendResponse(G6_VERIFY_PANEL_CMD, 1, "panel numbers are 1-based (1..N)");
+    return;
+  }
+  uint8_t panel_index = (uint8_t)(panel_number - 1);
   char msg[160];
   bool ok = isp_.verifyPanel(panel_index, msg, sizeof(msg));
-  DBG_PRINTF("[cmd] g6-verify-panel idx=%u %s: %s\n",
-             (unsigned)panel_index, ok ? "MATCH" : "NOMATCH", msg);
+  DBG_PRINTF("[cmd] g6-verify-panel panel=%u %s: %s\n",
+             (unsigned)panel_number, ok ? "MATCH" : "NOMATCH", msg);
   current_source_->sendResponse(G6_VERIFY_PANEL_CMD, ok ? 0 : 1, msg);
 }
 
