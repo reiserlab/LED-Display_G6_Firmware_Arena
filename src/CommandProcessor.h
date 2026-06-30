@@ -4,6 +4,7 @@
 #include "SerialManager.h"
 #include "SpiManager.h"
 #include "SdManager.h"
+#include "IspController.h"
 #include "G6PanelProtocol.h"
 #include "commands.h"
 
@@ -33,6 +34,9 @@ class CommandProcessor {
   SerialManager  &serial_;
   SpiManager     &spi_;
   SdManager      &sd_;
+
+  // SPI in-system-programming driver for g6-program-panel (0xC8).
+  IspController   isp_{spi_};
 
   // Set by processCommand() to point at whichever MessageSource (net_ or
   // serial_) originated the command being handled. Handlers send their
@@ -103,6 +107,10 @@ class CommandProcessor {
   void handlePsramPlay(const ParsedCommand &cmd);
   void handleBulkWriteCommand(const ParsedCommand &cmd);
   void handleGetSdArchive();
+  void handleSetFirmwareFile(const ParsedCommand &cmd);  // set-firmware-file (0xE0)
+  void handleGetFirmwareInfo();                          // get-firmware-info (0xE3)
+  void handleProgramPanel(const ParsedCommand &cmd);     // g6-program-panel (0xC8) — SPI ISP
+  void handleVerifyPanel(const ParsedCommand &cmd);      // g6-verify-panel (0xC9) — CRC running app flash
   void drainBulkData(uint32_t remaining_bytes);
 
   // State transitions.
@@ -123,6 +131,7 @@ class CommandProcessor {
 
   // Helpers.
   void fillFrameBufferAllOn(uint16_t block_byte_count);
+  void fillFrameBufferDark();             // all-pixels-off Persistent frame (for all-off/stop)
   void buildPsramFrame(uint16_t index);  // fill frame_buf_ with V2 index blocks
   uint32_t defaultRefreshFor(uint16_t block_byte_count) const;
   bool applyAoLut(uint16_t idx);          // write ao_lut_[idx % ao_lut_len_] to DAC; false = I²C error

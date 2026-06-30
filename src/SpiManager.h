@@ -18,6 +18,17 @@ class SpiManager {
   // duty_cycle. block_byte_count selects GS2 (53) vs GS16 (203).
   void transferFrame(const uint8_t *frame_buf, uint16_t block_byte_count);
 
+  // Single-panel ISP transaction (g6-program-panel / 0xC8). Asserts ONLY the
+  // target panel's CS, clocks `len` bytes full-duplex on that panel's bus, and
+  // captures the CIPO return into `cipo` (may be nullptr to ignore the reply).
+  // Uses a blocking full-duplex transfer — NOT the async-DMA path — because the
+  // DMA write into a RAM buffer isn't CPU-coherent on Teensy 4 (see
+  // transferPanelSet). Returns false if `panel_index` isn't in the arena map.
+  // Run ISP at a conservative clock (≤18 MHz) so the CIPO return path doesn't
+  // need the high-clock 1-bit realign.
+  bool transferSinglePanel(uint8_t panel_index, const uint8_t *copi,
+                           uint8_t *cipo, size_t len);
+
   // Display refresh timer — fires refreshFlag from ISR; main loop drains.
   void armRefreshTimer(uint32_t frequency_hz);
   void disarmRefreshTimer();

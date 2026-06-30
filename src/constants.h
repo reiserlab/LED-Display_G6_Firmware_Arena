@@ -158,6 +158,13 @@ constexpr char     pattern_dir[]                    = "/patterns";
 constexpr char     pattern_temp_name[]              = "pattern.temp";  // staging file in /patterns
 constexpr char     manifest_bin_path[]              = "/MANIFEST.bin";
 constexpr char     manifest_txt_path[]              = "/MANIFEST.txt";
+
+// Panel firmware image for SPI in-system programming (g6_03 § Panel firmware
+// update). A single image is held at a time; the trailing 32-byte footer is
+// {magic[8], version[16], image_crc32(u32 LE), image_size(u32 LE)}.
+constexpr char     firmware_dir[]                   = "/firmware";
+constexpr char     firmware_path[]                  = "/firmware/panel.bin";
+constexpr uint8_t  firmware_footer_byte_count       = 32;
 constexpr uint16_t pattern_max_count                = 256;   // listing capacity
 constexpr uint8_t  pattern_name_byte_count          = 64;    // incl. NUL
 constexpr uint8_t  pattern_header_byte_count        = 18;

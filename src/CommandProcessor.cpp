@@ -352,6 +352,28 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       handleGetSdArchive();
       break;
 
+    case GET_FIRMWARE_INFO_CMD:
+      handleGetFirmwareInfo();
+      break;
+
+    case G6_PROGRAM_PANEL_CMD:
+      if (state_ != ArenaState::ALL_OFF) {
+        current_source_->sendResponse(command_byte, CE_DISPLAY_ACTIVE,
+                                      "Stop display before flashing a panel");
+        break;
+      }
+      handleProgramPanel(cmd);
+      break;
+
+    case G6_VERIFY_PANEL_CMD:
+      if (state_ != ArenaState::ALL_OFF) {
+        current_source_->sendResponse(command_byte, CE_DISPLAY_ACTIVE,
+                                      "Stop display before verifying a panel");
+        break;
+      }
+      handleVerifyPanel(cmd);
+      break;
+
     case GET_DIAG_OUTPUT_CMD: {
       uint8_t val = g_dbg_on ? 1 : 0;
       current_source_->sendResponse(command_byte, 0, &val, 1);
@@ -974,6 +996,14 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
 
 void CommandProcessor::enterAllOff() {
   spi_.disarmRefreshTimer();
+  // Panels run in Persistent mode and HOLD their last received frame, so simply
+  // stopping transmission leaves them lit. Push an all-dark frame so they
+  // actually blank, then go quiet. Sent a few times for reliability on the
+  // shared (wired-OR CIPO) bus; one dropped frame would otherwise stay lit.
+  fillFrameBufferDark();
+  for (uint8_t i = 0; i < 3; ++i) {
+    spi_.transferFrame(frame_buf_, block_byte_count_);
+  }
   state_ = ArenaState::ALL_OFF;
   frame_byte_count_ = 0;
 }
@@ -1132,11 +1162,38 @@ void CommandProcessor::fillFrameBufferAllOn(uint16_t block_byte_count) {
                                  + panel_count_per_frame * block_byte_count);
 }
 
+void CommandProcessor::fillFrameBufferDark() {
+  // GS2 Persistent frame, all pixels + duty_cycle = 0 → panels scan dark and
+  // HOLD dark after transmission stops. A fixed Persistent opcode (not
+  // panel_disp_mode_) guarantees blanking even from Triggered/Gated modes,
+  // mirroring how the error-glyph path uses a mode-independent opcode.
+  memset(frame_buf_, 0, sizeof(frame_buf_));
+  frame_buf_[0] = 'F';
+  frame_buf_[1] = 'R';
+
+  const uint16_t blk = G6::block_byte_count_gs2;
+  for (uint8_t p = 0; p < panel_count_per_frame; ++p) {
+    uint8_t *block = frame_buf_ + stream_frame_prefix_byte_count
+                     + (uint32_t)p * blk;
+    block[0] = G6::header_version_v1;          // parity stamped below
+    block[1] = G6::cmd_disp_2lvl_persist;      // 0x11 — Persistent, holds dark
+    // pixel bytes + duty_cycle remain 0 from the memset above.
+    G6::stamp_header_parity(block, blk);
+  }
+  block_byte_count_ = blk;
+  frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
+                                 + panel_count_per_frame * blk);
+}
+
 // ---------------------------------------------------------------------------
 // handleBulkWriteCommand — set-pattern-file (0x85)
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
+  if (cmd.cmd == SET_FIRMWARE_FILE_CMD) {
+    handleSetFirmwareFile(cmd);
+    return;
+  }
   if (cmd.cmd != SET_PATTERN_FILE_CMD) {
     drainBulkData(cmd.bulk_payload_len);
     current_source_->sendResponse(cmd.cmd, 1, "Unknown bulk command");
@@ -1221,6 +1278,160 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
              (unsigned)idx, (unsigned long)total_len,
              (unsigned long)elapsed_ms, (unsigned long)kbps, path);
   current_source_->sendResponse(SET_PATTERN_FILE_CMD, 0, "");
+}
+
+// ---------------------------------------------------------------------------
+// handleSetFirmwareFile — set-firmware-file (0xE0)
+// ---------------------------------------------------------------------------
+// Streams the uploaded panel firmware image to /firmware/panel.bin (single
+// image, no index) and replies with the uint32 LE CRC-32 of the stored bytes
+// so the host can confirm the upload before issuing g6-program-panel.
+
+void CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
+  uint32_t total_len = cmd.bulk_payload_len;
+
+  if (state_ != ArenaState::ALL_OFF) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, CE_DISPLAY_ACTIVE,
+                                  "Stop display before writing to SD");
+    return;
+  }
+
+  SD.mkdir(AC::constants::firmware_dir);
+  SD.remove(AC::constants::firmware_path);
+  File f = SD.open(AC::constants::firmware_path, FILE_WRITE);
+  if (!f) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 1, "SD open failed");
+    return;
+  }
+
+  static constexpr size_t CHUNK = 4096;
+  static uint8_t chunk[CHUNK];
+  uint32_t remaining = total_len;
+  uint32_t crc       = 0xFFFFFFFFu;  // CRC-32/ISO-HDLC running state
+  uint32_t t_idle    = millis();
+  uint32_t t_start   = millis();
+  bool ok            = true;
+  const char *fail_msg = "Upload timeout";
+
+  while (remaining > 0) {
+    size_t want = (remaining < CHUNK) ? (size_t)remaining : CHUNK;
+    size_t got  = current_source_->readBulkBytes(chunk, want);
+    if (got > 0) {
+      size_t written = f.write(chunk, got);
+      if (written != got) {
+        fail_msg = "SD write error (card full?)";
+        ok = false;
+        break;
+      }
+      crc = G6::crc32_update(crc, chunk, got);
+      remaining -= (uint32_t)got;
+      t_idle = millis();
+    } else {
+      if ((uint32_t)(millis() - t_idle) > 30000U) { ok = false; break; }
+      yield();
+    }
+  }
+
+  uint32_t elapsed_ms = millis() - t_start;
+  f.close();
+  if (!ok) {
+    SD.remove(AC::constants::firmware_path);
+    current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 1, fail_msg);
+    return;
+  }
+
+  crc ^= 0xFFFFFFFFu;  // CRC-32 final XOR
+  uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(total_len / elapsed_ms) : 0;
+  DBG_PRINTF("[cmd] set-firmware-file wrote %lu bytes in %lu ms (%lu kB/s) crc=0x%08lX\n",
+             (unsigned long)total_len, (unsigned long)elapsed_ms,
+             (unsigned long)kbps, (unsigned long)crc);
+  uint8_t crc_buf[4];
+  memcpy(crc_buf, &crc, sizeof(crc));  // uint32 LE
+  current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 0, crc_buf, sizeof(crc_buf));
+}
+
+// ---------------------------------------------------------------------------
+// handleGetFirmwareInfo — get-firmware-info (0xE3)
+// ---------------------------------------------------------------------------
+// Replies with the 32-byte footer at the end of /firmware/panel.bin:
+//   {magic[8], version[16], image_crc32(u32 LE), image_size(u32 LE)}.
+
+void CommandProcessor::handleGetFirmwareInfo() {
+  File f = SD.open(AC::constants::firmware_path, FILE_READ);
+  if (!f) {
+    current_source_->sendResponse(GET_FIRMWARE_INFO_CMD, 1, "No firmware image present");
+    return;
+  }
+  uint32_t sz = (uint32_t)f.size();
+  constexpr uint8_t FOOT = AC::constants::firmware_footer_byte_count;
+  if (sz < FOOT) {
+    f.close();
+    current_source_->sendResponse(GET_FIRMWARE_INFO_CMD, 1, "Firmware image too small");
+    return;
+  }
+  uint8_t footer[FOOT];
+  f.seek(sz - FOOT);
+  size_t n = f.read(footer, FOOT);
+  f.close();
+  if (n != (size_t)FOOT) {
+    current_source_->sendResponse(GET_FIRMWARE_INFO_CMD, 1, "Footer read failed");
+    return;
+  }
+  current_source_->sendResponse(GET_FIRMWARE_INFO_CMD, 0, footer, FOOT);
+}
+
+// ---------------------------------------------------------------------------
+// handleProgramPanel — g6-program-panel (0xC8): reflash one panel over SPI ISP
+// ---------------------------------------------------------------------------
+// [0x02, 0xC8, panel_index]. Caller (the switch) has already required ALL_OFF.
+// Blocks for several seconds while the panel stages → commits → reboots.
+
+void CommandProcessor::handleProgramPanel(const ParsedCommand &cmd) {
+  if (cmd.data_len < 3) {
+    current_source_->sendResponse(G6_PROGRAM_PANEL_CMD, 1, "Expected [02 C8 panel_number]");
+    return;
+  }
+  // Payload is the 1-based panel NUMBER (matches the panel-map labels); the arena
+  // config is 0-based (panel_index = row*10 + col), so convert here.
+  uint8_t panel_number = cmd.data[2];
+  if (panel_number < 1) {
+    current_source_->sendResponse(G6_PROGRAM_PANEL_CMD, 1, "panel numbers are 1-based (1..N)");
+    return;
+  }
+  uint8_t panel_index = (uint8_t)(panel_number - 1);
+  DBG_PRINTF("[cmd] g6-program-panel panel=%u (idx=%u) — starting ISP\n",
+             (unsigned)panel_number, (unsigned)panel_index);
+  char msg[160];  // room for a raw-CIPO hex dump on garbled-reply diagnostics
+  bool ok = isp_.programPanel(panel_index, msg, sizeof(msg));
+  DBG_PRINTF("[cmd] g6-program-panel panel=%u %s: %s\n",
+             (unsigned)panel_number, ok ? "OK" : "FAIL", msg);
+  current_source_->sendResponse(G6_PROGRAM_PANEL_CMD, ok ? 0 : 1, msg);
+}
+
+// ---------------------------------------------------------------------------
+// handleVerifyPanel — g6-verify-panel (0xC9): CRC the panel's RUNNING app flash
+// against /firmware/panel.bin (ISP_ENTER + ISP_VERIFY_CRC). Confirms an OTA took.
+// [0x02, 0xC9, panel_number]. Caller (the switch) has already required ALL_OFF.
+// ---------------------------------------------------------------------------
+void CommandProcessor::handleVerifyPanel(const ParsedCommand &cmd) {
+  if (cmd.data_len < 3) {
+    current_source_->sendResponse(G6_VERIFY_PANEL_CMD, 1, "Expected [02 C9 panel_number]");
+    return;
+  }
+  // 1-based panel number (matches the panel-map) → 0-based arena index.
+  uint8_t panel_number = cmd.data[2];
+  if (panel_number < 1) {
+    current_source_->sendResponse(G6_VERIFY_PANEL_CMD, 1, "panel numbers are 1-based (1..N)");
+    return;
+  }
+  uint8_t panel_index = (uint8_t)(panel_number - 1);
+  char msg[160];
+  bool ok = isp_.verifyPanel(panel_index, msg, sizeof(msg));
+  DBG_PRINTF("[cmd] g6-verify-panel panel=%u %s: %s\n",
+             (unsigned)panel_number, ok ? "MATCH" : "NOMATCH", msg);
+  current_source_->sendResponse(G6_VERIFY_PANEL_CMD, ok ? 0 : 1, msg);
 }
 
 void CommandProcessor::drainBulkData(uint32_t remaining) {

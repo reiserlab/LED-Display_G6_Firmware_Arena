@@ -138,6 +138,36 @@ static inline void realignCipo(const uint8_t *raw, uint8_t *out,
 }
 #endif
 
+bool SpiManager::transferSinglePanel(uint8_t panel_index, const uint8_t *copi,
+                                     uint8_t *cipo, size_t len) {
+  // Map panel_index -> (panel set, bus). Each CS gates one panel on each bus;
+  // clocking only the target panel's bus leaves the bus-paired panel idle
+  // (it sees CS low but no SCK on its own bus, so it ingests nothing).
+  int set = -1;
+  uint8_t bus = 0;
+  for (uint8_t i = 0; i < panel_set_count; ++i) {
+    if (panel_sets[i].panel_b0 == panel_index) { set = i; bus = 0; break; }
+    if (panel_sets[i].panel_b1 == panel_index) { set = i; bus = 1; break; }
+  }
+  if (set < 0) return false;
+
+  SPIClass *region = region_spi_[bus];
+  const uint8_t cs = panel_sets[set].cs_pin;
+
+  SPISettings settings(spi_clock_hz_, spi_bit_order, spi_data_mode);
+  region->beginTransaction(settings);
+  digitalWriteFast(cs, LOW);
+  delayNanoseconds(cs_setup_delay_ns_);
+  // Blocking full-duplex: copi clocked out, cipo captured in lock-step. The
+  // Teensy 3-arg transfer takes a non-const tx buffer (it only reads it when a
+  // retbuf is supplied) — const_cast as transferPanelSet does.
+  region->transfer(const_cast<uint8_t *>(copi), cipo, len);
+  delayNanoseconds(cs_hold_delay_ns_);
+  digitalWriteFast(cs, HIGH);
+  region->endTransaction();
+  return true;
+}
+
 void SpiManager::transferFrame(const uint8_t *frame_buf,
                                uint16_t block_byte_count) {
   if (frame_buf == nullptr) return;

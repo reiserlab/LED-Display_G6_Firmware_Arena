@@ -126,6 +126,25 @@ void NetworkManager::parseIncoming() {
     cmd_ready_ = true;
     DBG_PRINTF("[net] parsed bulk set-pattern-file idx=%u len=%lu\n",
                (unsigned)idx, (unsigned long)len_lo);
+  } else if (first_byte == AC::SET_FIRMWARE_FILE_CMD) {
+    // [0xE0, len_b0..b7, file_data...] — single firmware image, no index.
+    static constexpr size_t FW_BULK_HDR = 9;
+    if (rx_len_ < FW_BULK_HDR) return;
+
+    uint32_t len_lo;
+    memcpy(&len_lo, rx_buf_ + 1, sizeof(len_lo));  // lower 32 bits; upper 32 ignored
+
+    parsed_cmd_.cmd              = AC::SET_FIRMWARE_FILE_CMD;
+    parsed_cmd_.is_stream        = false;
+    parsed_cmd_.is_bulk          = true;
+    parsed_cmd_.bulk_payload_len = len_lo;
+    parsed_cmd_.data_len         = (uint16_t)FW_BULK_HDR;
+    memcpy(parsed_cmd_.data, rx_buf_, FW_BULK_HDR);
+
+    memmove(rx_buf_, rx_buf_ + FW_BULK_HDR, rx_len_ - FW_BULK_HDR);
+    rx_len_ -= FW_BULK_HDR;
+    cmd_ready_ = true;
+    DBG_PRINTF("[net] parsed bulk set-firmware-file len=%lu\n", (unsigned long)len_lo);
   } else if (first_byte == AC::SET_PATTERN_FILENAME_CMD) {
     // Opcode-first framing: [0x83, idx_lo, idx_hi, name_len, chars…]
     // The standard binary framing can't carry this command for filenames > 45 chars
