@@ -10,6 +10,7 @@ Upload/download flow:
   4. command(DELETE_PATTERN_FILE, pack("<H", 1)) → removes by 1-based index
 """
 
+import os
 import struct
 import pytest
 
@@ -140,19 +141,29 @@ def test_download_out_of_range_errors(transport):
 # This uses a payload well above the ~80 KB threshold where that bug appears:
 #   buggy firmware → the download stalls/breaks → this FAILS (timeout / short read)
 #   fixed firmware → bytes return byte-for-byte   → this PASSES
-LARGE_SIZE = 200 * 1024  # 200 KB, comfortably above the ~80 KB crash threshold
+# Sized ABOVE the largest file that failed in the field (813 KB) so the test covers the
+# regime that actually broke — not a comfortable mid-size. Crank it to stress harder:
+#   HIL_BULK_SIZE=2097152 pixi run test-serial -- --port /dev/... -k large_bulk_roundtrip
+LARGE_SIZE = int(os.environ.get("HIL_BULK_SIZE", 1024 * 1024))  # default 1 MB
 LARGE_DATA = (bytes(range(256)) * ((LARGE_SIZE + 255) // 256))[:LARGE_SIZE]
 LARGE_NAME = "hil_large.pat"
 
 
 def test_large_bulk_roundtrip(transport):
-    """Upload + download a 200 KB pattern and verify byte-for-byte integrity."""
-    st, _, _, _ = transport.upload_file(0, LARGE_DATA, timeout=60.0)
+    """Upload + download a large (default 1 MB) pattern; verify byte-for-byte.
+
+    Timeouts are generous on purpose: the 0x85 upload *throughput* (~tens of kB/s,
+    SD-write bound) is NOT part of this fix — only the 0x84 download crash and the
+    upload's clean-abort (drain) are. A raw-serial upload still completes (it has no
+    browser coalescing/backpressure, which is what timed out big *console* uploads);
+    it's just slow. The load-bearing assertion is the DOWNLOAD round-tripping intact.
+    """
+    st, _, _, _ = transport.upload_file(0, LARGE_DATA, timeout=180.0)
     assert st == 0, f"large upload (0x85) failed: status={st}"
     st, _, payload, _ = transport.rename_file(0, LARGE_NAME)
     assert st == 0
     idx = struct.unpack("<H", payload)[0]
-    st, echo, data, _ = transport.download_file(idx, timeout=60.0)
+    st, echo, data, _ = transport.download_file(idx, timeout=120.0)
     assert st == 0, f"large download (0x84) failed: status={st}"
     assert echo == GET_PATTERN_FILE_CMD
     assert len(data) == LARGE_SIZE, f"short download: {len(data)}/{LARGE_SIZE} bytes"
