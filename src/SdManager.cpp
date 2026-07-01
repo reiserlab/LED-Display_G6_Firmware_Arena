@@ -346,6 +346,74 @@ uint8_t SdManager::readFrame(uint16_t frame_index, uint8_t *dest,
   return CE_NONE;
 }
 
+uint8_t SdManager::readPatternInfo(uint16_t pattern_id, PatternMeta &out) {
+  if (!mounted_) return CE_SD_NOT_PRESENT;
+  if (pattern_id == 0 || pattern_id > pattern_count_) return CE_BAD_PARAM;
+
+  char path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
+  snprintf(path, sizeof(path), "%s/%s", pattern_dir, names_[pattern_id - 1]);
+
+  // Separate File handle: a metadata read must not reposition or close the
+  // display's file_ (a running Mode 2/3/4 pattern seeks into it per frame).
+  File f = SD.open(path, FILE_READ);
+  if (!f) {
+    DBG_PRINTF("[sd] info open failed: %s\n", path);
+    return CE_SD_FILE_ERROR;
+  }
+
+  uint8_t hdr[pattern_header_byte_count];
+  if (f.read(hdr, pattern_header_byte_count) != pattern_header_byte_count) {
+    f.close();
+    return CE_SD_FILE_ERROR;
+  }
+
+  // Self-contained header validation (does NOT call validateHeader(), which
+  // mutates info_ and enforces the arena-match this controller is wired for).
+  // Magic "G6PT" + format version (high nibble of byte 4) + CRC-8/AUTOSAR.
+  if (hdr[0] != 'G' || hdr[1] != '6' || hdr[2] != 'P' || hdr[3] != 'T' ||
+      ((hdr[4] >> 4) & 0x0F) != pattern_format_version ||
+      G6::crc8_autosar(hdr, pattern_header_byte_count - 1) !=
+          hdr[pattern_header_byte_count - 1]) {
+    f.close();
+    return CE_HEADER_CRC;
+  }
+
+  uint8_t gs = hdr[10];
+  if (gs != 1 && gs != 2) { f.close(); return CE_HEADER_CRC; }
+
+  out.frame_count = le16(hdr + 6);
+  out.gs_val      = gs;
+  out.rows        = hdr[8];
+  out.cols        = hdr[9];
+  // V2 header packing (g6_04-pattern-file-format.md):
+  //   byte 4 bits 3-0 = arena_id high 4 bits; byte 5 bits 7-6 = arena_id low 2
+  //   bits; byte 5 bits 5-0 = observer_id (both are 6-bit fields).
+  out.arena_id    = (uint8_t)(((hdr[4] & 0x0F) << 2) | (hdr[5] >> 6));
+  out.observer_id = (uint8_t)(hdr[5] & 0x3F);
+  out.file_size   = (uint32_t)f.size();
+
+  // stretch = last byte of frame 0's panel-0 block (per-panel/per-frame value;
+  // we report frame 0, panel 0). Offset = header + "FR"+index prefix + block-1.
+  uint16_t block_size = (gs == 1) ? panel_block_byte_count_gs2
+                                  : panel_block_byte_count_gs16;
+  uint32_t stretch_off = (uint32_t)pattern_header_byte_count
+                         + pattern_frame_prefix_byte_count
+                         + block_size - 1;
+  if (out.file_size <= stretch_off || !f.seek(stretch_off) ||
+      f.read(&out.stretch, 1) != 1) {
+    f.close();
+    return CE_SD_FILE_ERROR;
+  }
+
+  f.close();
+  DBG_PRINTF("[sd] info id=%u %s frames=%u gs=%u %ux%u arena=%u obs=%u size=%lu stretch=%u\n",
+             (unsigned)pattern_id, path, (unsigned)out.frame_count,
+             (unsigned)out.gs_val, (unsigned)out.rows, (unsigned)out.cols,
+             (unsigned)out.arena_id, (unsigned)out.observer_id,
+             (unsigned long)out.file_size, (unsigned)out.stretch);
+  return CE_NONE;
+}
+
 // ---------------------------------------------------------------------------
 // Manifest and in-memory list helpers
 // ---------------------------------------------------------------------------

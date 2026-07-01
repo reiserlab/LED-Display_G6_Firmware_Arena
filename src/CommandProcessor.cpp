@@ -223,6 +223,37 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
     }
 
+    case GET_PATTERN_INFO_CMD: {
+      // [03 88 idx_lo idx_hi] — cheap pattern metadata for preview (no bulk
+      // download, no ALL_OFF). Framed reply: 12-byte little-endian payload
+      //   frame_count u16 · gs u8 · rows u8 · cols u8 · arena u8 · observer u8
+      //   · file_size u32 · stretch u8
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 88 idx_lo idx_hi]");
+        break;
+      }
+      uint16_t idx;
+      memcpy(&idx, buf + pos, sizeof(idx));
+      SdManager::PatternMeta m;
+      uint8_t err = sd_.readPatternInfo(idx, m);
+      if (err != CE_NONE) {
+        current_source_->sendResponse(command_byte, err, "pattern info read failed");
+        break;
+      }
+      uint8_t payload[12];
+      payload[0] = (uint8_t)(m.frame_count);
+      payload[1] = (uint8_t)(m.frame_count >> 8);
+      payload[2] = m.gs_val;
+      payload[3] = m.rows;
+      payload[4] = m.cols;
+      payload[5] = m.arena_id;
+      payload[6] = m.observer_id;
+      memcpy(payload + 7, &m.file_size, sizeof(m.file_size));  // u32 LE
+      payload[11] = m.stretch;
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      break;
+    }
+
     case SET_PATTERN_FILENAME_CMD: {
       // [len, 0x83, idx_lo, idx_hi, name_len, char0..charN]
       if (claimed_len < 4) {
