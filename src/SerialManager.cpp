@@ -192,7 +192,20 @@ void SerialManager::sendRaw(const uint8_t* buf, size_t len) {
   // Spin-wait up to 5 s in case the TX buffer is momentarily full.
   uint32_t deadline = millis() + 5000UL;
   while (resp_len_ > 0 && millis() < deadline) flushResponses();
-  if (buf && len > 0) Serial.write(buf, len);
+  if (!buf || len == 0) return;
+  // Pace the bulk body to the USB-CDC TX FIFO. A single Serial.write() larger than
+  // availableForWrite() blocks inside loop() until the host drains, which starves the
+  // USB service and can trip the CDC transmit watchdog on big files (the host then sees
+  // a "Break"). Chunk to the free FIFO space and yield() between writes, mirroring the
+  // framed flushResponses() discipline.
+  size_t off = 0;
+  while (off < len) {
+    int room = Serial.availableForWrite();
+    if (room <= 0) { yield(); continue; }
+    size_t n = ((size_t)room < (len - off)) ? (size_t)room : (len - off);
+    Serial.write(buf + off, n);
+    off += n;
+  }
 }
 
 void SerialManager::sendResponse(uint8_t cmd_echo, uint8_t status,

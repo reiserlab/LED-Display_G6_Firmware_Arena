@@ -10,6 +10,7 @@ Upload/download flow:
   4. command(DELETE_PATTERN_FILE, pack("<H", 1)) → removes by 1-based index
 """
 
+import os
 import struct
 import pytest
 
@@ -130,6 +131,53 @@ def test_download_out_of_range_errors(transport):
     st, echo, _, _ = transport.download_file(99)
     assert st != 0
     assert echo == GET_PATTERN_FILE_CMD
+
+
+# ── Bulk-transfer size sweep (happy-path regression guard) ───────────────────
+#
+# Round-trips a range of sizes and checks byte-for-byte integrity — a guard against
+# a regression that breaks large SD bulk transfers over serial.
+#
+# IMPORTANT: this does NOT reproduce the pre-fix "Break" crash. That crash needs the
+# host READER to stall so the controller's USB TX FIFO backs up (the condition that
+# tripped the old blocking Serial.write). This test's reader drains continuously and
+# the OS buffers the CDC stream, so the FIFO never backs up — the sweep PASSES on both
+# buggy and fixed firmware (verified 2026-07-01). The crash reproduces in the browser
+# (its read loop stalls under render/blob-save load), not over fast raw serial. Treat
+# this as "large transfers still work", not "the crash is fixed" — the latter rests on
+# the code review + the browser before/after.
+#
+# The 0x85 upload is SD-write bound (slow) but completes over raw serial — hence the
+# generous timeouts. Big *console* upload throttling is a separate browser issue.
+#
+# Default sweep runs to 2 MB. Override (comma-separated bytes):
+#   HIL_BULK_SIZES="32768,65536,131072,262144" pixi run test-serial -- --port /dev/... -k bulk_roundtrip
+_DEFAULT_SIZES = [64 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024, 2 * 1024 * 1024]
+BULK_SWEEP_SIZES = (
+    [int(x) for x in os.environ["HIL_BULK_SIZES"].split(",")]
+    if os.environ.get("HIL_BULK_SIZES")
+    else _DEFAULT_SIZES
+)
+
+
+@pytest.mark.parametrize("size", BULK_SWEEP_SIZES, ids=lambda s: f"{s // 1024}KB")
+def test_bulk_roundtrip(transport, size):
+    """Upload + download `size` bytes over the wire and verify byte-for-byte.
+
+    Run the set (-k bulk_roundtrip) to sweep and see where (if anywhere) it breaks;
+    run one size with e.g. -k "bulk_roundtrip and 1024KB".
+    """
+    data = (bytes(range(256)) * ((size + 255) // 256))[:size]
+    st, _, _, _ = transport.upload_file(0, data, timeout=240.0)
+    assert st == 0, f"upload (0x85) failed at {size} B: status={st}"
+    st, _, payload, _ = transport.rename_file(0, f"hil_{size}.pat")
+    assert st == 0
+    idx = struct.unpack("<H", payload)[0]
+    st, echo, got, _ = transport.download_file(idx, timeout=240.0)
+    assert st == 0, f"download (0x84) failed at {size} B: status={st}"
+    assert echo == GET_PATTERN_FILE_CMD
+    assert len(got) == size, f"short download at {size} B: {len(got)}/{size} bytes"
+    assert got == data, f"corrupt download at {size} B"
 
 
 # ── Delete (DELETE_PATTERN_FILE 0x86) ───────────────────────────────────────
