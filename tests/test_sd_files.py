@@ -132,6 +132,33 @@ def test_download_out_of_range_errors(transport):
     assert echo == GET_PATTERN_FILE_CMD
 
 
+# ── Large-payload bulk roundtrip (regression guard for the 0x84/0x85 bulk bug) ─
+#
+# The 512-byte TEST_DATA roundtrip above never fills the USB-CDC TX FIFO, so it
+# passed even on firmware where GET_PATTERN_FILE (0x84) crashed the link ("Break")
+# streaming a large file (blocking Serial.write with no availableForWrite()/yield()).
+# This uses a payload well above the ~80 KB threshold where that bug appears:
+#   buggy firmware → the download stalls/breaks → this FAILS (timeout / short read)
+#   fixed firmware → bytes return byte-for-byte   → this PASSES
+LARGE_SIZE = 200 * 1024  # 200 KB, comfortably above the ~80 KB crash threshold
+LARGE_DATA = (bytes(range(256)) * ((LARGE_SIZE + 255) // 256))[:LARGE_SIZE]
+LARGE_NAME = "hil_large.pat"
+
+
+def test_large_bulk_roundtrip(transport):
+    """Upload + download a 200 KB pattern and verify byte-for-byte integrity."""
+    st, _, _, _ = transport.upload_file(0, LARGE_DATA, timeout=60.0)
+    assert st == 0, f"large upload (0x85) failed: status={st}"
+    st, _, payload, _ = transport.rename_file(0, LARGE_NAME)
+    assert st == 0
+    idx = struct.unpack("<H", payload)[0]
+    st, echo, data, _ = transport.download_file(idx, timeout=60.0)
+    assert st == 0, f"large download (0x84) failed: status={st}"
+    assert echo == GET_PATTERN_FILE_CMD
+    assert len(data) == LARGE_SIZE, f"short download: {len(data)}/{LARGE_SIZE} bytes"
+    assert data == LARGE_DATA, "downloaded bytes differ from uploaded"
+
+
 # ── Delete (DELETE_PATTERN_FILE 0x86) ───────────────────────────────────────
 
 def test_delete_permanent_file(transport):
