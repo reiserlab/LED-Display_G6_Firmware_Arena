@@ -133,23 +133,24 @@ def test_download_out_of_range_errors(transport):
     assert echo == GET_PATTERN_FILE_CMD
 
 
-# ── Bulk-transfer size sweep (regression guard + characterization) ───────────
+# ── Bulk-transfer size sweep (happy-path regression guard) ───────────────────
 #
-# The 512-byte TEST_DATA roundtrip above never fills the USB-CDC TX FIFO, so it
-# passed even on firmware where GET_PATTERN_FILE (0x84) crashed the link ("Break")
-# streaming a large file (blocking Serial.write with no availableForWrite()/yield()).
-# Sweeping a RANGE of sizes finds *where* it breaks, not just one point:
-#   buggy firmware → download breaks above ~80 KB: the first oversized case FAILS,
-#                    then later cases cascade (the crash drops the USB session)
-#   fixed firmware → every size round-trips byte-for-byte → all PASS
+# Round-trips a range of sizes and checks byte-for-byte integrity — a guard against
+# a regression that breaks large SD bulk transfers over serial.
 #
-# Only the DOWNLOAD (0x84) crash is the size-dependent bug being fixed. The 0x85
-# upload is SD-write bound (slow, not fast) but completes over raw serial — hence
-# the generous timeouts. Big *console* upload throttling is a separate browser
-# issue (workaround: SD-copy), out of scope here.
+# IMPORTANT: this does NOT reproduce the pre-fix "Break" crash. That crash needs the
+# host READER to stall so the controller's USB TX FIFO backs up (the condition that
+# tripped the old blocking Serial.write). This test's reader drains continuously and
+# the OS buffers the CDC stream, so the FIFO never backs up — the sweep PASSES on both
+# buggy and fixed firmware (verified 2026-07-01). The crash reproduces in the browser
+# (its read loop stalls under render/blob-save load), not over fast raw serial. Treat
+# this as "large transfers still work", not "the crash is fixed" — the latter rests on
+# the code review + the browser before/after.
 #
-# Default sweep runs to 2 MB (> the 813 KB field failure). Override for finer/bigger
-# (comma-separated bytes):
+# The 0x85 upload is SD-write bound (slow) but completes over raw serial — hence the
+# generous timeouts. Big *console* upload throttling is a separate browser issue.
+#
+# Default sweep runs to 2 MB. Override (comma-separated bytes):
 #   HIL_BULK_SIZES="32768,65536,131072,262144" pixi run test-serial -- --port /dev/... -k bulk_roundtrip
 _DEFAULT_SIZES = [64 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024, 2 * 1024 * 1024]
 BULK_SWEEP_SIZES = (
