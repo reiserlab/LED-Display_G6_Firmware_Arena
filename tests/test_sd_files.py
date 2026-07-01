@@ -133,41 +133,50 @@ def test_download_out_of_range_errors(transport):
     assert echo == GET_PATTERN_FILE_CMD
 
 
-# ── Large-payload bulk roundtrip (regression guard for the 0x84/0x85 bulk bug) ─
+# ── Bulk-transfer size sweep (regression guard + characterization) ───────────
 #
 # The 512-byte TEST_DATA roundtrip above never fills the USB-CDC TX FIFO, so it
 # passed even on firmware where GET_PATTERN_FILE (0x84) crashed the link ("Break")
 # streaming a large file (blocking Serial.write with no availableForWrite()/yield()).
-# This uses a payload well above the ~80 KB threshold where that bug appears:
-#   buggy firmware → the download stalls/breaks → this FAILS (timeout / short read)
-#   fixed firmware → bytes return byte-for-byte   → this PASSES
-# Sized ABOVE the largest file that failed in the field (813 KB) so the test covers the
-# regime that actually broke — not a comfortable mid-size. Crank it to stress harder:
-#   HIL_BULK_SIZE=2097152 pixi run test-serial -- --port /dev/... -k large_bulk_roundtrip
-LARGE_SIZE = int(os.environ.get("HIL_BULK_SIZE", 1024 * 1024))  # default 1 MB
-LARGE_DATA = (bytes(range(256)) * ((LARGE_SIZE + 255) // 256))[:LARGE_SIZE]
-LARGE_NAME = "hil_large.pat"
+# Sweeping a RANGE of sizes finds *where* it breaks, not just one point:
+#   buggy firmware → download breaks above ~80 KB: the first oversized case FAILS,
+#                    then later cases cascade (the crash drops the USB session)
+#   fixed firmware → every size round-trips byte-for-byte → all PASS
+#
+# Only the DOWNLOAD (0x84) crash is the size-dependent bug being fixed. The 0x85
+# upload is SD-write bound (slow, not fast) but completes over raw serial — hence
+# the generous timeouts. Big *console* upload throttling is a separate browser
+# issue (workaround: SD-copy), out of scope here.
+#
+# Default sweep runs to 2 MB (> the 813 KB field failure). Override for finer/bigger
+# (comma-separated bytes):
+#   HIL_BULK_SIZES="32768,65536,131072,262144" pixi run test-serial -- --port /dev/... -k bulk_roundtrip
+_DEFAULT_SIZES = [64 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024, 2 * 1024 * 1024]
+BULK_SWEEP_SIZES = (
+    [int(x) for x in os.environ["HIL_BULK_SIZES"].split(",")]
+    if os.environ.get("HIL_BULK_SIZES")
+    else _DEFAULT_SIZES
+)
 
 
-def test_large_bulk_roundtrip(transport):
-    """Upload + download a large (default 1 MB) pattern; verify byte-for-byte.
+@pytest.mark.parametrize("size", BULK_SWEEP_SIZES, ids=lambda s: f"{s // 1024}KB")
+def test_bulk_roundtrip(transport, size):
+    """Upload + download `size` bytes over the wire and verify byte-for-byte.
 
-    Timeouts are generous on purpose: the 0x85 upload *throughput* (~tens of kB/s,
-    SD-write bound) is NOT part of this fix — only the 0x84 download crash and the
-    upload's clean-abort (drain) are. A raw-serial upload still completes (it has no
-    browser coalescing/backpressure, which is what timed out big *console* uploads);
-    it's just slow. The load-bearing assertion is the DOWNLOAD round-tripping intact.
+    Run the set (-k bulk_roundtrip) to sweep and see where (if anywhere) it breaks;
+    run one size with e.g. -k "bulk_roundtrip and 1024KB".
     """
-    st, _, _, _ = transport.upload_file(0, LARGE_DATA, timeout=180.0)
-    assert st == 0, f"large upload (0x85) failed: status={st}"
-    st, _, payload, _ = transport.rename_file(0, LARGE_NAME)
+    data = (bytes(range(256)) * ((size + 255) // 256))[:size]
+    st, _, _, _ = transport.upload_file(0, data, timeout=240.0)
+    assert st == 0, f"upload (0x85) failed at {size} B: status={st}"
+    st, _, payload, _ = transport.rename_file(0, f"hil_{size}.pat")
     assert st == 0
     idx = struct.unpack("<H", payload)[0]
-    st, echo, data, _ = transport.download_file(idx, timeout=120.0)
-    assert st == 0, f"large download (0x84) failed: status={st}"
+    st, echo, got, _ = transport.download_file(idx, timeout=240.0)
+    assert st == 0, f"download (0x84) failed at {size} B: status={st}"
     assert echo == GET_PATTERN_FILE_CMD
-    assert len(data) == LARGE_SIZE, f"short download: {len(data)}/{LARGE_SIZE} bytes"
-    assert data == LARGE_DATA, "downloaded bytes differ from uploaded"
+    assert len(got) == size, f"short download at {size} B: {len(got)}/{size} bytes"
+    assert got == data, f"corrupt download at {size} B"
 
 
 # ── Delete (DELETE_PATTERN_FILE 0x86) ───────────────────────────────────────
