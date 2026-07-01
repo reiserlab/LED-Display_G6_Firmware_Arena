@@ -1269,6 +1269,9 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   f.close();
   if (!ok) {
     SD.remove(path);
+    // Consume the undelivered payload before returning to the command loop; otherwise
+    // the leftover file bytes are parsed as bogus commands and desync the link.
+    drainBulkData(remaining);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, fail_msg);
     return;
   }
@@ -1338,6 +1341,8 @@ void CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
   f.close();
   if (!ok) {
     SD.remove(AC::constants::firmware_path);
+    // Drain undelivered payload so leftover bytes don't desync the command loop.
+    drainBulkData(remaining);
     current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 1, fail_msg);
     return;
   }
