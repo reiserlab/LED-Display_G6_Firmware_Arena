@@ -227,7 +227,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       // [03 88 idx_lo idx_hi] — cheap pattern metadata for preview (no bulk
       // download, no ALL_OFF). Framed reply: 12-byte little-endian payload
       //   frame_count u16 · gs u8 · rows u8 · cols u8 · arena u8 · observer u8
-      //   · file_size u32 · stretch u8
+      //   · file_size u32 · duty_cycle u8
       if (claimed_len != 3) {
         current_source_->sendResponse(command_byte, 1, "Expected [03 88 idx_lo idx_hi]");
         break;
@@ -249,7 +249,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       payload[5] = m.arena_id;
       payload[6] = m.observer_id;
       memcpy(payload + 7, &m.file_size, sizeof(m.file_size));  // u32 LE
-      payload[11] = m.stretch;
+      payload[11] = m.duty_cycle;
       current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
       break;
     }

@@ -382,6 +382,7 @@ uint8_t SdManager::readPatternInfo(uint16_t pattern_id, PatternMeta &out) {
   if (gs != 1 && gs != 2) { f.close(); return CE_HEADER_CRC; }
 
   out.frame_count = le16(hdr + 6);
+  if (out.frame_count == 0) { f.close(); return CE_HEADER_CRC; }  // 0 frames invalid (matches validateHeader)
   out.gs_val      = gs;
   out.rows        = hdr[8];
   out.cols        = hdr[9];
@@ -392,25 +393,26 @@ uint8_t SdManager::readPatternInfo(uint16_t pattern_id, PatternMeta &out) {
   out.observer_id = (uint8_t)(hdr[5] & 0x3F);
   out.file_size   = (uint32_t)f.size();
 
-  // stretch = last byte of frame 0's panel-0 block (per-panel/per-frame value;
-  // we report frame 0, panel 0). Offset = header + "FR"+index prefix + block-1.
+  // duty_cycle = last byte of frame 0's panel-0 block (per-panel/per-frame
+  // value; we report frame 0, panel 0). Offset = header + "FR"+index prefix +
+  // block-1.
   uint16_t block_size = (gs == 1) ? panel_block_byte_count_gs2
                                   : panel_block_byte_count_gs16;
-  uint32_t stretch_off = (uint32_t)pattern_header_byte_count
-                         + pattern_frame_prefix_byte_count
-                         + block_size - 1;
-  if (out.file_size <= stretch_off || !f.seek(stretch_off) ||
-      f.read(&out.stretch, 1) != 1) {
+  uint32_t duty_cycle_off = (uint32_t)pattern_header_byte_count
+                            + pattern_frame_prefix_byte_count
+                            + block_size - 1;
+  if (out.file_size <= duty_cycle_off || !f.seek(duty_cycle_off) ||
+      f.read(&out.duty_cycle, 1) != 1) {
     f.close();
     return CE_SD_FILE_ERROR;
   }
 
   f.close();
-  DBG_PRINTF("[sd] info id=%u %s frames=%u gs=%u %ux%u arena=%u obs=%u size=%lu stretch=%u\n",
+  DBG_PRINTF("[sd] info id=%u %s frames=%u gs=%u %ux%u arena=%u obs=%u size=%lu duty_cycle=%u\n",
              (unsigned)pattern_id, path, (unsigned)out.frame_count,
              (unsigned)out.gs_val, (unsigned)out.rows, (unsigned)out.cols,
              (unsigned)out.arena_id, (unsigned)out.observer_id,
-             (unsigned long)out.file_size, (unsigned)out.stretch);
+             (unsigned long)out.file_size, (unsigned)out.duty_cycle);
   return CE_NONE;
 }
 

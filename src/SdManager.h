@@ -41,7 +41,7 @@ class SdManager {
     uint8_t  arena_id    = 0;   // 6-bit V2 Arena ID
     uint8_t  observer_id = 0;   // 6-bit V2 Observer ID (host metadata only)
     uint32_t file_size   = 0;   // file.size()
-    uint8_t  stretch     = 0;   // frame 0, panel 0: last byte of the panel block
+    uint8_t  duty_cycle  = 0;   // frame 0, panel 0: last byte of the panel block
   };
 
   // Mount the SD card. Returns true on success; safe to call when no card is
@@ -97,7 +97,7 @@ class SdManager {
   // Read header metadata for the given 1-based pattern ID into `out`, without
   // touching the display's open file_/info_ state (uses a separate File handle,
   // so it is safe to call while a pattern is playing). Validates the header
-  // magic/version/CRC-8 and reads the first frame's panel-0 stretch byte.
+  // magic/version/CRC-8 and reads the first frame's panel-0 duty_cycle byte.
   // Returns CE_NONE on success or a ControllerError code. Backs GET_PATTERN_INFO
   // (0x88) — a cheap preview that avoids the full 0x84 bulk download.
   uint8_t readPatternInfo(uint16_t pattern_id, PatternMeta &out);
