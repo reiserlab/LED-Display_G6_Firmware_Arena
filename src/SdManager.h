@@ -97,7 +97,8 @@ class SdManager {
   // Read header metadata for the given 1-based pattern ID into `out`, without
   // touching the display's open file_/info_ state (uses a separate File handle,
   // so it is safe to call while a pattern is playing). Validates the header
-  // magic/version/CRC-8 and reads the first frame's panel-0 duty_cycle byte.
+  // (magic/version/CRC-8, non-zero frame count, gs — see validateHeaderBytes)
+  // and reads the first frame's panel-0 duty_cycle byte.
   // Returns CE_NONE on success or a ControllerError code. Backs GET_PATTERN_INFO
   // (0x88) — a cheap preview that avoids the full 0x84 bulk download.
   uint8_t readPatternInfo(uint16_t pattern_id, PatternMeta &out);
@@ -122,6 +123,10 @@ class SdManager {
   PatternInfo info_;
 
   void scanPatterns();
+  // Field-level header checks shared by validateHeader() and
+  // readPatternInfo(): magic, format version, CRC-8, frame_count != 0,
+  // gs ∈ {1,2}. Pure — touches no member state and enforces no arena match.
+  static uint8_t validateHeaderBytes(const uint8_t *hdr);
   uint8_t validateHeader(const uint8_t *hdr);
   bool writeManifest();
   void insertSorted(const char *name, const char *origin);
