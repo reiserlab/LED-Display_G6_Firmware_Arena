@@ -28,7 +28,7 @@ enum ArenaCommands : uint8_t {
   PSRAM_PLAY_CMD              = 0x3B,  // payload: start(2) count(2) fps(2) LE — auto-advance
   GET_FILE_COUNT_CMD          = 0x80,  // returns pattern file count on SD as uint16 LE
   GET_PATTERN_FILENAME_CMD    = 0x82,  // [03 82 idx_lo idx_hi] 1-based; returns 1-byte-len + filename
-  GET_PATTERN_INFO_CMD        = 0x88,  // [03 88 idx_lo idx_hi] 1-based; framed reply: header metadata + frame-0 stretch (cheap preview, no bulk download)
+  GET_PATTERN_INFO_CMD        = 0x88,  // [03 88 idx_lo idx_hi] 1-based; framed reply: header metadata + frame-0 duty_cycle (cheap preview, no bulk download)
   GET_PATTERN_FILE_CMD        = 0x84,  // [03 84 idx_lo idx_hi] 1-based; response: uint64 LE size, then raw bytes
   SET_PATTERN_FILENAME_CMD    = 0x83,  // [0x83, idx_lo, idx_hi, len, chars…] rename; returns new uint16 LE index
   SET_PATTERN_FILE_CMD        = 0x85,  // [0x85, idx_lo, idx_hi, len_b0..b7, data…] upload file (bulk stream)
