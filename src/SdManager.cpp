@@ -81,7 +81,7 @@ void SdManager::scanPatterns() {
   dir.close();
 }
 
-uint8_t SdManager::validateHeader(const uint8_t *hdr) {
+uint8_t SdManager::validateHeaderBytes(const uint8_t *hdr) {
   // Magic "G6PT".
   if (hdr[0] != 'G' || hdr[1] != '6' || hdr[2] != 'P' || hdr[3] != 'T') {
     return CE_HEADER_CRC;
@@ -93,13 +93,20 @@ uint8_t SdManager::validateHeader(const uint8_t *hdr) {
       hdr[pattern_header_byte_count - 1]) {
     return CE_HEADER_CRC;
   }
+  if (le16(hdr + 6) == 0) return CE_HEADER_CRC;     // 0 frames is invalid
+  uint8_t gs = hdr[10];
+  if (gs != 1 && gs != 2) return CE_HEADER_CRC;
+  return CE_NONE;
+}
+
+uint8_t SdManager::validateHeader(const uint8_t *hdr) {
+  uint8_t err = validateHeaderBytes(hdr);
+  if (err != CE_NONE) return err;
 
   uint16_t frame_count = le16(hdr + 6);
   uint8_t  row = hdr[8];
   uint8_t  col = hdr[9];
   uint8_t  gs  = hdr[10];
-  if (frame_count == 0) return CE_HEADER_CRC;       // 0 frames is invalid
-  if (gs != 1 && gs != 2) return CE_HEADER_CRC;
 
   uint16_t num_panels = (uint16_t)row * col;
   if (num_panels == 0 || num_panels > arena_panel_count_max) {
@@ -367,22 +374,17 @@ uint8_t SdManager::readPatternInfo(uint16_t pattern_id, PatternMeta &out) {
     return CE_SD_FILE_ERROR;
   }
 
-  // Self-contained header validation (does NOT call validateHeader(), which
-  // mutates info_ and enforces the arena-match this controller is wired for).
-  // Magic "G6PT" + format version (high nibble of byte 4) + CRC-8/AUTOSAR.
-  if (hdr[0] != 'G' || hdr[1] != '6' || hdr[2] != 'P' || hdr[3] != 'T' ||
-      ((hdr[4] >> 4) & 0x0F) != pattern_format_version ||
-      G6::crc8_autosar(hdr, pattern_header_byte_count - 1) !=
-          hdr[pattern_header_byte_count - 1]) {
+  // Field-level header checks shared with validateHeader() via
+  // validateHeaderBytes() — deliberately NOT validateHeader() itself, which
+  // mutates info_ and enforces the arena-match this controller is wired for.
+  uint8_t err = validateHeaderBytes(hdr);
+  if (err != CE_NONE) {
     f.close();
-    return CE_HEADER_CRC;
+    return err;
   }
 
   uint8_t gs = hdr[10];
-  if (gs != 1 && gs != 2) { f.close(); return CE_HEADER_CRC; }
-
   out.frame_count = le16(hdr + 6);
-  if (out.frame_count == 0) { f.close(); return CE_HEADER_CRC; }  // 0 frames invalid (matches validateHeader)
   out.gs_val      = gs;
   out.rows        = hdr[8];
   out.cols        = hdr[9];
