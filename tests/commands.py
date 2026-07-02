@@ -18,6 +18,7 @@ SET_FRAME_POSITION_CMD      = 0x70
 GET_FRAME_POSITION_CMD      = 0x72   # [01 72] returns cur_frame_index + frame_count, both uint16 LE
 GET_FILE_COUNT_CMD          = 0x80   # returns uint16 LE
 GET_PATTERN_FILENAME_CMD    = 0x82
+GET_PATTERN_INFO_CMD        = 0x88   # [03 88 idx_lo idx_hi] 1-based; framed reply: header metadata + frame-0 duty_cycle
 SET_PATTERN_FILENAME_CMD    = 0x83
 GET_PATTERN_FILE_CMD        = 0x84
 SET_PATTERN_FILE_CMD        = 0x85

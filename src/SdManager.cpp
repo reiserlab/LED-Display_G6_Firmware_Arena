@@ -81,7 +81,7 @@ void SdManager::scanPatterns() {
   dir.close();
 }
 
-uint8_t SdManager::validateHeader(const uint8_t *hdr) {
+uint8_t SdManager::validateHeaderBytes(const uint8_t *hdr) {
   // Magic "G6PT".
   if (hdr[0] != 'G' || hdr[1] != '6' || hdr[2] != 'P' || hdr[3] != 'T') {
     return CE_HEADER_CRC;
@@ -93,13 +93,20 @@ uint8_t SdManager::validateHeader(const uint8_t *hdr) {
       hdr[pattern_header_byte_count - 1]) {
     return CE_HEADER_CRC;
   }
+  if (le16(hdr + 6) == 0) return CE_HEADER_CRC;     // 0 frames is invalid
+  uint8_t gs = hdr[10];
+  if (gs != 1 && gs != 2) return CE_HEADER_CRC;
+  return CE_NONE;
+}
+
+uint8_t SdManager::validateHeader(const uint8_t *hdr) {
+  uint8_t err = validateHeaderBytes(hdr);
+  if (err != CE_NONE) return err;
 
   uint16_t frame_count = le16(hdr + 6);
   uint8_t  row = hdr[8];
   uint8_t  col = hdr[9];
   uint8_t  gs  = hdr[10];
-  if (frame_count == 0) return CE_HEADER_CRC;       // 0 frames is invalid
-  if (gs != 1 && gs != 2) return CE_HEADER_CRC;
 
   uint16_t num_panels = (uint16_t)row * col;
   if (num_panels == 0 || num_panels > arena_panel_count_max) {
@@ -343,6 +350,71 @@ uint8_t SdManager::readFrame(uint16_t frame_index, uint8_t *dest,
   uint16_t want = (uint16_t)crc_bytes[0] | ((uint16_t)crc_bytes[1] << 8);
   if (G6::crc16_ccitt_false(dest, body_len) != want) return CE_FRAME_CRC;
 
+  return CE_NONE;
+}
+
+uint8_t SdManager::readPatternInfo(uint16_t pattern_id, PatternMeta &out) {
+  if (!mounted_) return CE_SD_NOT_PRESENT;
+  if (pattern_id == 0 || pattern_id > pattern_count_) return CE_BAD_PARAM;
+
+  char path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
+  snprintf(path, sizeof(path), "%s/%s", pattern_dir, names_[pattern_id - 1]);
+
+  // Separate File handle: a metadata read must not reposition or close the
+  // display's file_ (a running Mode 2/3/4 pattern seeks into it per frame).
+  File f = SD.open(path, FILE_READ);
+  if (!f) {
+    DBG_PRINTF("[sd] info open failed: %s\n", path);
+    return CE_SD_FILE_ERROR;
+  }
+
+  uint8_t hdr[pattern_header_byte_count];
+  if (f.read(hdr, pattern_header_byte_count) != pattern_header_byte_count) {
+    f.close();
+    return CE_SD_FILE_ERROR;
+  }
+
+  // Field-level header checks shared with validateHeader() via
+  // validateHeaderBytes() — deliberately NOT validateHeader() itself, which
+  // mutates info_ and enforces the arena-match this controller is wired for.
+  uint8_t err = validateHeaderBytes(hdr);
+  if (err != CE_NONE) {
+    f.close();
+    return err;
+  }
+
+  uint8_t gs = hdr[10];
+  out.frame_count = le16(hdr + 6);
+  out.gs_val      = gs;
+  out.rows        = hdr[8];
+  out.cols        = hdr[9];
+  // V2 header packing (g6_04-pattern-file-format.md):
+  //   byte 4 bits 3-0 = arena_id high 4 bits; byte 5 bits 7-6 = arena_id low 2
+  //   bits; byte 5 bits 5-0 = observer_id (both are 6-bit fields).
+  out.arena_id    = (uint8_t)(((hdr[4] & 0x0F) << 2) | (hdr[5] >> 6));
+  out.observer_id = (uint8_t)(hdr[5] & 0x3F);
+  out.file_size   = (uint32_t)f.size();
+
+  // duty_cycle = last byte of frame 0's panel-0 block (per-panel/per-frame
+  // value; we report frame 0, panel 0). Offset = header + "FR"+index prefix +
+  // block-1.
+  uint16_t block_size = (gs == 1) ? panel_block_byte_count_gs2
+                                  : panel_block_byte_count_gs16;
+  uint32_t duty_cycle_off = (uint32_t)pattern_header_byte_count
+                            + pattern_frame_prefix_byte_count
+                            + block_size - 1;
+  if (out.file_size <= duty_cycle_off || !f.seek(duty_cycle_off) ||
+      f.read(&out.duty_cycle, 1) != 1) {
+    f.close();
+    return CE_SD_FILE_ERROR;
+  }
+
+  f.close();
+  DBG_PRINTF("[sd] info id=%u %s frames=%u gs=%u %ux%u arena=%u obs=%u size=%lu duty_cycle=%u\n",
+             (unsigned)pattern_id, path, (unsigned)out.frame_count,
+             (unsigned)out.gs_val, (unsigned)out.rows, (unsigned)out.cols,
+             (unsigned)out.arena_id, (unsigned)out.observer_id,
+             (unsigned long)out.file_size, (unsigned)out.duty_cycle);
   return CE_NONE;
 }
 

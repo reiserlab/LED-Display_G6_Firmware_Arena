@@ -31,6 +31,19 @@ class SdManager {
     uint32_t frame_size  = 0;   // prefix + blocks + CRC-16 trailer
   };
 
+  // Lightweight header metadata for GET_PATTERN_INFO (0x88) — filled by
+  // readPatternInfo() without opening the display's file_ handle.
+  struct PatternMeta {
+    uint16_t frame_count = 0;
+    uint8_t  gs_val      = 0;   // 1 = GS2, 2 = GS16
+    uint8_t  rows        = 0;   // RowCount
+    uint8_t  cols        = 0;   // ColCount
+    uint8_t  arena_id    = 0;   // 6-bit V2 Arena ID
+    uint8_t  observer_id = 0;   // 6-bit V2 Observer ID (host metadata only)
+    uint32_t file_size   = 0;   // file.size()
+    uint8_t  duty_cycle  = 0;   // frame 0, panel 0: last byte of the panel block
+  };
+
   // Mount the SD card. Returns true on success; safe to call when no card is
   // present (returns false, leaves available() == false).
   bool begin();
@@ -81,6 +94,15 @@ class SdManager {
   // CRC-16. Returns CE_NONE on success or a ControllerError code.
   uint8_t readFrame(uint16_t frame_index, uint8_t *dest, size_t dest_cap);
 
+  // Read header metadata for the given 1-based pattern ID into `out`, without
+  // touching the display's open file_/info_ state (uses a separate File handle,
+  // so it is safe to call while a pattern is playing). Validates the header
+  // (magic/version/CRC-8, non-zero frame count, gs — see validateHeaderBytes)
+  // and reads the first frame's panel-0 duty_cycle byte.
+  // Returns CE_NONE on success or a ControllerError code. Backs GET_PATTERN_INFO
+  // (0x88) — a cheap preview that avoids the full 0x84 bulk download.
+  uint8_t readPatternInfo(uint16_t pattern_id, PatternMeta &out);
+
  private:
   bool     mounted_       = false;
   uint16_t pattern_count_ = 0;
@@ -101,6 +123,10 @@ class SdManager {
   PatternInfo info_;
 
   void scanPatterns();
+  // Field-level header checks shared by validateHeader() and
+  // readPatternInfo(): magic, format version, CRC-8, frame_count != 0,
+  // gs ∈ {1,2}. Pure — touches no member state and enforces no arena match.
+  static uint8_t validateHeaderBytes(const uint8_t *hdr);
   uint8_t validateHeader(const uint8_t *hdr);
   bool writeManifest();
   void insertSorted(const char *name, const char *origin);
