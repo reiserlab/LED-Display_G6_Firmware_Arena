@@ -79,45 +79,7 @@ Same wire framing as G4.1-ArenaSlim, accepted on both TCP and USB serial:
 
 - **Incoming binary:** `[length, cmd, params...]`
 - **Incoming stream:** `[0x32, len_lo, len_hi, frame_data...]` — no `analog_x`/`analog_y` bytes (G6 dropped these)
-<<<<<<< Updated upstream
-- **Response:** `[length, status(0=ok), echo_cmd, payload...]` — `payload` is an ASCII message for most commands, or raw bytes for `GET_CONTROLLER_INFO`
-
-| Command | Code | Supported | Notes |
-|---|---|---|---|
-| `ALL_OFF`        | `0x00` | ✓ | Stops refresh, holds dark |
-| `TRIAL_PARAMS`   | `0x08` | ✓ | "Combined command" — selects display mode + SD pattern (Modes 2/3/4) |
-| `SET_REFRESH_RATE` | `0x16` | ✓ | Host override of GS-derived default (300 Hz GS16 / 1000 Hz GS2) |
-| `STOP_DISPLAY`   | `0x30` | ✓ | Alias for ALL_OFF |
-| `STREAM_FRAME`   | `0x32` | ✓ | Mode 5. Frame size `4 + 20*53` (GS2 = 1064) or `4 + 20*203` (GS16 = 4064) bytes |
-| `GET_ETHERNET_IP_ADDRESS` | `0x66` | ✓ | Returns DHCP-resolved IP as ASCII |
-| `GET_CONTROLLER_INFO` | `0xC2` | ✓ | Returns `{version, capability_bitmap, mac[6]}` (bit 0 `g6_mode` = 1, bit 5 `io_ext`; trailing raw MAC bytes = physical-setup identity, tolerant extension) |
-| `SET_DIO_ROLE` | `0xAC` | ✓ | `[03 AC port role]` port 1/2 ("Digital IO 1/2 (5V)" BNC), role 0 off / 1 in_trigger / 2 out_programmable / 3 out_debug_framescan (SPI-envelope gate per frame) |
-| `GET_DIO_ROLE` | `0xAD` | ✓ | Returns `[role1, level1, role2, level2]` — live pin reads (BNC level in input roles) |
-| `SET_AO_MODE` | `0xA3` | ✓ | `[02 A3 mode]` 0 programmable (0xA0/0xA2) / 1 frame_number (DAC = 0–5 V normalized frame position; 0xA0/0xA2 refused while active) |
-| `GET_ANALOG_IN` | `0xA4` | ✓ | Returns `[ain1, ain2]` int16 LE mV — "Analog In 1/2 (±10V)" BNCs (front-end calibration TBD) |
-| `SET_FRAME_POSITION` | `0x70` | ✓ | Mode 3 — show a specific frame of the open pattern |
-| `ALL_ON`         | `0xFF` | ✓ | Synthesizes a full-bright GS16 oneshot on every panel |
-| `SYSTEM_RESET`   | `0x01` | ✓ | Software system reset — acks then reboots (SCB_AIRCR SYSRESETREQ) |
-| `SWITCH_GRAYSCALE` | `0x06` | ✗ | Dropped for G6 — `gs_val` is derived from the stream size / pattern header |
-||||||| Stash base
-- **Response:** `[length, status(0=ok), echo_cmd, payload...]` — `payload` is an ASCII message for most commands, or raw bytes for `GET_CONTROLLER_INFO`
-
-| Command | Code | Supported | Notes |
-|---|---|---|---|
-| `ALL_OFF`        | `0x00` | ✓ | Stops refresh, holds dark |
-| `TRIAL_PARAMS`   | `0x08` | ✓ | "Combined command" — selects display mode + SD pattern (Modes 2/3/4) |
-| `SET_REFRESH_RATE` | `0x16` | ✓ | Host override of GS-derived default (300 Hz GS16 / 1000 Hz GS2) |
-| `STOP_DISPLAY`   | `0x30` | ✓ | Alias for ALL_OFF |
-| `STREAM_FRAME`   | `0x32` | ✓ | Mode 5. Frame size `4 + 20*53` (GS2 = 1064) or `4 + 20*203` (GS16 = 4064) bytes |
-| `GET_ETHERNET_IP_ADDRESS` | `0x66` | ✓ | Returns DHCP-resolved IP as ASCII |
-| `GET_CONTROLLER_INFO` | `0x67` | ✓ | Returns `{version, capability_bitmap}` (bit 0 `g6_mode` = 1) |
-| `SET_FRAME_POSITION` | `0x70` | ✓ | Mode 3 — show a specific frame of the open pattern |
-| `ALL_ON`         | `0xFF` | ✓ | Synthesizes a full-bright GS16 oneshot on every panel |
-| `SYSTEM_RESET`   | `0x01` | ✓ | Software system reset — acks then reboots (SCB_AIRCR SYSRESETREQ) |
-| `SWITCH_GRAYSCALE` | `0x06` | ✗ | Dropped for G6 — `gs_val` is derived from the stream size / pattern header |
-=======
 - **Response:** `[length, status(0=ok), echo_cmd, payload...]` — `payload` is an ASCII message for most commands, or raw bytes for machine-readable ones (e.g. `GET_CONTROLLER_INFO`)
->>>>>>> Stashed changes
 
 Unknown opcodes reply with `status = 1` and raise a `CE 01` error glyph.
 
