@@ -43,10 +43,19 @@ def test_stop_display_acks(transport):
 
 
 def test_get_controller_info(transport):
+    # {version, capability, mac[6]} — MAC bytes are the tolerant extension
+    # (webDisplayTools #135); capability bit 5 = io_ext (0xAC/0xAD/0xA3/0xA4).
     st, echo, payload, _ = transport.command(GET_CONTROLLER_INFO_CMD)
     assert st == 0
     assert echo == GET_CONTROLLER_INFO_CMD
-    assert len(payload) == 2
+    assert len(payload) == 8
+    version, capability = payload[0], payload[1]
+    assert version == 1
+    assert capability & 0x01, "g6_mode bit must be set"
+    assert capability & 0x20, "io_ext bit must be set (SET_DIO_ROLE et al.)"
+    mac = payload[2:8]
+    assert any(b != 0 for b in mac), "MAC must be non-zero (Teensy fuses)"
+    assert any(b != 0xFF for b in mac), "MAC must not be all-FF"
 
 
 def test_get_refresh_rate(transport):
@@ -58,11 +67,21 @@ def test_get_refresh_rate(transport):
 
 
 def test_round_trip_refresh_rate(transport):
-    target = 60
-    transport.command(SET_REFRESH_RATE_CMD, struct.pack("<H", target))
-    st, _, payload, _ = transport.command(GET_REFRESH_RATE_CMD)
-    assert st == 0
-    assert struct.unpack("<H", payload)[0] == target
+    # Restore the pre-test rate — these are LIVE runtime settings on a bench
+    # rig, and leaving 60 Hz behind masquerades as a wrong-build mystery.
+    # (Caveat: restoring via SET keeps the firmware's refresh_rate_explicit_
+    # flag latched until reboot — value is right, auto-default is disabled.)
+    st0, _, p0, _ = transport.command(GET_REFRESH_RATE_CMD)
+    assert st0 == 0
+    before = struct.unpack("<H", p0)[0]
+    try:
+        target = 60
+        transport.command(SET_REFRESH_RATE_CMD, struct.pack("<H", target))
+        st, _, payload, _ = transport.command(GET_REFRESH_RATE_CMD)
+        assert st == 0
+        assert struct.unpack("<H", payload)[0] == target
+    finally:
+        transport.command(SET_REFRESH_RATE_CMD, struct.pack("<H", before))
 
 
 def test_get_spi_clock(transport):
@@ -73,14 +92,22 @@ def test_get_spi_clock(transport):
 
 
 def test_round_trip_spi_clock(transport):
-    target = 10  # MHz
-    st, _, payload, _ = transport.command(SET_SPI_CLOCK_CMD, struct.pack("<H", target))
-    assert st == 0
-    assert len(payload) == 2
-    applied = struct.unpack("<H", payload)[0]
-    st2, _, payload2, _ = transport.command(GET_SPI_CLOCK_CMD)
-    assert st2 == 0
-    assert struct.unpack("<H", payload2)[0] == applied
+    # Restore the pre-test clock (see refresh-rate test — bench rigs keep
+    # running after the suite; don't leave them at a diagnostic 10 MHz).
+    st0, _, p0, _ = transport.command(GET_SPI_CLOCK_CMD)
+    assert st0 == 0
+    before = struct.unpack("<H", p0)[0]
+    try:
+        target = 10  # MHz
+        st, _, payload, _ = transport.command(SET_SPI_CLOCK_CMD, struct.pack("<H", target))
+        assert st == 0
+        assert len(payload) == 2
+        applied = struct.unpack("<H", payload)[0]
+        st2, _, payload2, _ = transport.command(GET_SPI_CLOCK_CMD)
+        assert st2 == 0
+        assert struct.unpack("<H", payload2)[0] == applied
+    finally:
+        transport.command(SET_SPI_CLOCK_CMD, struct.pack("<H", before))
 
 
 def test_get_frames_sent(transport):

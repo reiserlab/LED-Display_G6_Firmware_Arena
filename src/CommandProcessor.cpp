@@ -10,11 +10,57 @@ void CommandProcessor::begin() {
   Wire.begin();
   Wire.setClock(400000);
 
-  // Digital outputs: both channels start driving LOW, direction = Teensy→BNC.
-  pinMode(do1_data_pin, OUTPUT); digitalWrite(do1_data_pin, LOW);
-  pinMode(do1_dir_pin,  OUTPUT); digitalWrite(do1_dir_pin,  HIGH);
-  pinMode(do2_data_pin, OUTPUT); digitalWrite(do2_data_pin, LOW);
-  pinMode(do2_dir_pin,  OUTPUT); digitalWrite(do2_dir_pin,  HIGH);
+  // Digital IO boot roles (#135). Port 1 ("Digital IO 1 (5V)", J3): a driven-
+  // LOW programmable output, as this firmware has always booted. Port 2
+  // ("Digital IO 2 (5V)", J4): in_trigger — U3 in B→A so the BNC feeds the
+  // panels' EINT net through the J30 shunt (external trigger for the
+  // triggered/gated panel display modes). This REPLACES the old pair of
+  // main.cpp setupExternalTriggerInput() + unconditional output init here,
+  // which together left D35 driving the EINT net against U3 (boot contention)
+  // — applyDioRole tri-states the data pin before flipping direction.
+  // Teensy pin 33 (R25→EINT) stays at its power-on INPUT default so nothing
+  // else drives the EINT net.
+  applyDioRole(1, DioRole::kOutProgrammable);
+  applyDioRole(2, DioRole::kInTrigger);
+}
+
+// Apply a DIO role with contention-safe pin-transition ordering. The
+// SN74LVC1T45 translator drives its A side (our data pin's net) whenever
+// DIR=LOW, so: to an output role, flip DIR HIGH FIRST (translator releases the
+// A net; the BNC floats for ~µs) and only then drive the data pin; to an
+// input/off role, tri-state the data pin FIRST and only then flip DIR LOW.
+// Note for rigs with the J30 shunt installed: port 2's A net feeds the panels'
+// EINT fanout through R216 regardless of role — an out_programmable port 2
+// pulses the panel trigger net whenever it toggles (hardware property, not
+// firmware-preventable).
+void CommandProcessor::applyDioRole(uint8_t port, DioRole role) {
+  const uint8_t data = (port == 1) ? do1_data_pin : do2_data_pin;
+  const uint8_t dir  = (port == 1) ? do1_dir_pin  : do2_dir_pin;
+  pinMode(dir, OUTPUT);
+  if (role == DioRole::kOutProgrammable || role == DioRole::kOutFramescan) {
+    digitalWrite(dir, HIGH);   // translator A side becomes an input (stops driving)
+    pinMode(data, OUTPUT);
+    digitalWrite(data, LOW);   // defined level before anything observes the BNC
+  } else {
+    pinMode(data, INPUT);      // we stop driving FIRST
+    digitalWrite(dir, LOW);    // then the translator turns around (BNC → A net)
+  }
+  dio_role_[port - 1] = role;
+  // Keep the SpiManager frame-scan gate in sync (one slot per port).
+  spi_.setFramescanGatePins(
+      dio_role_[0] == DioRole::kOutFramescan ? (int16_t)do1_data_pin : (int16_t)-1,
+      dio_role_[1] == DioRole::kOutFramescan ? (int16_t)do2_data_pin : (int16_t)-1);
+  DBG_PRINTF("[cmd] dio role port=%u -> %s\n", (unsigned)port, dioRoleName(role));
+}
+
+const char *CommandProcessor::dioRoleName(DioRole role) const {
+  switch (role) {
+    case DioRole::kOff:             return "off";
+    case DioRole::kInTrigger:       return "in_trigger";
+    case DioRole::kOutProgrammable: return "out_programmable";
+    case DioRole::kOutFramescan:    return "out_debug_framescan";
+  }
+  return "?";
 }
 
 // ---------------------------------------------------------------------------
@@ -481,22 +527,71 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       }
       uint8_t channel = buf[pos++];
       uint8_t state   = buf[pos];
-      uint8_t data_pin, dir_pin;
-      if (channel == 1) {
-        data_pin = do1_data_pin;
-        dir_pin  = do1_dir_pin;
-      } else if (channel == 2) {
-        data_pin = do2_data_pin;
-        dir_pin  = do2_dir_pin;
-      } else {
+      if (channel != 1 && channel != 2) {
         current_source_->sendResponse(command_byte, 1, "channel must be 1 or 2");
         break;
       }
-      digitalWrite(dir_pin,  HIGH);
-      digitalWrite(data_pin, state ? HIGH : LOW);
+      // Role gate (#135): an `off` (unconfigured) port auto-promotes to
+      // out_programmable — bare bench pokes keep working. A port explicitly
+      // configured as in_trigger or out_debug_framescan REFUSES: flipping its
+      // direction here would silently destroy the trigger route / scan gate
+      // (the pre-role firmware did exactly that on channel 2).
+      DioRole role = dio_role_[channel - 1];
+      if (role == DioRole::kOff) {
+        applyDioRole(channel, DioRole::kOutProgrammable);
+        role = DioRole::kOutProgrammable;
+      }
+      if (role != DioRole::kOutProgrammable) {
+        char msg[96];
+        snprintf(msg, sizeof(msg),
+                 "Digital IO %u role is %s - SET_DIO_ROLE (0xAC) it to out_programmable first",
+                 (unsigned)channel, dioRoleName(role));
+        current_source_->sendResponse(command_byte, 1, msg);
+        break;
+      }
+      digitalWrite(channel == 1 ? do1_data_pin : do2_data_pin, state ? HIGH : LOW);
       current_source_->sendResponse(command_byte, 0, "");
       DBG_PRINTF("[cmd] set-digital-out ch=%u state=%u\n",
                  (unsigned)channel, (unsigned)state);
+      break;
+    }
+
+    case SET_DIO_ROLE_CMD: {
+      // [03 AC port role] — see DioRole in CommandProcessor.h. Explicit role
+      // changes are the ONLY way into in_trigger / out_debug_framescan.
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 AC port role]");
+        break;
+      }
+      uint8_t port = buf[pos++];
+      uint8_t role = buf[pos];
+      if (port != 1 && port != 2) {
+        current_source_->sendResponse(command_byte, 1, "port must be 1 or 2");
+        break;
+      }
+      if (role > 3) {
+        current_source_->sendResponse(
+            command_byte, 1,
+            "role must be 0=off 1=in_trigger 2=out_programmable 3=out_debug_framescan");
+        break;
+      }
+      applyDioRole(port, (DioRole)role);
+      current_source_->sendResponse(command_byte, 0, "");
+      break;
+    }
+
+    case GET_DIO_ROLE_CMD: {
+      // [01 AD] → [role1, level1, role2, level2]. `level` is a live read of
+      // the data pin: the driven latch in output roles, the BNC level (through
+      // the translator) in input roles — a free trigger-line readback.
+      uint8_t payload[4] = {
+          (uint8_t)dio_role_[0], (uint8_t)(digitalRead(do1_data_pin) ? 1 : 0),
+          (uint8_t)dio_role_[1], (uint8_t)(digitalRead(do2_data_pin) ? 1 : 0),
+      };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      DBG_PRINTF("[cmd] get-dio-role p1=%s/%u p2=%s/%u\n",
+                 dioRoleName(dio_role_[0]), (unsigned)payload[1],
+                 dioRoleName(dio_role_[1]), (unsigned)payload[3]);
       break;
     }
 
@@ -511,21 +606,71 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         current_source_->sendResponse(command_byte, 1, "mv out of range (0-5000)");
         break;
       }
-      uint16_t dac_code = (uint16_t)((uint32_t)mv * 4095 / 5000);
-      Wire.beginTransmission(0x60);
-      Wire.write((uint8_t)((dac_code >> 8) & 0x0F));
-      Wire.write((uint8_t)(dac_code & 0xFF));
-      uint8_t i2c_err = Wire.endTransmission();
-      if (i2c_err != 0) {
+      if (ao_mode_ != 0) {
+        current_source_->sendResponse(
+            command_byte, 1, "AO is in frame_number mode - SET_AO_MODE (0xA3) 0 first");
+        break;
+      }
+      if (!writeDacMv(mv)) {
         current_source_->sendResponse(command_byte, 1, "I2C write failed");
         break;
       }
-      ao_mv_ = mv;
       ao_lut_len_ = 0;  // stop any active LUT playback
       uint8_t payload[2] = { (uint8_t)(mv), (uint8_t)(mv >> 8) };
       current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
-      DBG_PRINTF("[cmd] set-ao-voltage mv=%u dac=%u\n",
-                 (unsigned)mv, (unsigned)dac_code);
+      DBG_PRINTF("[cmd] set-ao-voltage mv=%u\n", (unsigned)mv);
+      break;
+    }
+
+    case SET_AO_MODE_CMD: {
+      // [02 A3 mode] — 0 = programmable (0xA0/0xA2), 1 = frame_number: the
+      // DAC tracks the SD-pattern frame index, 0 V = frame 0 .. 5 V = last
+      // frame (normalized per pattern; updated in loadFrame, Modes 2/3/4).
+      if (claimed_len != 2) {
+        current_source_->sendResponse(command_byte, 1, "Expected [02 A3 mode]");
+        break;
+      }
+      uint8_t new_mode = buf[pos];
+      if (new_mode > 1) {
+        current_source_->sendResponse(command_byte, 1,
+                                      "mode must be 0 (programmable) or 1 (frame_number)");
+        break;
+      }
+      ao_mode_ = new_mode;
+      if (ao_mode_ == 1) {
+        ao_lut_len_ = 0;  // frame_number owns the DAC — stop LUT playback
+        // Reflect the current position immediately if a pattern is open.
+        if (frame_count_ > 1) {
+          writeDacMv((uint16_t)((uint32_t)cur_frame_index_ * 5000 / (frame_count_ - 1)));
+        } else if (frame_count_ == 1) {
+          writeDacMv(0);
+        }
+      }
+      current_source_->sendResponse(command_byte, 0, "");
+      DBG_PRINTF("[cmd] set-ao-mode %u\n", (unsigned)ao_mode_);
+      break;
+    }
+
+    case GET_ANALOG_IN_CMD: {
+      // [01 A4] → [ain1 int16 LE mV, ain2 int16 LE mV]. Both BNCs ("Analog In
+      // 1 (±10V)" J28/D14, "Analog In 2 (±10V)" J29/D15) share the OPA2277
+      // front-end mapping ±10 V → 0..3.3 V at the ADC, midscale = 0 V — the
+      // same math Mode 4 uses. Front-end offset/scale calibration is TBD
+      // (g6_03 § Mode 4); this is a bench diagnostic, not a precision read.
+      int16_t mv[2];
+      const uint8_t pins[2] = { mode4_ain_pin, ain2_pin };
+      for (int i = 0; i < 2; ++i) {
+        int raw = analogRead(pins[i]);
+        float frac = (float)raw / (float)adc_full_scale_counts;  // 0..1
+        float v = (frac - 0.5f) * 2.0f * mode4_ain_input_range_volts;
+        mv[i] = (int16_t)lroundf(v * 1000.0f);
+      }
+      uint8_t payload[4] = {
+          (uint8_t)((uint16_t)mv[0]), (uint8_t)((uint16_t)mv[0] >> 8),
+          (uint8_t)((uint16_t)mv[1]), (uint8_t)((uint16_t)mv[1] >> 8),
+      };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      DBG_PRINTF("[cmd] get-analog-in ain1=%d mV ain2=%d mV\n", (int)mv[0], (int)mv[1]);
       break;
     }
 
@@ -563,6 +708,11 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       // claimed_len = 1(cmd) + 1(mode) + 2(step_hz) + 2(count) + 2*count = 6 + 2*count
       if (claimed_len < 6) {
         current_source_->sendResponse(command_byte, 1, "Too short (need mode+step_hz+count)");
+        break;
+      }
+      if (ao_mode_ != 0) {
+        current_source_->sendResponse(
+            command_byte, 1, "AO is in frame_number mode - SET_AO_MODE (0xA3) 0 first");
         break;
       }
       uint8_t  lut_mode = buf[pos++];
@@ -686,14 +836,21 @@ void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleGetControllerInfo() {
-  // Response payload {version_byte, capability_bitmap} (g6_03 § 5).
-  const uint8_t payload[2] = {
+  // Response payload {version_byte, capability_bitmap, mac[6]} (g6_03 § 5).
+  // The trailing 6 raw MAC bytes are the controller's physical-setup identity
+  // (Teensy 4.1 burned-in unique ID, via QNEthernet — valid even when the
+  // Ethernet link is down). Tolerant, additive extension: hosts that predate
+  // it read only the first two bytes; webDisplayTools' decodeControllerInfo
+  // reports mac:null when the payload is 2 bytes, so version stays 1.
+  uint8_t payload[8] = {
       controller_info_version,
       controller_capability_bitmap,
   };
+  net_.macBytes(payload + 2);
   current_source_->sendResponse(GET_CONTROLLER_INFO_CMD, 0, payload, sizeof(payload));
-  DBG_PRINTF("[cmd] controller-info v=%u cap=0x%02X\n",
-             (unsigned)payload[0], (unsigned)payload[1]);
+  DBG_PRINTF("[cmd] controller-info v=%u cap=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
+             (unsigned)payload[0], (unsigned)payload[1], payload[2], payload[3],
+             payload[4], payload[5], payload[6], payload[7]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,7 +1171,14 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + (uint32_t)sd_.info().num_panels * block_byte_count_);
   patchDispMode();
-  if (ao_lut_len_ > 0 && ao_lut_mode_ == 0) {
+  if (ao_mode_ == 1) {
+    // frame_number AO (#135): DAC tracks the frame position, 0 V = frame 0 ..
+    // 5 V = last frame. loadFrame only runs when the index CHANGES, so the
+    // ~100 µs blocking I2C write costs nothing while a frame is held.
+    writeDacMv(frame_count_ > 1
+                   ? (uint16_t)((uint32_t)frame_index * 5000 / (frame_count_ - 1))
+                   : (uint16_t)0);
+  } else if (ao_lut_len_ > 0 && ao_lut_mode_ == 0) {
     ao_lut_idx_ = (uint16_t)(frame_index % ao_lut_len_);
     applyAoLut(ao_lut_idx_);
   }
@@ -1139,21 +1303,26 @@ void CommandProcessor::patchDispMode() {
   }
 }
 
-bool CommandProcessor::applyAoLut(uint16_t idx) {
-  if (ao_lut_len_ == 0) return true;
-  uint16_t mv = ao_lut_[idx % ao_lut_len_];
+// Write a 0-5000 mV level to the MCP4725 (fast-mode 2-byte write). Shared by
+// SET_AO_VOLTAGE, LUT playback, and the frame_number AO mode. Blocking I2C at
+// 400 kHz ≈ 100 µs — called only from the main loop, never an ISR.
+bool CommandProcessor::writeDacMv(uint16_t mv) {
   uint16_t dac_code = (uint16_t)((uint32_t)mv * 4095 / 5000);
   Wire.beginTransmission(0x60);
   Wire.write((uint8_t)((dac_code >> 8) & 0x0F));
   Wire.write((uint8_t)(dac_code & 0xFF));
   uint8_t err = Wire.endTransmission();
   if (err != 0) {
-    DBG_PRINTF("[ao_lut] I2C error %u at idx=%u mv=%u\n",
-               (unsigned)err, (unsigned)idx, (unsigned)mv);
+    DBG_PRINTF("[dac] I2C error %u writing mv=%u\n", (unsigned)err, (unsigned)mv);
     return false;
   }
   ao_mv_ = mv;
   return true;
+}
+
+bool CommandProcessor::applyAoLut(uint16_t idx) {
+  if (ao_lut_len_ == 0) return true;
+  return writeDacMv(ao_lut_[idx % ao_lut_len_]);
 }
 
 uint32_t CommandProcessor::defaultRefreshFor(uint16_t block_byte_count) const {

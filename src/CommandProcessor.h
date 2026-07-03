@@ -71,8 +71,30 @@ class CommandProcessor {
   uint32_t last_sample_us_  = 0;   // Mode 4 AIN sample clock
   float    frame_accum_     = 0.0f;// Mode 4 fractional-frame accumulator
 
+  // Digital IO roles (#135, SET_DIO_ROLE 0xAC). Ports are 1-based on the wire
+  // (== the board's "Digital IO 1/2 (5V)" BNC silkscreen == 0xAA channel);
+  // dio_role_[0] is port 1. Boot defaults (begin()): port 1 = out_programmable
+  // driving LOW (historic bench behavior), port 2 = in_trigger — the external
+  // trigger route to the panels' EINT net (U3 B→A + J30 shunt), which also
+  // fixes the old boot contention where D35 stayed an output driving the EINT
+  // net. SET_DIGITAL_OUT auto-promotes an `off` port to out_programmable but
+  // REFUSES ports explicitly configured as in_trigger / out_debug_framescan.
+  enum class DioRole : uint8_t {
+    kOff = 0,             // translator B→A, our data pin hi-Z; BNC ignored
+    kInTrigger = 1,       // pin config as kOff; on port 2 the BNC feeds EINT
+    kOutProgrammable = 2, // translator A→B, host drives the BNC via 0xAA
+    kOutFramescan = 3     // as output, gated by SpiManager per frame transfer
+  };
+  DioRole dio_role_[2] = { DioRole::kOff, DioRole::kOff };  // set in begin()
+
   // Analog output — last commanded level (mV). 0 = DAC code 0 (power-up default).
   uint16_t ao_mv_ = 0;
+
+  // AO mode (#135, SET_AO_MODE 0xA3). 0 = programmable (0xA0 levels + 0xA2
+  // LUT — today's behavior); 1 = frame_number: the DAC tracks the SD-pattern
+  // frame index, normalized 0 V = frame 0 .. 5 V = last frame (updated in
+  // loadFrame, Modes 2/3/4). 0xA0/0xA2 are refused while in frame_number.
+  uint8_t ao_mode_ = 0;
 
   // AO LUT playback (LAB-82). mode 0 = frame-locked (advances with cur_frame_index_);
   // mode 1 = time-based (steps at ao_lut_step_hz_, max 1000 Hz).
@@ -134,7 +156,10 @@ class CommandProcessor {
   void fillFrameBufferDark();             // all-pixels-off Persistent frame (for all-off/stop)
   void buildPsramFrame(uint16_t index);  // fill frame_buf_ with V2 index blocks
   uint32_t defaultRefreshFor(uint16_t block_byte_count) const;
+  bool writeDacMv(uint16_t mv);           // MCP4725 write, 0-5000 mV; false = I²C error
   bool applyAoLut(uint16_t idx);          // write ao_lut_[idx % ao_lut_len_] to DAC; false = I²C error
+  void applyDioRole(uint8_t port, DioRole role);  // 1-based port; safe pin-transition ordering
+  const char *dioRoleName(DioRole role) const;    // for error payloads / debug prints
   uint8_t dispOpcodeFor(bool gs16) const; // pick DISP_* opcode for panel_disp_mode_ × gs level
   void    patchDispMode();                // rewrite block[1]+parity in every panel block in frame_buf_
 };
