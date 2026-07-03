@@ -67,11 +67,21 @@ def test_get_refresh_rate(transport):
 
 
 def test_round_trip_refresh_rate(transport):
-    target = 60
-    transport.command(SET_REFRESH_RATE_CMD, struct.pack("<H", target))
-    st, _, payload, _ = transport.command(GET_REFRESH_RATE_CMD)
-    assert st == 0
-    assert struct.unpack("<H", payload)[0] == target
+    # Restore the pre-test rate — these are LIVE runtime settings on a bench
+    # rig, and leaving 60 Hz behind masquerades as a wrong-build mystery.
+    # (Caveat: restoring via SET keeps the firmware's refresh_rate_explicit_
+    # flag latched until reboot — value is right, auto-default is disabled.)
+    st0, _, p0, _ = transport.command(GET_REFRESH_RATE_CMD)
+    assert st0 == 0
+    before = struct.unpack("<H", p0)[0]
+    try:
+        target = 60
+        transport.command(SET_REFRESH_RATE_CMD, struct.pack("<H", target))
+        st, _, payload, _ = transport.command(GET_REFRESH_RATE_CMD)
+        assert st == 0
+        assert struct.unpack("<H", payload)[0] == target
+    finally:
+        transport.command(SET_REFRESH_RATE_CMD, struct.pack("<H", before))
 
 
 def test_get_spi_clock(transport):
@@ -82,14 +92,22 @@ def test_get_spi_clock(transport):
 
 
 def test_round_trip_spi_clock(transport):
-    target = 10  # MHz
-    st, _, payload, _ = transport.command(SET_SPI_CLOCK_CMD, struct.pack("<H", target))
-    assert st == 0
-    assert len(payload) == 2
-    applied = struct.unpack("<H", payload)[0]
-    st2, _, payload2, _ = transport.command(GET_SPI_CLOCK_CMD)
-    assert st2 == 0
-    assert struct.unpack("<H", payload2)[0] == applied
+    # Restore the pre-test clock (see refresh-rate test — bench rigs keep
+    # running after the suite; don't leave them at a diagnostic 10 MHz).
+    st0, _, p0, _ = transport.command(GET_SPI_CLOCK_CMD)
+    assert st0 == 0
+    before = struct.unpack("<H", p0)[0]
+    try:
+        target = 10  # MHz
+        st, _, payload, _ = transport.command(SET_SPI_CLOCK_CMD, struct.pack("<H", target))
+        assert st == 0
+        assert len(payload) == 2
+        applied = struct.unpack("<H", payload)[0]
+        st2, _, payload2, _ = transport.command(GET_SPI_CLOCK_CMD)
+        assert st2 == 0
+        assert struct.unpack("<H", payload2)[0] == applied
+    finally:
+        transport.command(SET_SPI_CLOCK_CMD, struct.pack("<H", before))
 
 
 def test_get_frames_sent(transport):
