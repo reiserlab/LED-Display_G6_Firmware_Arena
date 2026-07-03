@@ -42,6 +42,17 @@ class SpiManager {
   uint32_t framesSent() const { return frames_sent_; }
   void     resetFramesSent()  { frames_sent_ = 0; }
 
+  // Frame-scan debug gate (DIO role out_debug_framescan, #135): gate pins are
+  // driven HIGH when transferFrame() starts clocking panel data and LOW after
+  // the last panel set completes — a scope envelope spanning ALL SPI comms for
+  // one frame, LOW between frames. -1 = disabled. Set by
+  // CommandProcessor::applyDioRole (pins already configured as outputs there);
+  // one slot per DIO port so both ports may gate simultaneously.
+  void setFramescanGatePins(int16_t pin_a, int16_t pin_b) {
+    framescan_pin_a_ = pin_a;
+    framescan_pin_b_ = pin_b;
+  }
+
   volatile bool refreshFlag = false;
   volatile uint32_t isr_count_ = 0;  // refresh ISRs since boot (debug counter)
 
@@ -54,6 +65,8 @@ class SpiManager {
   uint32_t cs_setup_delay_ns_ = AC::constants::cs_setup_delay_ns;
   uint32_t cs_hold_delay_ns_  = AC::constants::cs_hold_delay_ns;
   uint32_t frames_sent_       = 0;
+  int16_t  framescan_pin_a_   = -1;  // frame-scan gate pins (setFramescanGatePins)
+  int16_t  framescan_pin_b_   = -1;
 #ifdef DEBUG_SERIAL
   uint8_t  cipo_realign_bits_ = AC::constants::cipo_realign_left_bits;
 #endif

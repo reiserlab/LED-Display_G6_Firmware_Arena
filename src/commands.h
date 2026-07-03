@@ -38,8 +38,12 @@ enum ArenaCommands : uint8_t {
   SET_AO_VOLTAGE_CMD          = 0xA0,  // [03 A0 mv_lo mv_hi] set BNC J27 (MCP4725 DAC) 0-5000 mV
   GET_AO_VOLTAGE_CMD          = 0xA1,  // [01 A1] returns hardware DAC readback as uint16 LE mV
   SET_AO_LUT_CMD              = 0xA2,  // [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
-  SET_DIGITAL_OUT_CMD         = 0xAA,  // [03 AA channel state] set DO1 (ch=1, J3) or DO2 (ch=2, J4) HIGH/LOW
-  GET_DIGITAL_OUT_CMD         = 0xAB,  // [01 AB] returns current state of DO1 and DO2 as two bytes
+  SET_AO_MODE_CMD             = 0xA3,  // [02 A3 mode] 0=programmable (0xA0/0xA2) | 1=frame_number (DAC tracks frame index, 0-5V normalized)
+  GET_ANALOG_IN_CMD           = 0xA4,  // [01 A4] returns Analog In 1 + Analog In 2 as two int16 LE mV (±10V front-end, calibration TBD)
+  SET_DIGITAL_OUT_CMD         = 0xAA,  // [03 AA channel state] drive "Digital IO 1/2 (5V)" BNC HIGH/LOW (requires role out_programmable; off auto-promotes)
+  GET_DIGITAL_OUT_CMD         = 0xAB,  // [01 AB] returns current state of Digital IO 1 and 2 data pins as two bytes
+  SET_DIO_ROLE_CMD            = 0xAC,  // [03 AC port role] port 1|2; role 0=off 1=in_trigger 2=out_programmable 3=out_debug_framescan
+  GET_DIO_ROLE_CMD            = 0xAD,  // [01 AD] returns [role1, level1, role2, level2] (level = live pin read, BNC level in input roles)
   SET_ETHERNET_IP_ADDRESS_CMD = 0xC0,  // reserved — not yet implemented
   GET_ETHERNET_IP_ADDRESS_CMD = 0xC1,
   GET_CONTROLLER_INFO_CMD     = 0xC2,  // returns {version, capability_bitmap, mac[6]}

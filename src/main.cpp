@@ -23,7 +23,6 @@ static bool ipPrinted = false;
 
 void blinkStartupPattern();
 void setupInterruptPriorities();
-void setupExternalTriggerInput();
 
 void setup() {
 #ifdef DEBUG_SERIAL
@@ -41,22 +40,15 @@ void setup() {
   spi.begin();
   sd.begin();  // mounts BUILTIN_SDCARD for Modes 2/3/4; safe with no card
 
-  setupExternalTriggerInput();
   setupInterruptPriorities();
 }
 
-// External trigger input path (BNC J4 -> U3 SN74LVC1T45 bidirectional translator ->
-// J30 shunt -> R216 (1k) -> TNY.EINT fanout (74LVC2G17 @3.3V) -> all panels' EINT/GP45).
-// U3.DIR is wired to Teensy pin 34 with no pull resistor, so the translator direction
-// is undefined until firmware sets it. Drive DIR LOW to select B->A: the 5V BNC side
-// (U3.B) becomes the input and U3.A drives the 3.3V EINT side. Without this the external
-// trigger never reaches the panels. Leave pins 35 (U3.A net) and 33 (R25->EINT) as inputs
-// so nothing else drives the EINT net. The J30 shunt must be installed for this route.
-void setupExternalTriggerInput() {
-  constexpr uint8_t EINT_BNC_DIR_PIN = 34;   // U3 DIR (net 34_RX8)
-  pinMode(EINT_BNC_DIR_PIN, OUTPUT);
-  digitalWrite(EINT_BNC_DIR_PIN, LOW);       // DIR=LOW -> B->A (BNC 5V in -> 3.3V EINT)
-}
+// The external-trigger input path (BNC "Digital IO 2 (5V)"/J4 -> U3 SN74LVC1T45
+// -> J30 shunt -> R216 -> TNY.EINT fanout -> all panels' EINT/GP45) is now set
+// up by CommandProcessor::begin() as DIO role `in_trigger` on port 2
+// (SET_DIO_ROLE 0xAC, #135) — the old setupExternalTriggerInput() here flipped
+// U3.DIR after begin() had made D35 an output, leaving D35 driving the EINT
+// net against U3 (boot contention). applyDioRole tri-states D35 first.
 
 void loop() {
   net.serviceTcp();           // 1a. Accept TCP client, read and parse commands

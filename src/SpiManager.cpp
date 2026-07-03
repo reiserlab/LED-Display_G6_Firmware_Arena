@@ -179,6 +179,13 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
   }
   ++frames_sent_;
 
+  // Frame-scan gate HIGH: envelope opens just before the first panel set's
+  // SPI transaction (out_debug_framescan, #135). digitalWrite (not Fast):
+  // runtime pin numbers, and the ns-scale overhead is invisible against a
+  // multi-hundred-µs frame transfer.
+  if (framescan_pin_a_ >= 0) digitalWrite((uint8_t)framescan_pin_a_, HIGH);
+  if (framescan_pin_b_ >= 0) digitalWrite((uint8_t)framescan_pin_b_, HIGH);
+
 #ifdef DEBUG_SERIAL
   uint32_t t0 = micros();
 #endif
@@ -233,6 +240,12 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
     digitalWriteFast(ps.cs_pin, HIGH);
     endPanelSetTransaction();
   }
+
+  // Frame-scan gate LOW: last panel set clocked out — envelope closes here,
+  // BEFORE the (slow, debug-only) CIPO dump below, so the pulse width measures
+  // actual SPI time.
+  if (framescan_pin_a_ >= 0) digitalWrite((uint8_t)framescan_pin_a_, LOW);
+  if (framescan_pin_b_ >= 0) digitalWrite((uint8_t)framescan_pin_b_, LOW);
 
 #ifdef DEBUG_SERIAL
   if (capture) {

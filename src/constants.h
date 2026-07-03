@@ -145,9 +145,12 @@ constexpr int     diag_line_byte_count_max  = 110;
 
 constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // Capability bitmap: bit0 g6_mode (always 1 for any G6 controller),
-// bit1 v2_local_storage, bit2 mode_1_tsi, bit3 v3_triggered, bit4 v3_gated.
-// Advertises g6_mode + v2_local_storage (V2 display-from-PSRAM, LAB-41/42).
-constexpr uint8_t controller_capability_bitmap = 0x03;
+// bit1 v2_local_storage, bit2 mode_1_tsi, bit3 v3_triggered, bit4 v3_gated,
+// bit5 io_ext (extended I/O command set: SET_DIO_ROLE 0xAC / GET_DIO_ROLE
+// 0xAD / SET_AO_MODE 0xA3 / GET_ANALOG_IN 0xA4 — lets hosts detect the
+// #135 rig-I/O roles by capability instead of firmware-version guessing).
+// Advertises g6_mode + v2_local_storage + io_ext.
+constexpr uint8_t controller_capability_bitmap = 0x23;
 
 // -----------------------------------------------------------------------------
 // SD pattern backend — Modes 2/3/4 load .pat files from the built-in SD slot.
@@ -200,7 +203,8 @@ constexpr uint8_t do1_dir_pin  = 36;  // DO1 U2 direction (D36, Teensy pad 28)
 constexpr uint8_t do2_data_pin = 35;  // DO2 BNC J4 data  (D35, Teensy pad 27, via U3)
 constexpr uint8_t do2_dir_pin  = 34;  // DO2 U3 direction (D34, Teensy pad 26)
 
-constexpr uint8_t  mode4_ain_pin        = 14;     // AIN0 / Teensy D14
+constexpr uint8_t  mode4_ain_pin        = 14;     // AIN0 / Teensy D14 — BNC "Analog In 1 (±10V)" (J28)
+constexpr uint8_t  ain2_pin             = 15;     // AIN1 / Teensy D15 — BNC "Analog In 2 (±10V)" (J29, g6_03: experimenter-available)
 constexpr uint32_t mode4_sample_rate_hz = 500;
 constexpr uint16_t adc_full_scale_counts = 1023;  // 10-bit analogRead default
 constexpr float    adc_ref_volts        = 3.3f;
