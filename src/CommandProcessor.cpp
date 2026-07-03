@@ -686,14 +686,21 @@ void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleGetControllerInfo() {
-  // Response payload {version_byte, capability_bitmap} (g6_03 § 5).
-  const uint8_t payload[2] = {
+  // Response payload {version_byte, capability_bitmap, mac[6]} (g6_03 § 5).
+  // The trailing 6 raw MAC bytes are the controller's physical-setup identity
+  // (Teensy 4.1 burned-in unique ID, via QNEthernet — valid even when the
+  // Ethernet link is down). Tolerant, additive extension: hosts that predate
+  // it read only the first two bytes; webDisplayTools' decodeControllerInfo
+  // reports mac:null when the payload is 2 bytes, so version stays 1.
+  uint8_t payload[8] = {
       controller_info_version,
       controller_capability_bitmap,
   };
+  net_.macBytes(payload + 2);
   current_source_->sendResponse(GET_CONTROLLER_INFO_CMD, 0, payload, sizeof(payload));
-  DBG_PRINTF("[cmd] controller-info v=%u cap=0x%02X\n",
-             (unsigned)payload[0], (unsigned)payload[1]);
+  DBG_PRINTF("[cmd] controller-info v=%u cap=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
+             (unsigned)payload[0], (unsigned)payload[1], payload[2], payload[3],
+             payload[4], payload[5], payload[6], payload[7]);
 }
 
 // ---------------------------------------------------------------------------

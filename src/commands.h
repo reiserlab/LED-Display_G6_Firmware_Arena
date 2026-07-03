@@ -42,7 +42,7 @@ enum ArenaCommands : uint8_t {
   GET_DIGITAL_OUT_CMD         = 0xAB,  // [01 AB] returns current state of DO1 and DO2 as two bytes
   SET_ETHERNET_IP_ADDRESS_CMD = 0xC0,  // reserved — not yet implemented
   GET_ETHERNET_IP_ADDRESS_CMD = 0xC1,
-  GET_CONTROLLER_INFO_CMD     = 0xC2,  // returns {version, capability_bitmap}
+  GET_CONTROLLER_INFO_CMD     = 0xC2,  // returns {version, capability_bitmap, mac[6]}
   SET_DIAG_OUTPUT_CMD         = 0xC3,  // [len=2,0xC3,on] mute/unmute DEBUG_SERIAL diagnostics
   GET_DIAG_OUTPUT_CMD         = 0xC4,  // returns current g_dbg_on state (0/1)
   SET_SPI_CLOCK_CMD           = 0xC5,  // [len=3,0xC5,lo,hi] uint16 LE MHz; echoes applied MHz

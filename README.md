@@ -89,7 +89,7 @@ Same wire framing as G4.1-ArenaSlim, accepted on both TCP and USB serial:
 | `STOP_DISPLAY`   | `0x30` | ✓ | Alias for ALL_OFF |
 | `STREAM_FRAME`   | `0x32` | ✓ | Mode 5. Frame size `4 + 20*53` (GS2 = 1064) or `4 + 20*203` (GS16 = 4064) bytes |
 | `GET_ETHERNET_IP_ADDRESS` | `0x66` | ✓ | Returns DHCP-resolved IP as ASCII |
-| `GET_CONTROLLER_INFO` | `0x67` | ✓ | Returns `{version, capability_bitmap}` (bit 0 `g6_mode` = 1) |
+| `GET_CONTROLLER_INFO` | `0xC2` | ✓ | Returns `{version, capability_bitmap, mac[6]}` (bit 0 `g6_mode` = 1; trailing raw MAC bytes = physical-setup identity, tolerant extension) |
 | `SET_FRAME_POSITION` | `0x70` | ✓ | Mode 3 — show a specific frame of the open pattern |
 | `ALL_ON`         | `0xFF` | ✓ | Synthesizes a full-bright GS16 oneshot on every panel |
 | `SYSTEM_RESET`   | `0x01` | ✓ | Software system reset — acks then reboots (SCB_AIRCR SYSRESETREQ) |

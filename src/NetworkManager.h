@@ -40,6 +40,11 @@ class NetworkManager : public MessageSource {
   const char *ipAddress() const { return ip_str_; }
   const char *macAddress() const { return mac_str_; }
 
+  // Raw hardware MAC (6 bytes) for machine-readable replies (0xC2). QNEthernet
+  // seeds its MAC from the Teensy's HW_OCOTP fuses at startup, so this is
+  // valid regardless of link/DHCP state (unlike mac_str_, cached on lease).
+  void macBytes(uint8_t out[6]) const { Ethernet.macAddress(out); }
+
  private:
   EthernetServer server_{AC::constants::ethernet_server_port};
   EthernetClient client_;
