@@ -8,7 +8,7 @@ Current capabilities:
 
 - **G4 display Modes 2, 3, 4, and 5.** Mode 5 streams full arena frames over TCP/USB; Modes 2/3/4 play `.pat` files from the SD card (open-loop auto-advance, host-commanded frame, and AIN0 closed-loop velocity).
 - **Two command transports** — TCP (port 62222) and USB-CDC serial — sharing one parser and command set.
-- **`get-controller-info` (0x67)** capability handshake and a **controller error display** ("CE / NN" glyph) for SD/CRC/parameter faults.
+- **`get-controller-info` (0xC2)** capability handshake and a **controller error display** ("CE / NN" glyph) for SD/CRC/parameter faults.
 - **Arena hardcoded to G6_2x10** — the panel-set table and CS pin map are baked in. Multi-arena lookup via [`g6_arena_configs.h`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_arena_configs.h) is deferred.
 - **10 MHz SPI**, MSB-first, **CPOL=1 / CPHA=1 (Mode 3)** per [`g6_01-panel-protocol.md`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_01-panel-protocol.md) § SPI framing. (Panels accept up to 30 MHz; the clock is held at 10 MHz during bring-up — see `spi_clock_speed` in `constants.h`.)
 - **G6 v2 `.pat` format** ([`g6_04-pattern-file-format.md`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_04-pattern-file-format.md)) is the on-disk file format the SD reader consumes.
@@ -73,12 +73,13 @@ All source files live in `src/`.
 | `constants.h` | Hardware constants, panel geometry, timing, SD/Mode-4/error constants |
 | `commands.h` | `ArenaCommands` enum (G4-compatible, G6-dropped commands marked) |
 
-## G4 host command protocol
+## Host command protocol
 
 Same wire framing as G4.1-ArenaSlim, accepted on both TCP and USB serial:
 
 - **Incoming binary:** `[length, cmd, params...]`
 - **Incoming stream:** `[0x32, len_lo, len_hi, frame_data...]` — no `analog_x`/`analog_y` bytes (G6 dropped these)
+<<<<<<< Updated upstream
 - **Response:** `[length, status(0=ok), echo_cmd, payload...]` — `payload` is an ASCII message for most commands, or raw bytes for `GET_CONTROLLER_INFO`
 
 | Command | Code | Supported | Notes |
@@ -98,8 +99,33 @@ Same wire framing as G4.1-ArenaSlim, accepted on both TCP and USB serial:
 | `ALL_ON`         | `0xFF` | ✓ | Synthesizes a full-bright GS16 oneshot on every panel |
 | `SYSTEM_RESET`   | `0x01` | ✓ | Software system reset — acks then reboots (SCB_AIRCR SYSRESETREQ) |
 | `SWITCH_GRAYSCALE` | `0x06` | ✗ | Dropped for G6 — `gs_val` is derived from the stream size / pattern header |
+||||||| Stash base
+- **Response:** `[length, status(0=ok), echo_cmd, payload...]` — `payload` is an ASCII message for most commands, or raw bytes for `GET_CONTROLLER_INFO`
+
+| Command | Code | Supported | Notes |
+|---|---|---|---|
+| `ALL_OFF`        | `0x00` | ✓ | Stops refresh, holds dark |
+| `TRIAL_PARAMS`   | `0x08` | ✓ | "Combined command" — selects display mode + SD pattern (Modes 2/3/4) |
+| `SET_REFRESH_RATE` | `0x16` | ✓ | Host override of GS-derived default (300 Hz GS16 / 1000 Hz GS2) |
+| `STOP_DISPLAY`   | `0x30` | ✓ | Alias for ALL_OFF |
+| `STREAM_FRAME`   | `0x32` | ✓ | Mode 5. Frame size `4 + 20*53` (GS2 = 1064) or `4 + 20*203` (GS16 = 4064) bytes |
+| `GET_ETHERNET_IP_ADDRESS` | `0x66` | ✓ | Returns DHCP-resolved IP as ASCII |
+| `GET_CONTROLLER_INFO` | `0x67` | ✓ | Returns `{version, capability_bitmap}` (bit 0 `g6_mode` = 1) |
+| `SET_FRAME_POSITION` | `0x70` | ✓ | Mode 3 — show a specific frame of the open pattern |
+| `ALL_ON`         | `0xFF` | ✓ | Synthesizes a full-bright GS16 oneshot on every panel |
+| `SYSTEM_RESET`   | `0x01` | ✓ | Software system reset — acks then reboots (SCB_AIRCR SYSRESETREQ) |
+| `SWITCH_GRAYSCALE` | `0x06` | ✗ | Dropped for G6 — `gs_val` is derived from the stream size / pattern header |
+=======
+- **Response:** `[length, status(0=ok), echo_cmd, payload...]` — `payload` is an ASCII message for most commands, or raw bytes for machine-readable ones (e.g. `GET_CONTROLLER_INFO`)
+>>>>>>> Stashed changes
 
 Unknown opcodes reply with `status = 1` and raise a `CE 01` error glyph.
+
+The full, current opcode list (host→controller and controller→panel) lives in
+[`g6_03-controller.md`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_03-controller.md#command-registry)
+§ Command Registry — not duplicated here, so it can't drift out of sync with `commands.h` the
+way an inline table would. `commands.h` is the source of truth for opcode values; the spec doc
+tracks it and is updated alongside firmware changes.
 
 ### Display modes
 
