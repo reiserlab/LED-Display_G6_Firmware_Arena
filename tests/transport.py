@@ -32,6 +32,7 @@ TCP_PORT = 62222
 _CMD_SET_PATTERN_FILE     = 0x85
 _CMD_SET_PATTERN_FILENAME = 0x83
 _CMD_GET_PATTERN_FILE     = 0x84
+_CMD_GET_SD_ARCHIVE       = 0x8A
 
 
 def build_frame(cmd: int, params: bytes = b"") -> bytes:
@@ -160,6 +161,33 @@ class Transport(ABC):
         if len(leftover) >= file_size:
             return status, echo, bytes(leftover[:file_size]), diag_lines
         more = self._recv_more(file_size - len(leftover), timeout)
+        return status, echo, bytes(leftover) + more, diag_lines
+
+    def get_sd_archive(self, timeout: float = 30.0) -> tuple:
+        """Fetch the SD archive via GET_SD_ARCHIVE_CMD (0x8A).
+
+        Same bulk-response shape as download_file/GET_PATTERN_FILE: framed
+        header [len=10, status, 0x8A, size_b0..b7] then raw ZIP bytes on
+        success. On error (e.g. CE_DISPLAY_ACTIVE — display still running) the
+        handler returns a plain ack frame with no bulk data following, so
+        draining is skipped. Always drain on success, even when the caller
+        only cares about `status`: leftover ZIP bytes in the stream would
+        otherwise desync the next command's response framing.
+
+        Returns (status, echo, archive_bytes, diag_lines).
+        """
+        self._send(build_frame(_CMD_GET_SD_ARCHIVE))
+        raw = self._recv_raw(timeout)
+        status, echo, payload, diag_lines, consumed = _parse_response_ex(raw)
+        if status != 0:
+            return status, echo, b"", diag_lines
+        if len(payload) < 8:
+            raise RuntimeError("GET_SD_ARCHIVE: short size payload in header frame")
+        archive_size = struct.unpack("<Q", payload[:8])[0]
+        leftover = raw[consumed:]
+        if len(leftover) >= archive_size:
+            return status, echo, bytes(leftover[:archive_size]), diag_lines
+        more = self._recv_more(archive_size - len(leftover), timeout)
         return status, echo, bytes(leftover) + more, diag_lines
 
 

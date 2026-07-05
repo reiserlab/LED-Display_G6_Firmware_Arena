@@ -66,10 +66,11 @@ class CommandProcessor {
   uint16_t frame_count_     = 0;   // frames in the open pattern
   uint16_t cur_frame_index_ = 0;   // 0-based
   int16_t  frame_rate_hz_   = 0;   // frame-advance rate (Mode 2); negative = reverse
-  int8_t   gain_            = 0;   // Mode 4 velocity scaling (10x fps/V)
+  int16_t  gain_            = 0;   // Mode 4 velocity scaling (10x fps/V)
   uint32_t last_advance_us_ = 0;   // Mode 2 frame-advance clock
   uint32_t last_sample_us_  = 0;   // Mode 4 AIN sample clock
   float    frame_accum_     = 0.0f;// Mode 4 fractional-frame accumulator
+  uint32_t trial_end_ms_    = 0;   // trial_params (0x08) Duration auto-stop deadline; 0 = not armed
 
   // Digital IO roles (#135, SET_DIO_ROLE 0xAC). Ports are 1-based on the wire
   // (== the board's "Digital IO 1/2 (5V)" BNC silkscreen == 0xAA channel);
@@ -140,12 +141,13 @@ class CommandProcessor {
   void enterAllOn();
   void enterStreamingFrame(uint16_t block_byte_count);
   bool enterPatternMode(ArenaState mode, uint16_t pattern_id,
-                        int16_t frame_rate_hz, int8_t gain,
-                        uint16_t init_frame);
+                        int16_t frame_rate_hz, int16_t gain,
+                        uint16_t init_frame, uint16_t duration_ticks);
   void showError(uint8_t code);
 
   // Per-mode service helpers.
   void transmitOnRefresh();
+  void serviceTrialTimer();  // trial_params (0x08) Duration auto-stop
   void serviceOpenLoop();
   void serviceClosedLoop();
   void servicePsramPlay();               // V2 auto-advance (LAB-41/42)

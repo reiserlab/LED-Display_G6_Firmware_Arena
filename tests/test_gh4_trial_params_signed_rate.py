@@ -34,13 +34,16 @@ EXPECTED_STEPS = RATE_HZ * SLEEP_S  # ~3
 
 
 def _trial_params(transport, mode: int, pat_id: int, frame_rate_hz: int,
-                  gain: int = 0, init_pos: int = 0):
-    """Send a trial-params command. frame_rate_hz is int16 (negative = reverse)."""
+                  gain: int = 0, init_pos: int = 0, duration_ticks: int = 0):
+    """Send a trial-params command. frame_rate_hz and gain are int16 (negative
+    frame_rate = reverse). Wire order: mode, pattern_id, frame_rate, init_pos,
+    gain, duration (post-relayout, GH #4)."""
     pat_bytes  = struct.pack("<H", pat_id)
     rate_bytes = struct.pack("<h", frame_rate_hz)  # signed int16
-    gain_byte  = struct.pack("<b", gain)
     pos_bytes  = struct.pack("<H", init_pos)
-    params = bytes([mode]) + pat_bytes + rate_bytes + gain_byte + pos_bytes + b"\x00\x00\x00"
+    gain_bytes = struct.pack("<h", gain)  # signed int16
+    dur_bytes  = struct.pack("<H", duration_ticks)
+    params = bytes([mode]) + pat_bytes + rate_bytes + pos_bytes + gain_bytes + dur_bytes
     return transport.command(TRIAL_PARAMS_CMD, params)
 
 
