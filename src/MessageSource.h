@@ -33,9 +33,21 @@ class MessageSource {
   // whole file.
   virtual size_t readBulkBytes(uint8_t* buf, size_t max_len) { return 0; }
 
-  // Flush any queued response frame and then write `len` raw bytes directly
-  // to the transport without framing. Used by 0x84 get-pattern-file to
-  // stream file data after the header response. Default is a no-op so
-  // non-streaming MessageSource subclasses don't need to override it.
-  virtual void sendRaw(const uint8_t* buf, size_t len) {}
+  // Flush any queued response frame and then write up to `len` raw bytes
+  // directly to the transport without framing. Used by 0x84 get-pattern-file
+  // to stream file data after the header response. Returns the number of
+  // bytes actually written — short of `len` means the transport stalled
+  // (e.g. host stopped draining); callers must treat a short return as an
+  // abort signal rather than retrying the remainder inline, since retrying
+  // is exactly the unbounded spin this return value exists to avoid.
+  // Default is a no-op so non-streaming MessageSource subclasses don't need
+  // to override it.
+  virtual size_t sendRaw(const uint8_t* buf, size_t len) { return 0; }
+
+  // Release the currently-pending parsed command (hasCommand() -> false),
+  // letting the transport parse its next one. Exposed on the base interface
+  // so CommandProcessor can defer this call on whichever concrete source
+  // (net_ or serial_) started an async bulk transfer — see ul_source_/
+  // dl_source_ — without needing to know which one it is.
+  virtual void commandConsumed() {}
 };

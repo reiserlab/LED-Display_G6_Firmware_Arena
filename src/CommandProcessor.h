@@ -28,6 +28,8 @@ class CommandProcessor {
   void begin();
   void processCommand();
   void serviceDisplay();
+  void serviceDownload();
+  void serviceUpload();
 
  private:
   NetworkManager &net_;
@@ -118,6 +120,58 @@ class CommandProcessor {
   uint16_t psram_play_count_  = 1;
   uint16_t psram_play_offset_ = 0;   // 0..count-1
   uint8_t  psram_cmd_id_      = G6::cmd_disp_psram_persist;
+
+  // GET_PATTERN_FILE (0x84) download state (issue #16, fix 2). Streamed one
+  // ~4 KB chunk per serviceDownload() call (driven from loop(), like
+  // serviceDisplay()) instead of blocking inside processCommand() for the
+  // whole file — the old single-call version starved net_.serviceTcp(),
+  // serial_.serviceUsb(), serviceDisplay(), and both flushResponses() for
+  // as long as the download ran. dl_deadline_ is idle-based (fix 3): it
+  // resets on every successfully drained chunk rather than being set once
+  // for the whole transfer, so a slow-but-still-progressing host doesn't
+  // trip the 60 s ceiling. A short return from sendRaw() (fix 1) — the host
+  // has stopped draining — aborts the transfer immediately rather than
+  // waiting out the idle deadline.
+  static constexpr uint32_t kDownloadIdleTimeoutMs = 60000UL;
+  File           dl_file_;
+  MessageSource *dl_source_    = nullptr;
+  uint32_t       dl_remaining_ = 0;
+  uint32_t       dl_deadline_  = 0;
+  bool           dl_active_    = false;
+
+  // SET_PATTERN_FILE (0x85) upload state (issue #16, mirroring the 0x84
+  // download fix above). Streamed one ~4 KB chunk per serviceUpload() call
+  // instead of blocking inside processCommand() for the whole transfer — the
+  // old single-call version starved net_.serviceTcp(), serial_.serviceUsb()
+  // (for the OTHER source), serviceDisplay(), and both flushResponses() for
+  // as long as the upload ran, and its 30 s idle-vs-now check could misfire
+  // on legitimately slow-but-still-arriving data the same way the pre-fix
+  // 0x84 handler's wall-clock deadline could.
+  //
+  // The pending SET_PATTERN_FILE_CMD stays un-consumed (SerialManager /
+  // NetworkManager hasCommand() keeps returning true) for as long as
+  // ul_active_ is set — see processCommand() — which is what keeps
+  // parseIncoming() from mistaking the raw file bytes still arriving on the
+  // wire for a new framed command; readBulkBytes() drains them directly.
+  // ul_draining_ marks the post-failure phase: once a timeout or SD-write
+  // error aborts the write, remaining wire bytes still have to be read and
+  // discarded (not written) before the link is back in sync — draining is
+  // itself paced by serviceUpload(), with its own shorter idle bound, rather
+  // than the old blocking drainBulkData() spin.
+  static constexpr uint32_t kUploadIdleTimeoutMs  = 30000UL;
+  static constexpr uint32_t kUploadDrainTimeoutMs = 5000UL;
+  File           ul_file_;
+  MessageSource *ul_source_      = nullptr;
+  uint16_t       ul_idx_         = 0;
+  uint32_t       ul_remaining_   = 0;
+  uint32_t       ul_total_       = 0;
+  uint32_t       ul_deadline_    = 0;
+  uint32_t       ul_start_ms_    = 0;
+  bool           ul_active_      = false;
+  bool           ul_draining_    = false;
+  uint8_t        ul_fail_status_ = 0;
+  char           ul_fail_msg_[40] = {};
+  char           ul_path_[AC::constants::pattern_name_byte_count + 16] = {};
 
   // Handlers.
   void handleBinaryCommand(const ParsedCommand &cmd);

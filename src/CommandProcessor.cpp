@@ -72,29 +72,56 @@ void CommandProcessor::processCommand() {
   // (lower-latency TCP path), then serial. Each source uses its own
   // response buffer; current_source_ tells the handlers which one to
   // send the reply back through.
-  if (net_.hasCommand()) {
+  //
+  // A source with an active 0x84 download (dl_active_, issue #16 fix 2) or
+  // 0x85 upload (ul_active_) is skipped here even if it has a newly-parsed
+  // command waiting.
+  //
+  // Downloads: sendRaw() flushes any queued response frame before writing
+  // raw bytes, so handling a new command on that same source would splice a
+  // framed response into the middle of the in-flight raw byte stream,
+  // corrupting it from the client's point of view.
+  //
+  // Uploads: the pending SET_PATTERN_FILE_CMD is deliberately left
+  // un-consumed (hasCommand() stays true) so parseIncoming() doesn't mistake
+  // its still-arriving raw file bytes for a new framed command — but that
+  // means hasCommand() alone can't gate re-entry the way it does for a
+  // genuinely new command: without this check, processCommand() would call
+  // handleBulkWriteCommand() again on every single loop() iteration for as
+  // long as the upload runs, re-entering its setup path (re-opening the
+  // file, resetting progress) instead of leaving it to serviceUpload().
+  //
+  // Either way, the command stays queued until the transfer finishes. The
+  // OTHER source is unaffected — that's the concurrency fix 2 is for.
+  if (net_.hasCommand() && !(dl_active_ && dl_source_ == &net_)
+                        && !(ul_active_ && ul_source_ == &net_)) {
     current_source_ = &net_;
     const ParsedCommand &cmd = net_.command();
     if (cmd.is_bulk) {
       handleBulkWriteCommand(cmd);
+      if (!ul_active_) net_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
+      net_.commandConsumed();
     } else {
       handleBinaryCommand(cmd);
+      net_.commandConsumed();
     }
-    net_.commandConsumed();
   }
-  if (serial_.hasCommand()) {
+  if (serial_.hasCommand() && !(dl_active_ && dl_source_ == &serial_)
+                           && !(ul_active_ && ul_source_ == &serial_)) {
     current_source_ = &serial_;
     const ParsedCommand &cmd = serial_.command();
     if (cmd.is_bulk) {
       handleBulkWriteCommand(cmd);
+      if (!ul_active_) serial_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
+      serial_.commandConsumed();
     } else {
       handleBinaryCommand(cmd);
+      serial_.commandConsumed();
     }
-    serial_.commandConsumed();
   }
   current_source_ = nullptr;
 }
@@ -339,7 +366,18 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case GET_PATTERN_FILE_CMD: {
-      // [03 84 idx_lo idx_hi]  Response: [0x0A, 0, 0x84, size_b0..b7], then raw bytes.
+      // [03 84 idx_lo idx_hi]  Response: [0x0A, 0, 0x84, size_b0..b7], then raw
+      // bytes streamed asynchronously by serviceDownload() — see fixes 1-3 in
+      // debug/issue-16-bulk-download-notes.md.
+      if (state_ != ArenaState::ALL_OFF) {
+        current_source_->sendResponse(command_byte, CE_DISPLAY_ACTIVE,
+                                      "Stop display first");
+        break;
+      }
+      if (dl_active_) {
+        current_source_->sendResponse(command_byte, 1, "Download already in progress");
+        break;
+      }
       if (claimed_len != 3) {
         current_source_->sendResponse(command_byte, 1, "Expected [03 84 idx_lo idx_hi]");
         break;
@@ -367,27 +405,18 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       uint8_t size_buf[8] = {};
       memcpy(size_buf, &file_size, sizeof(file_size));
       current_source_->sendResponse(command_byte, 0, size_buf, sizeof(size_buf));
-      // Stream raw file bytes via sendRaw (flushes the header on the first call).
-      static uint8_t chunk[4096];
-      uint32_t remaining = file_size;
-      uint32_t deadline = millis() + 60000UL;
-      uint32_t t_start = millis();
-      bool timed_out = false;
-      while (remaining > 0) {
-        if (millis() > deadline) { timed_out = true; break; }
-        size_t to_read = (remaining < sizeof(chunk)) ? (size_t)remaining : sizeof(chunk);
-        size_t n = (size_t)f.read(chunk, to_read);
-        if (n == 0) break;
-        current_source_->sendRaw(chunk, n);
-        remaining -= n;
-      }
-      uint32_t elapsed_ms = millis() - t_start;
-      uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(file_size / elapsed_ms) : 0;
-      f.close();
-      DBG_PRINTF("[cmd] get-pattern-file idx=%u name=%s size=%lu elapsed=%lu ms (%lu kB/s)%s\n",
-                 (unsigned)idx, name, (unsigned long)file_size,
-                 (unsigned long)elapsed_ms, (unsigned long)kbps,
-                 timed_out ? " (TIMEOUT)" : "");
+      // Hand off to serviceDownload() (driven from loop(), like serviceDisplay())
+      // to stream the body one ~4 KB chunk per loop iteration instead of blocking
+      // here for the whole file — the old version starved everything else in
+      // loop() (TCP/USB command intake, display refresh, response flushing) for
+      // as long as the transfer ran.
+      dl_file_      = f;
+      dl_source_    = current_source_;
+      dl_remaining_ = file_size;
+      dl_deadline_  = millis() + kDownloadIdleTimeoutMs;
+      dl_active_    = true;
+      DBG_PRINTF("[cmd] get-pattern-file idx=%u name=%s size=%lu (async)\n",
+                 (unsigned)idx, name, (unsigned long)file_size);
       break;
     }
 
@@ -1086,6 +1115,144 @@ void CommandProcessor::serviceDisplay() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// serviceDownload — one GET_PATTERN_FILE (0x84) chunk per loop() call.
+//
+// Issue #16 fixes 1-3: the old handler streamed the whole file inline inside
+// processCommand(), blocking net_.serviceTcp(), serial_.serviceUsb(),
+// serviceDisplay(), and both flushResponses() for the entire transfer (fix 2).
+// This drains one ~4 KB chunk per call instead, so those all keep running.
+//
+// dl_deadline_ resets on every successfully drained chunk rather than being
+// set once for the whole transfer (fix 3), so a slow-but-progressing host
+// doesn't trip the idle ceiling just because the transfer runs long. A short
+// return from sendRaw() (fix 1's stall bound) means the host has stopped
+// draining — abort immediately rather than waiting out the idle deadline.
+// ---------------------------------------------------------------------------
+void CommandProcessor::serviceDownload() {
+  if (!dl_active_) return;
+
+  if ((int32_t)(millis() - dl_deadline_) >= 0) {
+    DBG_PRINTF("[cmd] get-pattern-file idle TIMEOUT, %lu bytes remaining\n",
+               (unsigned long)dl_remaining_);
+    dl_file_.close();
+    dl_active_ = false;
+    return;
+  }
+
+  if (dl_remaining_ == 0) {
+    dl_file_.close();
+    dl_active_ = false;
+    return;
+  }
+
+  static uint8_t chunk[4096];
+  size_t to_read = (dl_remaining_ < sizeof(chunk)) ? (size_t)dl_remaining_ : sizeof(chunk);
+  // File::read() returns int: -1 on I/O error, 0 on EOF, else bytes read.
+  // Check the sign BEFORE narrowing to size_t — casting -1 straight to
+  // size_t (as an earlier version of this code did) yields SIZE_MAX, which
+  // then gets handed to sendRaw() as the length of a 4096-byte buffer:
+  // an out-of-bounds read that crashes/reboots the controller instead of
+  // cleanly aborting the download.
+  int rd = dl_file_.read(chunk, to_read);
+  if (rd <= 0) {  // unexpected EOF/read error before dl_remaining_ hit 0
+    DBG_PRINTF("[cmd] get-pattern-file EOF/read-error rd=%d, %lu bytes remaining\n",
+               rd, (unsigned long)dl_remaining_);
+    dl_file_.close();
+    dl_active_ = false;
+    return;
+  }
+  size_t n = (size_t)rd;
+
+  size_t sent = dl_source_->sendRaw(chunk, n);
+  dl_remaining_ -= sent;
+  if (sent < n) {
+    DBG_PRINTF("[cmd] get-pattern-file STALL sent=%lu/%lu, %lu bytes remaining\n",
+               (unsigned long)sent, (unsigned long)n, (unsigned long)dl_remaining_);
+    dl_file_.close();
+    dl_active_ = false;
+    return;
+  }
+
+  dl_deadline_ = millis() + kDownloadIdleTimeoutMs;
+  if (dl_remaining_ == 0) {
+    dl_file_.close();
+    dl_active_ = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// serviceUpload — one SET_PATTERN_FILE (0x85) chunk per loop() call.
+//
+// Mirrors serviceDownload() above (issue #16): reads+writes one ~4 KB chunk
+// per call instead of blocking inside processCommand() for the whole
+// transfer, and ul_deadline_ resets on every chunk actually read off the
+// wire rather than staying fixed from the start, so a slow-but-progressing
+// host doesn't trip the idle ceiling just because the transfer runs long.
+//
+// Unlike the download side, a failure here (idle timeout or SD write error)
+// doesn't mean the transfer can just stop: the host already committed to
+// sending total_len bytes, and whatever it hasn't sent yet will still land
+// on the wire and get misparsed as a bogus command unless something reads
+// and discards it first. ul_draining_ is that second phase — same chunked
+// service loop, just discarding instead of writing, with its own shorter
+// idle bound (kUploadDrainTimeoutMs) since by then the transfer is already
+// a lost cause and this is purely resync, not recovery.
+// ---------------------------------------------------------------------------
+void CommandProcessor::serviceUpload() {
+  if (!ul_active_) return;
+
+  if ((int32_t)(millis() - ul_deadline_) >= 0) {
+    if (!ul_draining_) {
+      ul_file_.close();
+      SD.remove(ul_path_);
+      ul_fail_status_ = 1;
+      strncpy(ul_fail_msg_, "Upload timeout", sizeof(ul_fail_msg_) - 1);
+    }
+    // Draining also timed out — give up on resync too; the next framed byte
+    // the parser sees may be garbage, but continuing to wait indefinitely
+    // isn't better.
+    ul_source_->sendResponse(SET_PATTERN_FILE_CMD, ul_fail_status_, ul_fail_msg_);
+    ul_active_ = false;
+    ul_source_->commandConsumed();
+    return;
+  }
+
+  static uint8_t chunk[4096];
+  size_t want = (ul_remaining_ < sizeof(chunk)) ? (size_t)ul_remaining_ : sizeof(chunk);
+  size_t got = ul_source_->readBulkBytes(chunk, want);
+  if (got == 0) return;  // nothing new this tick; idle check above covers staleness
+
+  if (!ul_draining_) {
+    size_t written = ul_file_.write(chunk, got);
+    if (written != got) {
+      ul_file_.close();
+      SD.remove(ul_path_);
+      ul_draining_ = true;
+      ul_fail_status_ = 1;
+      strncpy(ul_fail_msg_, "SD write error (card full?)", sizeof(ul_fail_msg_) - 1);
+    }
+  }
+  ul_remaining_ -= (uint32_t)got;
+  ul_deadline_ = millis() + (ul_draining_ ? kUploadDrainTimeoutMs : kUploadIdleTimeoutMs);
+
+  if (ul_remaining_ == 0) {
+    if (ul_draining_) {
+      ul_source_->sendResponse(SET_PATTERN_FILE_CMD, ul_fail_status_, ul_fail_msg_);
+    } else {
+      uint32_t elapsed_ms = millis() - ul_start_ms_;
+      uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(ul_total_ / elapsed_ms) : 0;
+      DBG_PRINTF("[cmd] set-pattern-file idx=%u wrote %lu bytes in %lu ms (%lu kB/s) to %s\n",
+                 (unsigned)ul_idx_, (unsigned long)ul_total_,
+                 (unsigned long)elapsed_ms, (unsigned long)kbps, ul_path_);
+      ul_file_.close();
+      ul_source_->sendResponse(SET_PATTERN_FILE_CMD, 0, "");
+    }
+    ul_active_ = false;
+    ul_source_->commandConsumed();
+  }
+}
+
 void CommandProcessor::serviceOpenLoop() {
   if (frame_rate_hz_ == 0 || frame_count_ <= 1) return;  // static frame
   uint32_t rate_hz   = (frame_rate_hz_ < 0) ? (uint32_t)(-frame_rate_hz_)
@@ -1412,6 +1579,12 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
     return;
   }
 
+  if (ul_active_) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Upload already in progress");
+    return;
+  }
+
   if (idx > sd_.patternCount()) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Index out of range");
@@ -1419,7 +1592,7 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   }
 
   // Build destination path.
-  char path[AC::constants::pattern_name_byte_count + 16];
+  char path[sizeof(ul_path_)];
   if (idx == 0) {
     snprintf(path, sizeof(path), "%s/pattern.temp", AC::constants::pattern_dir);
   } else {
@@ -1436,51 +1609,20 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
     return;
   }
 
-  static constexpr size_t CHUNK = 4096;
-  static uint8_t chunk[CHUNK];
-  uint32_t remaining = total_len;
-  uint32_t t_idle = millis();   // tracks last data arrival (timeout)
-  uint32_t t_start = millis();  // start of write phase (throughput)
-  bool ok = true;
-  const char *fail_msg = "Upload timeout";
-
-  while (remaining > 0) {
-    size_t want = (remaining < CHUNK) ? (size_t)remaining : CHUNK;
-    size_t got = current_source_->readBulkBytes(chunk, want);
-    if (got > 0) {
-      size_t written = f.write(chunk, got);
-      if (written != got) {
-        fail_msg = "SD write error (card full?)";
-        ok = false;
-        break;
-      }
-      remaining -= (uint32_t)got;
-      t_idle = millis();
-    } else {
-      if ((uint32_t)(millis() - t_idle) > 30000U) {
-        ok = false;
-        break;
-      }
-      yield();
-    }
-  }
-
-  uint32_t elapsed_ms = millis() - t_start;
-  f.close();
-  if (!ok) {
-    SD.remove(path);
-    // Consume the undelivered payload before returning to the command loop; otherwise
-    // the leftover file bytes are parsed as bogus commands and desync the link.
-    drainBulkData(remaining);
-    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, fail_msg);
-    return;
-  }
-
-  uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(total_len / elapsed_ms) : 0;
-  DBG_PRINTF("[cmd] set-pattern-file idx=%u wrote %lu bytes in %lu ms (%lu kB/s) to %s\n",
-             (unsigned)idx, (unsigned long)total_len,
-             (unsigned long)elapsed_ms, (unsigned long)kbps, path);
-  current_source_->sendResponse(SET_PATTERN_FILE_CMD, 0, "");
+  // Hand off to serviceUpload() (driven from loop(), like serviceDownload())
+  // to read+write one ~4 KB chunk per loop iteration instead of blocking here
+  // for the whole transfer — see the ul_* fields' comment in
+  // CommandProcessor.h for why this doesn't desync the command parser.
+  snprintf(ul_path_, sizeof(ul_path_), "%s", path);
+  ul_file_      = f;
+  ul_source_    = current_source_;
+  ul_idx_       = idx;
+  ul_remaining_ = total_len;
+  ul_total_     = total_len;
+  ul_start_ms_  = millis();
+  ul_deadline_  = millis() + kUploadIdleTimeoutMs;
+  ul_draining_  = false;
+  ul_active_    = true;
 }
 
 // ---------------------------------------------------------------------------

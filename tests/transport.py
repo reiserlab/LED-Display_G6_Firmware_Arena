@@ -233,6 +233,104 @@ class SerialTransport(Transport):
             )
         return bytes(buf[:n])
 
+    def begin_download(self, idx: int, timeout: float = 2.0) -> tuple:
+        """Send GET_PATTERN_FILE (0x84) and return (status, echo, file_size,
+        leftover_bytes, diag_lines) after parsing just the framed header,
+        WITHOUT draining the raw body.
+
+        Used by download_file_throttled() below, and directly by tests that
+        need to control the pace/timing of draining themselves — e.g. to
+        simulate a host that stops reading entirely (a hard stall) rather
+        than just a slow one.
+        """
+        self._send(build_frame(_CMD_GET_PATTERN_FILE, struct.pack("<H", idx)))
+        raw = self._recv_raw(timeout)
+        status, echo, payload, diag_lines, consumed = _parse_response_ex(raw)
+        if status != 0:
+            return status, echo, 0, b"", diag_lines
+        if len(payload) < 8:
+            raise RuntimeError("GET_PATTERN_FILE: short size payload in header frame")
+        file_size = struct.unpack("<Q", payload[:8])[0]
+        return status, echo, file_size, raw[consumed:], diag_lines
+
+    def download_file_throttled(self, idx: int, bytes_per_sec: float,
+                                idle_timeout: float = 20.0,
+                                overall_timeout: float = 600.0) -> tuple:
+        """Download via GET_PATTERN_FILE (0x84), pacing host reads to ~bytes_per_sec
+        on AVERAGE via a token bucket with a CAPPED burst allowance, so the total
+        transfer takes roughly file_size/bytes_per_sec — not just "eventually
+        completes" — while never leaving the OS read buffer undrained for more
+        than one poll interval (~20 ms), well under the controller's stall bound
+        (fix 1, ~1.5 s).
+
+        Three earlier versions of this helper got the pacing wrong, all
+        confirmed empirically via GET_CONTROLLER_INFO's debug fields (see
+        debug/issue-16-bulk-download-notes.md investigation):
+          v1: read a fixed chunk once per 200 ms window, then went fully idle for
+              the rest of that window (up to ~180 ms of true silence, repeated)
+              — bursty enough to look like a stall.
+          v2: a token bucket with an UNCAPPED debt — the running total could get
+              ahead of the target trajectory (e.g. from whatever the controller
+              pushed into the ~4 KB kernel buffer before the first read), and
+              then reads were withheld entirely until wall-clock time paid the
+              debt down, which took over 1.5 s and starved the controller for
+              real, not just on average.
+          v3: dropped pacing on the READ side entirely (always drained all of
+              `in_waiting`) and tried to pace by varying the sleep between
+              checks — but with nothing capping how much a single read could
+              grab, an initial burst let the whole file drain in a few checks,
+              finishing in ~10 s instead of the intended ~80 s: not a stall, but
+              not a paced transfer either.
+        v4 fixed the pacing itself (token bucket capped at half a second's
+        worth: no debt, no unbounded burst credit), but still used a FIXED
+        overall deadline from the start — exactly the wall-clock-not-idle bug
+        fix 3 exists to fix, just relocated to the test harness: a transfer
+        that was still progressing, only slower than bytes_per_sec would
+        ideally allow (real SD/USB throughput varies under sustained test-
+        session load — see debug/issue-16-bulk-download-notes.md), got killed
+        by an arbitrary total-time cutoff even though the controller's own
+        debug fields confirmed it was never actually stalled.
+        `idle_timeout` mirrors the controller's own idle-based deadline: it
+        resets on every chunk actually read, so only a genuine stall (no
+        forward progress at all) trips it. `overall_timeout` is a generous
+        absolute backstop against a truly-hung transfer, not the primary bound.
+        """
+        status, echo, file_size, leftover, diag_lines = self.begin_download(idx, 2.0)
+        if status != 0:
+            return status, echo, b"", diag_lines
+        data = bytearray(leftover)
+        start = time.monotonic()
+        overall_deadline = start + overall_timeout
+        idle_deadline = start + idle_timeout
+        poll_interval = 0.02
+        max_tokens = max(1.0, bytes_per_sec * 0.5)
+        tokens = 0.0
+        last = start
+        while len(data) < file_size:
+            now = time.monotonic()
+            if now > overall_deadline:
+                raise RuntimeError(
+                    f"throttled download exceeded overall cap ({overall_timeout}s): "
+                    f"got {len(data)}/{file_size} bytes"
+                )
+            if now > idle_deadline:
+                raise RuntimeError(
+                    f"throttled download idle for {idle_timeout}s: "
+                    f"got {len(data)}/{file_size} bytes"
+                )
+            tokens = min(max_tokens, tokens + bytes_per_sec * (now - last))
+            last = now
+            if tokens >= 1.0:
+                avail = self._ser.in_waiting
+                if avail:
+                    want = min(avail, int(tokens), file_size - len(data))
+                    if want > 0:
+                        chunk = self._ser.read(want)
+                        data.extend(chunk)
+                        tokens -= len(chunk)
+                        idle_deadline = time.monotonic() + idle_timeout
+            time.sleep(poll_interval)
+        return status, echo, bytes(data[:file_size]), diag_lines
 
 class TcpTransport(Transport):
     """TCP backend. Mirrors the socket pattern in scripts/all_on.py and controller_info.py."""

@@ -55,6 +55,8 @@ void loop() {
   serial.serviceUsb();        // 1b. Read and parse commands from USB CDC
   cmdProc.processCommand();   // 2.  Handle one parsed command per source
   cmdProc.serviceDisplay();   // 3.  Re-transmit current frame at refresh rate
+  cmdProc.serviceDownload();  // 3b. Stream one 0x84 download chunk, if one is in flight
+  cmdProc.serviceUpload();    // 3c. Stream one 0x85 upload chunk, if one is in flight
   net.flushResponses();       // 4a. Send queued responses over TCP
   serial.flushResponses();    // 4b. Send queued responses over USB CDC
 

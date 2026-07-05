@@ -191,14 +191,16 @@ void NetworkManager::flushResponses() {
   resp_len_ = 0;
 }
 
-void NetworkManager::sendRaw(const uint8_t* buf, size_t len) {
+size_t NetworkManager::sendRaw(const uint8_t* buf, size_t len) {
   // Flush any queued response frame first, then write raw bytes.
   flushResponses();
-  if (!buf || len == 0 || !client_ || !client_.connected()) return;
+  if (!buf || len == 0 || !client_ || !client_.connected()) return 0;
   // Loop until every byte is handed to the TCP stack. QNEthernet's write()
   // returns fewer bytes than requested when the LWIP send buffer is full
   // (ERR_MEM from tcp_write). A 1 ms delay lets the network timer fire and
-  // drain the send queue before we retry.
+  // drain the send queue before we retry. Unlike SerialManager::sendRaw, this
+  // loop is not stall-bounded — TCP's own connection state (client_.connected())
+  // is the exit condition, not a client-side stall (issue #16 was USB-CDC-specific).
   const uint8_t *p = buf;
   size_t remaining = len;
   while (remaining > 0 && client_.connected()) {
@@ -214,6 +216,7 @@ void NetworkManager::sendRaw(const uint8_t* buf, size_t len) {
       delayMicroseconds(250);
     }
   }
+  return len - remaining;
 }
 
 void NetworkManager::sendResponse(uint8_t cmd_echo, uint8_t status,
