@@ -1649,6 +1649,15 @@ bool CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   memcpy(&idx, cmd.data + 1, sizeof(idx));
   uint32_t total_len = cmd.bulk_payload_len;
 
+  // A 0-byte pattern file isn't a valid pattern (no header, no frames);
+  // reject it outright rather than opening/keeping an empty file around for
+  // something to fail on later (PR #27 review point 7). No drainBulkData()
+  // needed: total_len == 0 means no payload bytes follow the header at all.
+  if (total_len == 0) {
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Empty upload not supported");
+    return false;
+  }
+
   if (state_ != ArenaState::ALL_OFF) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, CE_DISPLAY_ACTIVE,
