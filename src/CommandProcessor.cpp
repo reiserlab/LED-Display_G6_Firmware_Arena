@@ -82,14 +82,15 @@ void CommandProcessor::processCommand() {
   // would splice a framed response into the middle of the in-flight raw
   // byte stream, corrupting it from the client's point of view.
   //
-  // Uploads: the pending SET_PATTERN_FILE_CMD is deliberately left
-  // un-consumed (hasCommand() stays true) so parseIncoming() doesn't mistake
-  // its still-arriving raw file bytes for a new framed command — but that
-  // means hasCommand() alone can't gate re-entry the way it does for a
-  // genuinely new command: without this check, processCommand() would call
-  // handleBulkWriteCommand() again on every single loop() iteration for as
-  // long as the upload runs, re-entering its setup path (re-opening the
-  // file, resetting progress) instead of leaving it to serviceUpload().
+  // Uploads: a command that hands off to serviceUpload() is deliberately
+  // left un-consumed (hasCommand() stays true) so parseIncoming() doesn't
+  // mistake its still-arriving raw file bytes for a new framed command.
+  // handleBulkWriteCommand()'s return value says whether THIS call handed
+  // off (true) or was fully, synchronously handled already (false). See
+  // the ul_* fields' comment in CommandProcessor.h (PR #27 review point 1)
+  // for why consuming based on the stale global ul_active_ flag instead let
+  // a REJECTED command get redispatched, and re-rejected, on every loop()
+  // iteration for as long as an UNRELATED transfer on the other source ran.
   //
   // Either way, the command stays queued until the transfer finishes. The
   // OTHER source is unaffected — that's the concurrency fix 2 is for.
@@ -99,8 +100,8 @@ void CommandProcessor::processCommand() {
     current_source_ = &net_;
     const ParsedCommand &cmd = net_.command();
     if (cmd.is_bulk) {
-      handleBulkWriteCommand(cmd);
-      if (!ul_active_) net_.commandConsumed();
+      bool async_handoff = handleBulkWriteCommand(cmd);
+      if (!async_handoff) net_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
       net_.commandConsumed();
@@ -115,8 +116,8 @@ void CommandProcessor::processCommand() {
     current_source_ = &serial_;
     const ParsedCommand &cmd = serial_.command();
     if (cmd.is_bulk) {
-      handleBulkWriteCommand(cmd);
-      if (!ul_active_) serial_.commandConsumed();
+      bool async_handoff = handleBulkWriteCommand(cmd);
+      if (!async_handoff) serial_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
       serial_.commandConsumed();
@@ -1560,17 +1561,24 @@ void CommandProcessor::fillFrameBufferDark() {
 
 // ---------------------------------------------------------------------------
 // handleBulkWriteCommand — set-pattern-file (0x85)
+//
+// Returns true only on the one path that hands off to serviceUpload():
+// the caller must leave that command unconsumed so parseIncoming() doesn't
+// mistake the still-arriving raw bytes for a new command. Every other path
+// is rejected, drained, and responded to synchronously right here, so it
+// returns false: the caller must consume the command immediately regardless
+// of ul_active_'s value for an unrelated transfer on the OTHER source (PR
+// #27 review point 1; see the ul_* fields' comment in CommandProcessor.h).
 // ---------------------------------------------------------------------------
 
-void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
+bool CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   if (cmd.cmd == SET_FIRMWARE_FILE_CMD) {
-    handleSetFirmwareFile(cmd);
-    return;
+    return handleSetFirmwareFile(cmd);
   }
   if (cmd.cmd != SET_PATTERN_FILE_CMD) {
     drainBulkData(cmd.bulk_payload_len);
     current_source_->sendResponse(cmd.cmd, 1, "Unknown bulk command");
-    return;
+    return false;
   }
 
   // Header: [0x85, idx_lo, idx_hi, len_b0..b7] (already parsed by transport)
@@ -1582,19 +1590,19 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, CE_DISPLAY_ACTIVE,
                                   "Stop display before writing to SD");
-    return;
+    return false;
   }
 
   if (ul_active_) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Upload already in progress");
-    return;
+    return false;
   }
 
   if (idx > sd_.patternCount()) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Index out of range");
-    return;
+    return false;
   }
 
   // Build destination path.
@@ -1612,7 +1620,7 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   if (!f) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "SD open failed");
-    return;
+    return false;
   }
 
   // Hand off to serviceUpload() (driven from loop(), like serviceDownload())
@@ -1629,6 +1637,7 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   ul_deadline_  = millis() + kUploadIdleTimeoutMs;
   ul_draining_  = false;
   ul_active_    = true;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1637,15 +1646,36 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
 // Streams the uploaded panel firmware image to /firmware/panel.bin (single
 // image, no index) and replies with the uint32 LE CRC-32 of the stored bytes
 // so the host can confirm the upload before issuing g6-program-panel.
+//
+// Still a single blocking call, unlike 0x84/0x85/0x8A, which all stream one
+// chunk per loop() call. While this runs, nothing else in loop() executes,
+// including serviceDownload()/serviceUpload()/serviceArchive() for an
+// unrelated transfer on the OTHER source. That transfer's idle deadline
+// measures wall-clock time since its last successfully drained chunk, not
+// whether its own host stopped sending, so a long firmware flash here could
+// starve it long enough to trip a false timeout and delete its partial
+// file (PR #27 review point 1's follow-on hazard, beyond the redispatch bug
+// the ownership fix targets). Refusing to start while ANY of
+// dl_/ul_/ar_active_ is set avoids that outright, rather than letting this
+// run and silently wreck an unrelated transfer's timing. Always returns
+// false (no async handoff): every path here, success or failure, is fully
+// synchronous by the time it returns.
 
-void CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
+bool CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
   uint32_t total_len = cmd.bulk_payload_len;
 
   if (state_ != ArenaState::ALL_OFF) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, CE_DISPLAY_ACTIVE,
                                   "Stop display before writing to SD");
-    return;
+    return false;
+  }
+
+  if (dl_active_ || ul_active_ || ar_active_) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 1,
+                                  "Bulk transfer already in progress");
+    return false;
   }
 
   SD.mkdir(AC::constants::firmware_dir);
@@ -1654,7 +1684,7 @@ void CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
   if (!f) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 1, "SD open failed");
-    return;
+    return false;
   }
 
   static constexpr size_t CHUNK = 4096;
@@ -1692,7 +1722,7 @@ void CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
     // Drain undelivered payload so leftover bytes don't desync the command loop.
     drainBulkData(remaining);
     current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 1, fail_msg);
-    return;
+    return false;
   }
 
   crc ^= 0xFFFFFFFFu;  // CRC-32 final XOR
@@ -1703,6 +1733,7 @@ void CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
   uint8_t crc_buf[4];
   memcpy(crc_buf, &crc, sizeof(crc));  // uint32 LE
   current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 0, crc_buf, sizeof(crc_buf));
+  return false;
 }
 
 // ---------------------------------------------------------------------------

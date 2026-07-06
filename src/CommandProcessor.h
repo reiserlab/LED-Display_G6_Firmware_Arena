@@ -151,9 +151,19 @@ class CommandProcessor {
   //
   // The pending SET_PATTERN_FILE_CMD stays un-consumed (SerialManager /
   // NetworkManager hasCommand() keeps returning true) for as long as
-  // ul_active_ is set — see processCommand() — which is what keeps
-  // parseIncoming() from mistaking the raw file bytes still arriving on the
-  // wire for a new framed command; readBulkBytes() drains them directly.
+  // ul_active_ is set, which is what keeps parseIncoming() from mistaking
+  // the raw file bytes still arriving on the wire for a new framed command;
+  // readBulkBytes() drains them directly. handleBulkWriteCommand()'s return
+  // value (not a re-check of ul_active_ at the consume site, PR #27 review
+  // point 1) tells processCommand() whether THIS call handed off; on every
+  // later loop() iteration the skip-dispatch guard (ul_active_ &&
+  // ul_source_ == this source) keeps the owning source out of
+  // processCommand() entirely, so the return value only matters on the one
+  // tick the handoff happens. A REJECTED command (wrong state, already
+  // busy, bad index, SD error) is fully handled by the time it returns and
+  // must be consumed right away regardless of ul_active_'s value for an
+  // UNRELATED transfer on the other source, or it gets redispatched (and
+  // re-rejected) every loop() iteration for as long as that transfer runs.
   // ul_draining_ marks the post-failure phase: once a timeout or SD-write
   // error aborts the write, remaining wire bytes still have to be read and
   // discarded (not written) before the link is back in sync — draining is
@@ -229,9 +239,9 @@ class CommandProcessor {
   void handleGetControllerInfo();
   void handleDisplayPsramIndex(const ParsedCommand &cmd);
   void handlePsramPlay(const ParsedCommand &cmd);
-  void handleBulkWriteCommand(const ParsedCommand &cmd);
+  bool handleBulkWriteCommand(const ParsedCommand &cmd);  // true = handed off to serviceUpload; caller must not consume yet
   void handleGetSdArchive();
-  void handleSetFirmwareFile(const ParsedCommand &cmd);  // set-firmware-file (0xE0)
+  bool handleSetFirmwareFile(const ParsedCommand &cmd);  // set-firmware-file (0xE0); always false, fully synchronous
   void handleGetFirmwareInfo();                          // get-firmware-info (0xE3)
   void handleProgramPanel(const ParsedCommand &cmd);     // g6-program-panel (0xC8) — SPI ISP
   void handleVerifyPanel(const ParsedCommand &cmd);      // g6-verify-panel (0xC9) — CRC running app flash
