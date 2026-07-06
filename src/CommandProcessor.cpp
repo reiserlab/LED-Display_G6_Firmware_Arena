@@ -1201,59 +1201,83 @@ void CommandProcessor::serviceDownload() {
 // doesn't mean the transfer can just stop: the host already committed to
 // sending total_len bytes, and whatever it hasn't sent yet will still land
 // on the wire and get misparsed as a bogus command unless something reads
-// and discards it first. ul_draining_ is that second phase — same chunked
-// service loop, just discarding instead of writing, with its own shorter
-// idle bound (kUploadDrainTimeoutMs) since by then the transfer is already
-// a lost cause and this is purely resync, not recovery.
+// and discards it first. ul_phase_'s kDraining value is that second phase:
+// same chunked service loop, just discarding instead of writing, with its
+// own bound (kUploadDrainTimeoutMs) since by then the transfer is already a
+// lost cause and this is purely resync, not recovery. See the ul_* fields'
+// comment in CommandProcessor.h (PR #27 review point 3) for why this is an
+// explicit phase transition rather than a bool checked at two sites: an
+// earlier version of this function used the latter and, on the FIRST
+// write-phase timeout, fell straight into the same "give up" response this
+// function now only reaches on a SECOND (drain-phase) timeout, never
+// reading the bytes still in flight, so they landed on the wire and got
+// misparsed as bogus commands once the source was freed up.
 // ---------------------------------------------------------------------------
 void CommandProcessor::serviceUpload() {
   if (!ul_active_) return;
 
-  if ((int32_t)(millis() - ul_deadline_) >= 0) {
-    if (!ul_draining_) {
+  if (ul_phase_ == UploadPhase::kWriting) {
+    if ((int32_t)(millis() - ul_deadline_) >= 0) {
+      // First (write-phase) timeout: transition into draining instead of
+      // finalizing here. ul_drain_deadline_ is an absolute cap from now,
+      // not idle-reset; see the field comment in CommandProcessor.h.
       ul_file_.close();
       SD.remove(ul_path_);
       ul_fail_status_ = 1;
       strncpy(ul_fail_msg_, "Upload timeout", sizeof(ul_fail_msg_) - 1);
+      ul_phase_ = UploadPhase::kDraining;
+      ul_drain_deadline_ = millis() + kUploadDrainTimeoutMs;
+      return;
     }
-    // Draining also timed out — give up on resync too; the next framed byte
-    // the parser sees may be garbage, but continuing to wait indefinitely
-    // isn't better.
-    ul_source_->sendResponse(SET_PATTERN_FILE_CMD, ul_fail_status_, ul_fail_msg_);
-    ul_active_ = false;
-    ul_source_->commandConsumed();
-    return;
+  } else {  // kDraining
+    if ((int32_t)(millis() - ul_drain_deadline_) >= 0) {
+      // Draining also timed out — give up on resync too; the next framed
+      // byte the parser sees may be garbage, but continuing to wait
+      // indefinitely isn't better.
+      ul_source_->sendResponse(SET_PATTERN_FILE_CMD, ul_fail_status_, ul_fail_msg_);
+      ul_active_ = false;
+      ul_source_->commandConsumed();
+      return;
+    }
   }
 
   static uint8_t chunk[4096];
   size_t want = (ul_remaining_ < sizeof(chunk)) ? (size_t)ul_remaining_ : sizeof(chunk);
   size_t got = ul_source_->readBulkBytes(chunk, want);
-  if (got == 0) return;  // nothing new this tick; idle check above covers staleness
+  if (got == 0) return;  // nothing new this tick; the checks above cover staleness
 
-  if (!ul_draining_) {
+  if (ul_phase_ == UploadPhase::kWriting) {
     size_t written = ul_file_.write(chunk, got);
     if (written != got) {
       ul_file_.close();
       SD.remove(ul_path_);
-      ul_draining_ = true;
       ul_fail_status_ = 1;
       strncpy(ul_fail_msg_, "SD write error (card full?)", sizeof(ul_fail_msg_) - 1);
+      ul_phase_ = UploadPhase::kDraining;
+      ul_drain_deadline_ = millis() + kUploadDrainTimeoutMs;
     }
   }
   ul_remaining_ -= (uint32_t)got;
-  ul_deadline_ = millis() + (ul_draining_ ? kUploadDrainTimeoutMs : kUploadIdleTimeoutMs);
+  // kDraining's deadline is an absolute cap set once above, not reset here.
+  if (ul_phase_ == UploadPhase::kWriting) {
+    ul_deadline_ = millis() + kUploadIdleTimeoutMs;
+  }
 
   if (ul_remaining_ == 0) {
-    if (ul_draining_) {
-      ul_source_->sendResponse(SET_PATTERN_FILE_CMD, ul_fail_status_, ul_fail_msg_);
-    } else {
-      uint32_t elapsed_ms = millis() - ul_start_ms_;
-      uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(ul_total_ / elapsed_ms) : 0;
-      DBG_PRINTF("[cmd] set-pattern-file idx=%u wrote %lu bytes in %lu ms (%lu kB/s) to %s\n",
-                 (unsigned)ul_idx_, (unsigned long)ul_total_,
-                 (unsigned long)elapsed_ms, (unsigned long)kbps, ul_path_);
-      ul_file_.close();
-      ul_source_->sendResponse(SET_PATTERN_FILE_CMD, 0, "");
+    switch (ul_phase_) {
+      case UploadPhase::kDraining:
+        ul_source_->sendResponse(SET_PATTERN_FILE_CMD, ul_fail_status_, ul_fail_msg_);
+        break;
+      case UploadPhase::kWriting: {
+        uint32_t elapsed_ms = millis() - ul_start_ms_;
+        uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(ul_total_ / elapsed_ms) : 0;
+        DBG_PRINTF("[cmd] set-pattern-file idx=%u wrote %lu bytes in %lu ms (%lu kB/s) to %s\n",
+                   (unsigned)ul_idx_, (unsigned long)ul_total_,
+                   (unsigned long)elapsed_ms, (unsigned long)kbps, ul_path_);
+        ul_file_.close();
+        ul_source_->sendResponse(SET_PATTERN_FILE_CMD, 0, "");
+        break;
+      }
     }
     ul_active_ = false;
     ul_source_->commandConsumed();
@@ -1635,7 +1659,7 @@ bool CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   ul_total_     = total_len;
   ul_start_ms_  = millis();
   ul_deadline_  = millis() + kUploadIdleTimeoutMs;
-  ul_draining_  = false;
+  ul_phase_     = UploadPhase::kWriting;
   ul_active_    = true;
   return true;
 }

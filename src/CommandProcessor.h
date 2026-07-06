@@ -164,23 +164,37 @@ class CommandProcessor {
   // must be consumed right away regardless of ul_active_'s value for an
   // UNRELATED transfer on the other source, or it gets redispatched (and
   // re-rejected) every loop() iteration for as long as that transfer runs.
-  // ul_draining_ marks the post-failure phase: once a timeout or SD-write
-  // error aborts the write, remaining wire bytes still have to be read and
-  // discarded (not written) before the link is back in sync — draining is
-  // itself paced by serviceUpload(), with its own shorter idle bound, rather
-  // than the old blocking drainBulkData() spin.
+  // ul_phase_ tracks the post-failure phase (PR #27 review point 3): once a
+  // timeout or SD-write error aborts the write, remaining wire bytes still
+  // have to be read and discarded (not written) before the link is back in
+  // sync, so serviceUpload() transitions kWriting -> kDraining instead of
+  // finalizing on the spot. An explicit enum with an exhaustive switch in
+  // serviceUpload() (rather than a bool read at two separate sites) is
+  // deliberate: a bool plus an implicit-else read is exactly the shape that
+  // let an earlier version of this code skip the kWriting -> kDraining
+  // transition entirely, treating a first-time write-phase timeout as if
+  // resync had already been attempted and failed. Draining is itself paced
+  // by serviceUpload(), with its own bound, rather than the old blocking
+  // drainBulkData() spin. ul_drain_deadline_ is an ABSOLUTE cap set once on
+  // entering kDraining, not idle-reset like ul_deadline_: draining exists
+  // purely to resync the parser, nothing is being preserved, so a host
+  // trickling one byte in just under the bound forever shouldn't be able to
+  // keep this phase alive indefinitely the way a genuinely slow-but-
+  // progressing kWriting upload legitimately should.
+  enum class UploadPhase : uint8_t { kWriting, kDraining };
   static constexpr uint32_t kUploadIdleTimeoutMs  = 30000UL;
   static constexpr uint32_t kUploadDrainTimeoutMs = 5000UL;
   File           ul_file_;
-  MessageSource *ul_source_      = nullptr;
-  uint16_t       ul_idx_         = 0;
-  uint32_t       ul_remaining_   = 0;
-  uint32_t       ul_total_       = 0;
-  uint32_t       ul_deadline_    = 0;
-  uint32_t       ul_start_ms_    = 0;
-  bool           ul_active_      = false;
-  bool           ul_draining_    = false;
-  uint8_t        ul_fail_status_ = 0;
+  MessageSource *ul_source_        = nullptr;
+  uint16_t       ul_idx_           = 0;
+  uint32_t       ul_remaining_     = 0;
+  uint32_t       ul_total_         = 0;
+  uint32_t       ul_deadline_      = 0;   // kWriting: idle-reset
+  uint32_t       ul_drain_deadline_ = 0;  // kDraining: absolute, set once
+  uint32_t       ul_start_ms_      = 0;
+  bool           ul_active_        = false;
+  UploadPhase    ul_phase_         = UploadPhase::kWriting;
+  uint8_t        ul_fail_status_   = 0;
   char           ul_fail_msg_[40] = {};
   char           ul_path_[AC::constants::pattern_name_byte_count + 16] = {};
 
