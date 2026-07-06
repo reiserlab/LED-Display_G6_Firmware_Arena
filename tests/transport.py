@@ -32,6 +32,7 @@ TCP_PORT = 62222
 _CMD_SET_PATTERN_FILE     = 0x85
 _CMD_SET_PATTERN_FILENAME = 0x83
 _CMD_GET_PATTERN_FILE     = 0x84
+_CMD_GET_SD_ARCHIVE       = 0x8A
 
 
 def build_frame(cmd: int, params: bytes = b"") -> bytes:
@@ -161,6 +162,52 @@ class Transport(ABC):
             return status, echo, bytes(leftover[:file_size]), diag_lines
         more = self._recv_more(file_size - len(leftover), timeout)
         return status, echo, bytes(leftover) + more, diag_lines
+
+    def get_sd_archive(self, timeout: float = 60.0) -> tuple:
+        """Fetch the SD archive via GET_SD_ARCHIVE_CMD (0x8A).
+
+        Same bulk-response shape as download_file/GET_PATTERN_FILE: framed
+        header [len=10, status, 0x8A, size_b0..b7] then raw ZIP bytes on
+        success. On error (e.g. CE_DISPLAY_ACTIVE, or "Archive already in
+        progress") the handler returns a plain ack frame with no bulk data
+        following, so draining is skipped. Always drain on success, even if
+        the caller only cares about `status`: leftover ZIP bytes left in the
+        stream would otherwise desync the next command's response framing.
+
+        Returns (status, echo, archive_bytes, diag_lines).
+        """
+        self._send(build_frame(_CMD_GET_SD_ARCHIVE))
+        raw = self._recv_raw(timeout)
+        status, echo, payload, diag_lines, consumed = _parse_response_ex(raw)
+        if status != 0:
+            return status, echo, b"", diag_lines
+        if len(payload) < 8:
+            raise RuntimeError("GET_SD_ARCHIVE: short size payload in header frame")
+        archive_size = struct.unpack("<Q", payload[:8])[0]
+        leftover = raw[consumed:]
+        if len(leftover) >= archive_size:
+            return status, echo, bytes(leftover[:archive_size]), diag_lines
+        more = self._recv_more(archive_size - len(leftover), timeout)
+        return status, echo, bytes(leftover) + more, diag_lines
+
+    def begin_get_sd_archive(self, timeout: float = 5.0) -> tuple:
+        """Send GET_SD_ARCHIVE (0x8A) and return (status, echo, archive_size,
+        leftover_bytes, diag_lines) after parsing just the framed header,
+        WITHOUT draining the raw ZIP body.
+
+        Mirrors begin_download() above: used by tests that need to control
+        the pace/timing of draining themselves, e.g. to simulate a host that
+        stops reading entirely (a hard stall) partway through the archive.
+        """
+        self._send(build_frame(_CMD_GET_SD_ARCHIVE))
+        raw = self._recv_raw(timeout)
+        status, echo, payload, diag_lines, consumed = _parse_response_ex(raw)
+        if status != 0:
+            return status, echo, 0, b"", diag_lines
+        if len(payload) < 8:
+            raise RuntimeError("GET_SD_ARCHIVE: short size payload in header frame")
+        archive_size = struct.unpack("<Q", payload[:8])[0]
+        return status, echo, archive_size, raw[consumed:], diag_lines
 
 
 class SerialTransport(Transport):

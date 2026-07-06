@@ -57,6 +57,7 @@ void loop() {
   cmdProc.serviceDisplay();   // 3.  Re-transmit current frame at refresh rate
   cmdProc.serviceDownload();  // 3b. Stream one 0x84 download chunk, if one is in flight
   cmdProc.serviceUpload();    // 3c. Stream one 0x85 upload chunk, if one is in flight
+  cmdProc.serviceArchive();   // 3d. Stream one 0x8A archive step, if one is in flight
   net.flushResponses();       // 4a. Send queued responses over TCP
   serial.flushResponses();    // 4b. Send queued responses over USB CDC
 

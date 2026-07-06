@@ -73,14 +73,14 @@ void CommandProcessor::processCommand() {
   // response buffer; current_source_ tells the handlers which one to
   // send the reply back through.
   //
-  // A source with an active 0x84 download (dl_active_, issue #16 fix 2) or
-  // 0x85 upload (ul_active_) is skipped here even if it has a newly-parsed
-  // command waiting.
+  // A source with an active 0x84 download (dl_active_, issue #16 fix 2),
+  // 0x85 upload (ul_active_), or 0x8A archive (ar_active_, PR #27 review
+  // point 2) is skipped here even if it has a newly-parsed command waiting.
   //
-  // Downloads: sendRaw() flushes any queued response frame before writing
-  // raw bytes, so handling a new command on that same source would splice a
-  // framed response into the middle of the in-flight raw byte stream,
-  // corrupting it from the client's point of view.
+  // Downloads and archives: sendRaw() flushes any queued response frame
+  // before writing raw bytes, so handling a new command on that same source
+  // would splice a framed response into the middle of the in-flight raw
+  // byte stream, corrupting it from the client's point of view.
   //
   // Uploads: the pending SET_PATTERN_FILE_CMD is deliberately left
   // un-consumed (hasCommand() stays true) so parseIncoming() doesn't mistake
@@ -94,7 +94,8 @@ void CommandProcessor::processCommand() {
   // Either way, the command stays queued until the transfer finishes. The
   // OTHER source is unaffected — that's the concurrency fix 2 is for.
   if (net_.hasCommand() && !(dl_active_ && dl_source_ == &net_)
-                        && !(ul_active_ && ul_source_ == &net_)) {
+                        && !(ul_active_ && ul_source_ == &net_)
+                        && !(ar_active_ && ar_source_ == &net_)) {
     current_source_ = &net_;
     const ParsedCommand &cmd = net_.command();
     if (cmd.is_bulk) {
@@ -109,7 +110,8 @@ void CommandProcessor::processCommand() {
     }
   }
   if (serial_.hasCommand() && !(dl_active_ && dl_source_ == &serial_)
-                           && !(ul_active_ && ul_source_ == &serial_)) {
+                           && !(ul_active_ && ul_source_ == &serial_)
+                           && !(ar_active_ && ar_source_ == &serial_)) {
     current_source_ = &serial_;
     const ParsedCommand &cmd = serial_.command();
     if (cmd.is_bulk) {
@@ -453,6 +455,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       if (state_ != ArenaState::ALL_OFF) {
         current_source_->sendResponse(command_byte, CE_DISPLAY_ACTIVE,
                                       "Stop display first");
+        break;
+      }
+      if (ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "Archive already in progress");
         break;
       }
       handleGetSdArchive();
@@ -1798,28 +1804,26 @@ void CommandProcessor::drainBulkData(uint32_t remaining) {
 }
 
 // ---------------------------------------------------------------------------
-// handleGetSdArchive — 0x8A: stream full SD content as a ZIP (store mode).
-// Sends a bulk-read response: 8-byte uint64 LE total size, then ZIP bytes.
+// handleGetSdArchive: 0x8A, arms a full-SD-content ZIP (store mode) stream.
+// Sends a bulk-read response header (8-byte uint64 LE total size) here,
+// synchronously (entry collection only stats files, open+size+close; it
+// never calls sendRaw() and can't stall a transport). The ZIP bytes
+// themselves (headers, file data, data descriptors, central directory,
+// EOCD) are streamed asynchronously afterward by serviceArchive(), one
+// bounded sendRaw() per loop() call; see the ar_* fields' comment in
+// CommandProcessor.h for why (PR #27 review point 2).
+//
 // ZIP uses data descriptors (flags=0x0008) so CRC/sizes are deferred — the
 // total size can be computed before streaming any file data.
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleGetSdArchive() {
-  struct ZipEntry {
-    char     zip_name[80];  // path inside ZIP (e.g. "patterns/foo.pat")
-    char     sd_path[80];   // full path on SD  (e.g. "/patterns/foo.pat")
-    uint32_t file_size;
-    uint32_t crc32;
-    uint32_t lhf_offset;    // byte offset of this entry's Local File Header
-    uint8_t  name_len;
-  };
-  static ZipEntry entries[258];  // 2 manifest + up to 256 patterns; ~44 KB BSS
   uint16_t entry_count = 0;
 
   // --- Collect root manifest files ---
   static const char *const kRootFiles[] = { "MANIFEST.bin", "MANIFEST.txt" };
   for (uint8_t i = 0; i < 2; ++i) {
-    ZipEntry &e = entries[entry_count];
+    ZipEntry &e = ar_entries_[entry_count];
     e.name_len = (uint8_t)strlen(kRootFiles[i]);
     memcpy(e.zip_name, kRootFiles[i], e.name_len + 1);
     snprintf(e.sd_path, sizeof(e.sd_path), "/%s", kRootFiles[i]);
@@ -1834,10 +1838,10 @@ void CommandProcessor::handleGetSdArchive() {
 
   // --- Collect pattern files ---
   uint16_t pc = sd_.patternCount();
-  for (uint16_t i = 1; i <= pc && entry_count < 258; ++i) {
+  for (uint16_t i = 1; i <= pc && entry_count < kArchiveMaxEntries; ++i) {
     const char *name = sd_.patternName(i);
     if (!name) continue;
-    ZipEntry &e = entries[entry_count];
+    ZipEntry &e = ar_entries_[entry_count];
     snprintf(e.zip_name, sizeof(e.zip_name), "patterns/%s", name);
     e.name_len = (uint8_t)strlen(e.zip_name);
     snprintf(e.sd_path, sizeof(e.sd_path), "%s/%s", AC::constants::pattern_dir, name);
@@ -1857,9 +1861,9 @@ void CommandProcessor::handleGetSdArchive() {
   uint32_t offset  = 0;
   uint32_t cd_size = 0;
   for (uint16_t i = 0; i < entry_count; ++i) {
-    entries[i].lhf_offset = offset;
-    offset  += 30u + entries[i].name_len + entries[i].file_size + 16u;
-    cd_size += 46u + entries[i].name_len;
+    ar_entries_[i].lhf_offset = offset;
+    offset  += 30u + ar_entries_[i].name_len + ar_entries_[i].file_size + 16u;
+    cd_size += 46u + ar_entries_[i].name_len;
   }
   uint32_t cd_offset  = offset;
   uint64_t total_size = (uint64_t)cd_offset + cd_size + 22u;
@@ -1869,91 +1873,172 @@ void CommandProcessor::handleGetSdArchive() {
   memcpy(size_buf, &total_size, sizeof(total_size));
   current_source_->sendResponse(GET_SD_ARCHIVE_CMD, 0, size_buf, sizeof(size_buf));
 
-  // --- Stream each entry: LFH + data + DataDescriptor ---
-  static uint8_t chunk[512];
-  static const uint8_t kZeros[64] = {};
+  // --- Arm the async stream; serviceArchive() sends the ZIP body from loop() ---
+  ar_entry_count_ = entry_count;
+  ar_entry_idx_    = 0;
+  ar_phase_        = ArchivePhase::kLocalHeader;
+  ar_cd_offset_    = cd_offset;
+  ar_cd_size_      = cd_size;
+  ar_source_       = current_source_;
+  ar_deadline_     = millis() + kArchiveIdleTimeoutMs;
+  ar_active_       = true;
 
-  for (uint16_t i = 0; i < entry_count; ++i) {
-    ZipEntry &e = entries[i];
-
-    // Local File Header (30 bytes, flags=0x0008 → data descriptor follows)
-    uint8_t lfh[30] = {};
-    lfh[0]=0x50; lfh[1]=0x4B; lfh[2]=0x03; lfh[3]=0x04;  // PK\x03\x04
-    lfh[4]=20;                                              // version needed 2.0
-    lfh[6]=0x08;                                            // flags: data descriptor
-    lfh[26]=(uint8_t)e.name_len;                            // file name length LE
-    current_source_->sendRaw(lfh, sizeof(lfh));
-    current_source_->sendRaw((const uint8_t *)e.zip_name, e.name_len);
-
-    // Stream file data, accumulate CRC-32
-    uint32_t crc      = 0xFFFFFFFFu;
-    uint32_t leftover = e.file_size;
-    File f = SD.open(e.sd_path, FILE_READ);
-    if (f) {
-      uint32_t deadline = millis() + 60000UL;
-      while (leftover > 0) {
-        if (millis() > deadline) break;
-        size_t want = (leftover < sizeof(chunk)) ? (size_t)leftover : sizeof(chunk);
-        size_t got  = (size_t)f.read(chunk, want);
-        if (got == 0) break;
-        crc = G6::crc32_update(crc, chunk, got);
-        current_source_->sendRaw(chunk, got);
-        leftover -= (uint32_t)got;
-      }
-      f.close();
-    }
-    // Pad with zeros if file is short or unavailable (preserves ZIP structure)
-    while (leftover > 0) {
-      size_t n = (leftover < sizeof(kZeros)) ? (size_t)leftover : sizeof(kZeros);
-      crc = G6::crc32_update(crc, kZeros, n);
-      current_source_->sendRaw(kZeros, n);
-      leftover -= (uint32_t)n;
-    }
-    e.crc32 = crc ^ 0xFFFFFFFFu;
-
-    // Data Descriptor (16 bytes): PK\x07\x08 + crc32 + comp_size + uncomp_size
-    uint8_t dd[16];
-    dd[0]=0x50; dd[1]=0x4B; dd[2]=0x07; dd[3]=0x08;
-    dd[4] =(uint8_t)e.crc32;         dd[5] =(uint8_t)(e.crc32>>8);
-    dd[6] =(uint8_t)(e.crc32>>16);   dd[7] =(uint8_t)(e.crc32>>24);
-    dd[8] =(uint8_t)e.file_size;     dd[9] =(uint8_t)(e.file_size>>8);
-    dd[10]=(uint8_t)(e.file_size>>16);dd[11]=(uint8_t)(e.file_size>>24);
-    dd[12]=(uint8_t)e.file_size;     dd[13]=(uint8_t)(e.file_size>>8);
-    dd[14]=(uint8_t)(e.file_size>>16);dd[15]=(uint8_t)(e.file_size>>24);
-    current_source_->sendRaw(dd, sizeof(dd));
-  }
-
-  // --- Central Directory (one entry per file) ---
-  for (uint16_t i = 0; i < entry_count; ++i) {
-    ZipEntry &e = entries[i];
-    uint8_t cde[46] = {};
-    cde[0]=0x50; cde[1]=0x4B; cde[2]=0x01; cde[3]=0x02;  // PK\x01\x02
-    cde[4]=20;   cde[6]=20;                                // version made by / needed
-    cde[8]=0x08;                                           // flags
-    cde[16]=(uint8_t)e.crc32;          cde[17]=(uint8_t)(e.crc32>>8);
-    cde[18]=(uint8_t)(e.crc32>>16);    cde[19]=(uint8_t)(e.crc32>>24);
-    cde[20]=(uint8_t)e.file_size;      cde[21]=(uint8_t)(e.file_size>>8);
-    cde[22]=(uint8_t)(e.file_size>>16);cde[23]=(uint8_t)(e.file_size>>24);
-    cde[24]=(uint8_t)e.file_size;      cde[25]=(uint8_t)(e.file_size>>8);
-    cde[26]=(uint8_t)(e.file_size>>16);cde[27]=(uint8_t)(e.file_size>>24);
-    cde[28]=(uint8_t)e.name_len;                           // file name length
-    cde[42]=(uint8_t)e.lhf_offset;     cde[43]=(uint8_t)(e.lhf_offset>>8);
-    cde[44]=(uint8_t)(e.lhf_offset>>16);cde[45]=(uint8_t)(e.lhf_offset>>24);
-    current_source_->sendRaw(cde, sizeof(cde));
-    current_source_->sendRaw((const uint8_t *)e.zip_name, e.name_len);
-  }
-
-  // --- End of Central Directory Record (22 bytes) ---
-  uint8_t eocd[22] = {};
-  eocd[0]=0x50; eocd[1]=0x4B; eocd[2]=0x05; eocd[3]=0x06;  // PK\x05\x06
-  eocd[8] =(uint8_t)entry_count;      eocd[9] =(uint8_t)(entry_count>>8);
-  eocd[10]=(uint8_t)entry_count;      eocd[11]=(uint8_t)(entry_count>>8);
-  eocd[12]=(uint8_t)cd_size;          eocd[13]=(uint8_t)(cd_size>>8);
-  eocd[14]=(uint8_t)(cd_size>>16);    eocd[15]=(uint8_t)(cd_size>>24);
-  eocd[16]=(uint8_t)cd_offset;        eocd[17]=(uint8_t)(cd_offset>>8);
-  eocd[18]=(uint8_t)(cd_offset>>16);  eocd[19]=(uint8_t)(cd_offset>>24);
-  current_source_->sendRaw(eocd, sizeof(eocd));
-
-  DBG_PRINTF("[cmd] get-sd-archive %u files %lu bytes\n",
+  DBG_PRINTF("[cmd] get-sd-archive armed: %u files, %lu bytes\n",
              (unsigned)entry_count, (unsigned long)total_size);
+}
+
+// ---------------------------------------------------------------------------
+// serviceArchive: one bounded step of the GET_SD_ARCHIVE (0x8A) ZIP stream
+// per loop() call. Mirrors serviceDownload()/serviceUpload() (issue #16):
+// each phase does at most one sendRaw() (file data is additionally chunked
+// to kChunkBytes, same as serviceDownload), checks its return, and aborts
+// the WHOLE transfer on the first short write. It never retries a partial
+// send inline, per MessageSource::sendRaw()'s documented contract.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::serviceArchive() {
+  if (!ar_active_) return;
+
+  if ((int32_t)(millis() - ar_deadline_) >= 0) {
+    DBG_PRINTF("[cmd] get-sd-archive idle TIMEOUT at entry %u/%u phase=%u\n",
+               (unsigned)ar_entry_idx_, (unsigned)ar_entry_count_,
+               (unsigned)ar_phase_);
+    abortArchive();
+    return;
+  }
+
+  static constexpr size_t kChunkBytes = 4096;
+  static uint8_t chunk[kChunkBytes];
+  static const uint8_t kZeros[kChunkBytes] = {};
+
+  switch (ar_phase_) {
+    case ArchivePhase::kLocalHeader: {
+      ZipEntry &e = ar_entries_[ar_entry_idx_];
+      uint8_t buf[30 + sizeof(e.zip_name)] = {};
+      buf[0]=0x50; buf[1]=0x4B; buf[2]=0x03; buf[3]=0x04;  // PK\x03\x04
+      buf[4]=20;                                              // version needed 2.0
+      buf[6]=0x08;                                            // flags: data descriptor
+      buf[26]=(uint8_t)e.name_len;                            // file name length LE
+      memcpy(buf + 30, e.zip_name, e.name_len);
+      size_t total = 30u + e.name_len;
+      size_t sent = ar_source_->sendRaw(buf, total);
+      if (sent < total) { abortArchive(); return; }
+
+      // Hand off to kFileData: open (or fail to open) the entry's file now,
+      // once, rather than re-attempting it every tick.
+      ar_crc_           = 0xFFFFFFFFu;
+      ar_file_remaining_ = e.file_size;
+      ar_file_          = SD.open(e.sd_path, FILE_READ);
+      ar_phase_         = ArchivePhase::kFileData;
+      ar_deadline_      = millis() + kArchiveIdleTimeoutMs;
+      break;
+    }
+
+    case ArchivePhase::kFileData: {
+      if (ar_file_remaining_ == 0) {
+        if (ar_file_) ar_file_.close();
+        ar_entries_[ar_entry_idx_].crc32 = ar_crc_ ^ 0xFFFFFFFFu;
+        ar_phase_ = ArchivePhase::kDataDescriptor;
+        break;
+      }
+      size_t want = (ar_file_remaining_ < kChunkBytes) ? (size_t)ar_file_remaining_ : kChunkBytes;
+      if (ar_file_) {
+        size_t got = (size_t)ar_file_.read(chunk, want);
+        if (got > 0) {
+          ar_crc_ = G6::crc32_update(ar_crc_, chunk, got);
+          size_t sent = ar_source_->sendRaw(chunk, got);
+          if (sent < got) { abortArchive(); return; }
+          ar_file_remaining_ -= (uint32_t)got;
+          ar_deadline_ = millis() + kArchiveIdleTimeoutMs;
+          break;
+        }
+        // EOF/read-error before ar_file_remaining_ hit 0, so fall back to
+        // zero-padding the rest so the ZIP's promised file_size still holds
+        // (mirrors the old code's short-file/unavailable-file fallback).
+        ar_file_.close();
+      }
+      // No file open (never opened, or just closed above): zero-pad this tick.
+      ar_crc_ = G6::crc32_update(ar_crc_, kZeros, want);
+      size_t sent = ar_source_->sendRaw(kZeros, want);
+      if (sent < want) { abortArchive(); return; }
+      ar_file_remaining_ -= (uint32_t)want;
+      ar_deadline_ = millis() + kArchiveIdleTimeoutMs;
+      break;
+    }
+
+    case ArchivePhase::kDataDescriptor: {
+      ZipEntry &e = ar_entries_[ar_entry_idx_];
+      uint8_t dd[16];
+      dd[0]=0x50; dd[1]=0x4B; dd[2]=0x07; dd[3]=0x08;
+      dd[4] =(uint8_t)e.crc32;          dd[5] =(uint8_t)(e.crc32>>8);
+      dd[6] =(uint8_t)(e.crc32>>16);    dd[7] =(uint8_t)(e.crc32>>24);
+      dd[8] =(uint8_t)e.file_size;      dd[9] =(uint8_t)(e.file_size>>8);
+      dd[10]=(uint8_t)(e.file_size>>16);dd[11]=(uint8_t)(e.file_size>>24);
+      dd[12]=(uint8_t)e.file_size;      dd[13]=(uint8_t)(e.file_size>>8);
+      dd[14]=(uint8_t)(e.file_size>>16);dd[15]=(uint8_t)(e.file_size>>24);
+      size_t sent = ar_source_->sendRaw(dd, sizeof(dd));
+      if (sent < sizeof(dd)) { abortArchive(); return; }
+
+      ++ar_entry_idx_;
+      ar_deadline_ = millis() + kArchiveIdleTimeoutMs;
+      if (ar_entry_idx_ < ar_entry_count_) {
+        ar_phase_ = ArchivePhase::kLocalHeader;
+      } else {
+        ar_entry_idx_ = 0;  // reused below as the Central Directory index
+        ar_phase_ = ArchivePhase::kCentralDir;
+      }
+      break;
+    }
+
+    case ArchivePhase::kCentralDir: {
+      ZipEntry &e = ar_entries_[ar_entry_idx_];
+      uint8_t buf[46 + sizeof(e.zip_name)] = {};
+      buf[0]=0x50; buf[1]=0x4B; buf[2]=0x01; buf[3]=0x02;  // PK\x01\x02
+      buf[4]=20;   buf[6]=20;                                // version made by / needed
+      buf[8]=0x08;                                           // flags
+      buf[16]=(uint8_t)e.crc32;           buf[17]=(uint8_t)(e.crc32>>8);
+      buf[18]=(uint8_t)(e.crc32>>16);     buf[19]=(uint8_t)(e.crc32>>24);
+      buf[20]=(uint8_t)e.file_size;       buf[21]=(uint8_t)(e.file_size>>8);
+      buf[22]=(uint8_t)(e.file_size>>16); buf[23]=(uint8_t)(e.file_size>>24);
+      buf[24]=(uint8_t)e.file_size;       buf[25]=(uint8_t)(e.file_size>>8);
+      buf[26]=(uint8_t)(e.file_size>>16); buf[27]=(uint8_t)(e.file_size>>24);
+      buf[28]=(uint8_t)e.name_len;                           // file name length
+      buf[42]=(uint8_t)e.lhf_offset;      buf[43]=(uint8_t)(e.lhf_offset>>8);
+      buf[44]=(uint8_t)(e.lhf_offset>>16);buf[45]=(uint8_t)(e.lhf_offset>>24);
+      memcpy(buf + 46, e.zip_name, e.name_len);
+      size_t total = 46u + e.name_len;
+      size_t sent = ar_source_->sendRaw(buf, total);
+      if (sent < total) { abortArchive(); return; }
+
+      ++ar_entry_idx_;
+      ar_deadline_ = millis() + kArchiveIdleTimeoutMs;
+      if (ar_entry_idx_ >= ar_entry_count_) ar_phase_ = ArchivePhase::kEocd;
+      break;
+    }
+
+    case ArchivePhase::kEocd: {
+      uint8_t eocd[22] = {};
+      eocd[0]=0x50; eocd[1]=0x4B; eocd[2]=0x05; eocd[3]=0x06;  // PK\x05\x06
+      eocd[8] =(uint8_t)ar_entry_count_;  eocd[9] =(uint8_t)(ar_entry_count_>>8);
+      eocd[10]=(uint8_t)ar_entry_count_;  eocd[11]=(uint8_t)(ar_entry_count_>>8);
+      eocd[12]=(uint8_t)ar_cd_size_;      eocd[13]=(uint8_t)(ar_cd_size_>>8);
+      eocd[14]=(uint8_t)(ar_cd_size_>>16);eocd[15]=(uint8_t)(ar_cd_size_>>24);
+      eocd[16]=(uint8_t)ar_cd_offset_;    eocd[17]=(uint8_t)(ar_cd_offset_>>8);
+      eocd[18]=(uint8_t)(ar_cd_offset_>>16);eocd[19]=(uint8_t)(ar_cd_offset_>>24);
+      size_t sent = ar_source_->sendRaw(eocd, sizeof(eocd));
+      if (sent < sizeof(eocd)) { abortArchive(); return; }
+
+      DBG_PRINTF("[cmd] get-sd-archive complete: %u files\n", (unsigned)ar_entry_count_);
+      ar_active_ = false;
+      break;
+    }
+  }
+}
+
+// Common teardown for an aborted (stalled or timed-out) archive stream.
+// serviceArchive() calls this instead of retrying a short sendRaw() inline,
+// per MessageSource::sendRaw()'s documented contract.
+void CommandProcessor::abortArchive() {
+  if (ar_file_) ar_file_.close();
+  ar_active_ = false;
 }

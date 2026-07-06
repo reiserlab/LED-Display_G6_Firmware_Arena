@@ -30,6 +30,7 @@ class CommandProcessor {
   void serviceDisplay();
   void serviceDownload();
   void serviceUpload();
+  void serviceArchive();
 
  private:
   NetworkManager &net_;
@@ -173,6 +174,53 @@ class CommandProcessor {
   char           ul_fail_msg_[40] = {};
   char           ul_path_[AC::constants::pattern_name_byte_count + 16] = {};
 
+  // GET_SD_ARCHIVE (0x8A) archive state (PR #27 review point 2, follow-up to
+  // the issue #16 fixes above). The old handleGetSdArchive() streamed the
+  // whole ZIP inline via ~8 sendRaw() calls and never checked any of their
+  // return values. MessageSource::sendRaw() can now return short after a
+  // 2 s stall (issue #16 fix 1) instead of blocking forever, but a caller
+  // that ignores that return just keeps going, silently dropping bytes into
+  // a ZIP it's already told the client is complete (status 0 sent up
+  // front). serviceArchive() streams one bounded sendRaw() per loop() call
+  // instead, driven the same way serviceDownload()/serviceUpload() are, and
+  // aborts the whole transfer on the first short write, matching
+  // serviceDownload's discipline exactly, not a new one.
+  //
+  // Entry collection (which files go in the ZIP, their sizes, and their
+  // Local File Header offsets) stays synchronous inside handleGetSdArchive():
+  // it only stats files (open+size+close), never calls sendRaw(), and isn't
+  // the failure mode this fixes. Only the streaming phases below (headers,
+  // file data, data descriptors, central directory, EOCD) are async.
+  struct ZipEntry {
+    char     zip_name[80];  // path inside ZIP (e.g. "patterns/foo.pat")
+    char     sd_path[80];   // full path on SD  (e.g. "/patterns/foo.pat")
+    uint32_t file_size;
+    uint32_t crc32;
+    uint32_t lhf_offset;    // byte offset of this entry's Local File Header
+    uint8_t  name_len;
+  };
+  enum class ArchivePhase : uint8_t {
+    kLocalHeader,     // send this entry's Local File Header + name
+    kFileData,        // stream (or zero-pad) this entry's file content
+    kDataDescriptor,  // send this entry's 16-byte data descriptor
+    kCentralDir,      // send one central-directory record + name
+    kEocd,            // send the End of Central Directory record
+  };
+  static constexpr uint16_t kArchiveMaxEntries    = 258;    // 2 manifest + up to 256 patterns
+  static constexpr uint32_t kArchiveIdleTimeoutMs = 60000UL;  // matches serviceDownload's ceiling
+  ZipEntry       ar_entries_[kArchiveMaxEntries];  // ~44 KB; was a function-static local
+  uint16_t       ar_entry_count_ = 0;
+  uint16_t       ar_entry_idx_   = 0;   // which entry the LFH/data/DD/CD phases act on
+  ArchivePhase   ar_phase_       = ArchivePhase::kLocalHeader;
+  File           ar_file_;              // open SD file for ar_entries_[ar_entry_idx_], kFileData only
+  uint32_t       ar_file_remaining_ = 0; // bytes of the current entry's data not yet streamed
+  uint32_t       ar_crc_            = 0; // running CRC-32 (pre-finalize) for the current entry
+  uint32_t       ar_cd_offset_      = 0; // byte offset of the Central Directory (== end of entries)
+  uint32_t       ar_cd_size_        = 0; // total Central Directory byte count
+  MessageSource *ar_source_         = nullptr;
+  uint32_t       ar_deadline_       = 0;
+  bool           ar_active_         = false;
+
   // Handlers.
   void handleBinaryCommand(const ParsedCommand &cmd);
   void handleStreamCommand(const ParsedCommand &cmd);
@@ -188,6 +236,7 @@ class CommandProcessor {
   void handleProgramPanel(const ParsedCommand &cmd);     // g6-program-panel (0xC8) — SPI ISP
   void handleVerifyPanel(const ParsedCommand &cmd);      // g6-verify-panel (0xC9) — CRC running app flash
   void drainBulkData(uint32_t remaining_bytes);
+  void abortArchive();  // serviceArchive() teardown on a stalled/timed-out 0x8A stream
 
   // State transitions.
   void enterAllOff();
