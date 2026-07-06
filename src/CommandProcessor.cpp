@@ -1066,6 +1066,25 @@ void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
 }
 
 // ---------------------------------------------------------------------------
+// serviceDisconnects: called every loop() iteration, before the per-
+// transfer service functions. PR #27 review point 5: a TCP client can
+// disconnect out from under an active 0x84/0x85/0x8A transfer, and
+// NetworkManager::serviceTcp() will happily accept a brand-new client on
+// the very same source afterward. Without this check, dl_/ul_/ar_active_
+// stay set with a stale dl_/ul_/ar_source_ pointer, so the NEW client's
+// bytes (or, for downloads/archives, its next command) get fed into or
+// blocked by a transfer it never started. isConnected() defaults to true
+// on MessageSource (serial has no equivalent failure mode, matching the
+// review's USB exclusion), so this is a no-op for serial_-owned transfers.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::serviceDisconnects() {
+  if (dl_active_ && !dl_source_->isConnected()) endDownload();
+  if (ul_active_ && !ul_source_->isConnected()) abortUpload();
+  if (ar_active_ && !ar_source_->isConnected()) abortArchive();
+}
+
+// ---------------------------------------------------------------------------
 // Display service — called every loop iteration
 // ---------------------------------------------------------------------------
 
@@ -1142,14 +1161,12 @@ void CommandProcessor::serviceDownload() {
   if ((int32_t)(millis() - dl_deadline_) >= 0) {
     DBG_PRINTF("[cmd] get-pattern-file idle TIMEOUT, %lu bytes remaining\n",
                (unsigned long)dl_remaining_);
-    dl_file_.close();
-    dl_active_ = false;
+    endDownload();
     return;
   }
 
   if (dl_remaining_ == 0) {
-    dl_file_.close();
-    dl_active_ = false;
+    endDownload();
     return;
   }
 
@@ -1165,8 +1182,7 @@ void CommandProcessor::serviceDownload() {
   if (rd <= 0) {  // unexpected EOF/read error before dl_remaining_ hit 0
     DBG_PRINTF("[cmd] get-pattern-file EOF/read-error rd=%d, %lu bytes remaining\n",
                rd, (unsigned long)dl_remaining_);
-    dl_file_.close();
-    dl_active_ = false;
+    endDownload();
     return;
   }
   size_t n = (size_t)rd;
@@ -1176,16 +1192,24 @@ void CommandProcessor::serviceDownload() {
   if (sent < n) {
     DBG_PRINTF("[cmd] get-pattern-file STALL sent=%lu/%lu, %lu bytes remaining\n",
                (unsigned long)sent, (unsigned long)n, (unsigned long)dl_remaining_);
-    dl_file_.close();
-    dl_active_ = false;
+    endDownload();
     return;
   }
 
   dl_deadline_ = millis() + kDownloadIdleTimeoutMs;
   if (dl_remaining_ == 0) {
-    dl_file_.close();
-    dl_active_ = false;
+    endDownload();
   }
+}
+
+// Common teardown for serviceDownload(), on completion, timeout, read error,
+// stall, or (PR #27 review point 5) the owning source disconnecting. No
+// response is sent either way: the header response already promised the
+// file's total size; the client infers success or failure from how many
+// bytes it actually received.
+void CommandProcessor::endDownload() {
+  dl_file_.close();
+  dl_active_ = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,6 +1306,21 @@ void CommandProcessor::serviceUpload() {
     ul_active_ = false;
     ul_source_->commandConsumed();
   }
+}
+
+// Teardown for an upload whose owning source disconnected (PR #27 review
+// point 5), distinct from serviceUpload()'s own timeout/error paths: those
+// still expect the host to resume (kWriting -> kDraining) or have already
+// finished, so they respond and consume normally. A disconnected source has
+// nothing left to respond to and nothing left to resync, so this always
+// deletes the partial file and fully deactivates in one step; there's no
+// draining phase to enter since no more bytes will ever arrive on this
+// connection.
+void CommandProcessor::abortUpload() {
+  ul_file_.close();
+  SD.remove(ul_path_);
+  ul_active_ = false;
+  ul_source_->commandConsumed();
 }
 
 void CommandProcessor::serviceOpenLoop() {

@@ -27,6 +27,7 @@ class CommandProcessor {
 
   void begin();
   void processCommand();
+  void serviceDisconnects();  // PR #27 review point 5: abort a transfer whose source went away
   void serviceDisplay();
   void serviceDownload();
   void serviceUpload();
@@ -261,6 +262,8 @@ class CommandProcessor {
   void handleVerifyPanel(const ParsedCommand &cmd);      // g6-verify-panel (0xC9) — CRC running app flash
   void drainBulkData(uint32_t remaining_bytes);
   void abortArchive();  // serviceArchive() teardown on a stalled/timed-out 0x8A stream
+  void endDownload();   // serviceDownload() teardown: completion, timeout, error, or stall
+  void abortUpload();   // serviceUpload() teardown for a disconnected owning source
 
   // State transitions.
   void enterAllOff();

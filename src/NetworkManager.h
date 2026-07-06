@@ -36,6 +36,7 @@ class NetworkManager : public MessageSource {
 
   size_t readBulkBytes(uint8_t* buf, size_t max_len) override;
   size_t sendRaw(const uint8_t* buf, size_t len) override;
+  bool   isConnected() override { return client_ && client_.connected(); }
 
   const char *ipAddress() const { return ip_str_; }
   const char *macAddress() const { return mac_str_; }

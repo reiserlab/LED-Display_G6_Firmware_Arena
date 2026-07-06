@@ -50,4 +50,12 @@ class MessageSource {
   // (net_ or serial_) started an async bulk transfer — see ul_source_/
   // dl_source_ — without needing to know which one it is.
   virtual void commandConsumed() {}
+
+  // Is the underlying connection still there? Default true: USB-CDC has no
+  // equivalent failure mode (PR #27 review points 4/5 are TCP-specific), so
+  // only NetworkManager overrides this. Used by CommandProcessor to abort a
+  // dl_/ul_/ar_ transfer whose owning source disconnected out from under it,
+  // rather than leaving that transfer's state around for a LATER, unrelated
+  // client on the same source to be silently fed into.
+  virtual bool isConnected() { return true; }
 };
