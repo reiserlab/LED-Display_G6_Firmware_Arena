@@ -1881,17 +1881,33 @@ void CommandProcessor::handleVerifyPanel(const ParsedCommand &cmd) {
   current_source_->sendResponse(G6_VERIFY_PANEL_CMD, ok ? 0 : 1, msg);
 }
 
+// Reads and discards a rejected/undelivered bulk payload so the host's
+// trailing bytes don't get misparsed as the start of a new command. Two
+// give-up conditions, whichever comes first (PR #27 review point 6):
+//   - idle: no bytes at all for kIdleTimeoutMs
+//   - absolute: kAbsoluteTimeoutMs total, from when draining started,
+//     regardless of how many times the idle deadline got reset
+// The idle-only bound let a sender pacing bytes just under it keep this call
+// "making progress" indefinitely, blocking loop() for minutes over a single
+// rejected upload. This is purely resync after a decision that's already
+// been made (the command was already rejected), nothing is being preserved,
+// so there's no reason to tolerate an unbounded drain the way a real
+// transfer's own idle-reset deadline legitimately does.
 void CommandProcessor::drainBulkData(uint32_t remaining) {
+  static constexpr uint32_t kIdleTimeoutMs     = 5000UL;
+  static constexpr uint32_t kAbsoluteTimeoutMs = 15000UL;
   uint8_t buf[256];
-  uint32_t t0 = millis();
+  uint32_t start = millis();
+  uint32_t t0 = start;
   while (remaining > 0) {
+    if ((uint32_t)(millis() - start) > kAbsoluteTimeoutMs) break;
     size_t want = (remaining < sizeof(buf)) ? (size_t)remaining : sizeof(buf);
     size_t got = current_source_->readBulkBytes(buf, want);
     if (got > 0) {
       remaining -= (uint32_t)got;
       t0 = millis();
     } else {
-      if ((uint32_t)(millis() - t0) > 5000U) break;
+      if ((uint32_t)(millis() - t0) > kIdleTimeoutMs) break;
       yield();
     }
   }
