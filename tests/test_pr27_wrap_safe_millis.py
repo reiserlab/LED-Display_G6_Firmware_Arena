@@ -18,9 +18,10 @@ naturally wraps correctly, not a comparison of the two raw operands.
 This can't be exercised as a HIL behavior test: the wrap itself is 49.7
 days away on real hardware, nothing a test can wait for. Instead, this
 statically scans the firmware source for the banned pattern. A direct
-millis()/micros() call immediately followed by a comparison operator
-(rather than a subtraction) is exactly the unsafe shape, so its absence is
-the regression signal.
+millis()/micros() call immediately next to a comparison operator (rather
+than a subtraction), in EITHER operand order (`millis() < deadline` or
+`deadline > millis()`), is exactly the unsafe shape, so its absence is the
+regression signal.
 
 Run (works without a controller attached; doesn't use the `transport`
 fixture, so it isn't gated on serial/tcp at all):
@@ -33,12 +34,15 @@ from pathlib import Path
 
 SRC_DIR = Path(__file__).parent.parent / "src"
 
-# millis()/micros() directly followed (only whitespace between) by a
-# comparison operator is the unsafe shape: it compares two absolute
-# timestamps directly. The safe idiom subtracts first, e.g.
+# millis()/micros() directly next to (only whitespace between) a comparison
+# operator, in either operand order, is the unsafe shape: it compares two
+# absolute timestamps directly. The safe idiom subtracts first, e.g.
 # `(millis() - deadline) >= 0`, so millis() is followed by ` - ...`, not a
-# comparison operator, and doesn't match this pattern.
-_UNSAFE_PATTERN = re.compile(r"\b(?:millis|micros)\(\)\s*[<>]")
+# comparison operator, on either side, and doesn't match this pattern.
+_UNSAFE_PATTERN = re.compile(
+    r"\b(?:millis|micros)\(\)\s*[<>]"       # millis() < deadline
+    r"|[<>]\s*\b(?:millis|micros)\(\)"       # deadline > millis()
+)
 
 
 def _code_only(line: str) -> str:
