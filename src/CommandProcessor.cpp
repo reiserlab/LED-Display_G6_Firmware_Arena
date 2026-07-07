@@ -361,6 +361,15 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         current_source_->sendResponse(command_byte, 1, "Index out of range");
         break;
       }
+      // PR #27 point 8 follow-up: a rename re-sorts the 1-based index space
+      // (invalidating the dl_idx_/ul_idx_ latched by in-flight transfers) and
+      // a promote (idx 0) moves pattern.temp — possibly the very file an
+      // idx-0 upload has open. Renames are rare and transfers are short, so
+      // refuse outright rather than tracking the shift.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
+        break;
+      }
 
       char new_name[AC::constants::pattern_name_byte_count];
       memcpy(new_name, buf + pos, name_len);
@@ -400,6 +409,13 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       memcpy(&idx, buf + pos, sizeof(idx));
       if (idx == 0 || idx > sd_.patternCount()) {
         current_source_->sendResponse(command_byte, 1, "Index out of range");
+        break;
+      }
+      // Mirror of the 0x85-side dl_idx_ guard: refuse downloading the one
+      // file an active upload has open for write, rather than streaming a
+      // torn half-written file under a status-0 header (point 8 symmetry).
+      if (patternBusy(idx)) {
+        current_source_->sendResponse(command_byte, 1, "Pattern is in use");
         break;
       }
       const char* name = sd_.patternName(idx);
@@ -456,6 +472,16 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         current_source_->sendResponse(command_byte, err, "Delete failed");
         break;
       }
+      // Deleting a lower-sorted pattern compacts the 1-based index space
+      // (SdManager::removeAt), so shift the latched transfer indices down
+      // with it — otherwise patternBusy()/the 0x85 dl_idx_ guard would keep
+      // guarding the wrong pattern for the rest of the transfer. idx 0
+      // (pattern.temp) doesn't live in the sorted array and shifts nothing;
+      // idx == dl_idx_/ul_idx_ was already refused by patternBusy() above.
+      if (idx >= 1) {
+        if (dl_active_ && dl_idx_ > idx) --dl_idx_;
+        if (ul_active_ && ul_idx_ > idx) --ul_idx_;
+      }
       DBG_PRINTF("[cmd] delete-pattern-file idx=%u\n", (unsigned)idx);
       current_source_->sendResponse(command_byte, 0, "");
       break;
@@ -463,9 +489,11 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
 
     case DELETE_ALL_PATTERNS_CMD: {
       // Same reasoning as DELETE_PATTERN_FILE_CMD above, but "all" has no
-      // single index to check against, so refuse outright while either
-      // mechanism is active on any pattern (PR #27 review point 8).
-      if (dl_active_ || ul_active_) {
+      // single index to check against, so refuse outright while any transfer
+      // mechanism is active (PR #27 review point 8). ar_ included: wiping the
+      // library mid-archive would zero-fill every remaining ZIP entry while
+      // the client has already been promised a status-0 archive.
+      if (dl_active_ || ul_active_ || ar_active_) {
         current_source_->sendResponse(command_byte, 1, "A transfer is in progress");
         break;
       }
@@ -489,6 +517,13 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         current_source_->sendResponse(command_byte, 1, "Archive already in progress");
         break;
       }
+      // Mirror of the 0x85-during-archive guard: an archive reads every
+      // pattern in the library, so starting one while an upload is rewriting
+      // a pattern would silently bake torn file content into a status-0 ZIP.
+      if (ul_active_) {
+        current_source_->sendResponse(command_byte, 1, "Upload in progress");
+        break;
+      }
       handleGetSdArchive();
       break;
 
@@ -502,6 +537,14 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
                                       "Stop display before flashing a panel");
         break;
       }
+      // Same rationale as the 0xE0 guard (PR #27 point 8): panel flashing
+      // blocks loop() for several seconds reading /firmware/panel.bin + SPI
+      // ISP, long enough to starve an in-flight transfer toward its idle
+      // deadline. Refuse rather than interleave.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
+        break;
+      }
       handleProgramPanel(cmd);
       break;
 
@@ -509,6 +552,12 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       if (state_ != ArenaState::ALL_OFF) {
         current_source_->sendResponse(command_byte, CE_DISPLAY_ACTIVE,
                                       "Stop display before verifying a panel");
+        break;
+      }
+      // Same rationale as G6_PROGRAM_PANEL_CMD above: multi-second blocking
+      // SD + ISP work would starve an in-flight transfer.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
         break;
       }
       handleVerifyPanel(cmd);
@@ -553,6 +602,12 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       }
       uint16_t pattern_id;
       memcpy(&pattern_id, buf + pos, sizeof(pattern_id));
+      // Same guard as handleTrialParams (PR #27 review point 8): this starts
+      // a display via sd_.openPattern(), an SD read mid-transfer otherwise.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
+        break;
+      }
       if (!enterPatternMode(ArenaState::SHOW_FRAME, pattern_id, 0, 0, 0)) {
         current_source_->sendResponse(command_byte, 1, "SET_PATTERN_ID: load failed");
         break;
@@ -2052,7 +2107,13 @@ void CommandProcessor::handleGetSdArchive() {
   // --- Arm the async stream; serviceArchive() sends the ZIP body from loop() ---
   ar_entry_count_ = entry_count;
   ar_entry_idx_    = 0;
-  ar_phase_        = ArchivePhase::kLocalHeader;
+  // Empty library (blank/absent SD): the promised total_size is the 22-byte
+  // EOCD alone. Arm straight into kEocd — kLocalHeader and kCentralDir both
+  // dereference ar_entries_[ar_entry_idx_] before any bound check, so
+  // entering either with entry_count == 0 streams a garbage (or stale, since
+  // ar_entries_ persists across archives) entry against that promise.
+  ar_phase_        = (entry_count == 0) ? ArchivePhase::kEocd
+                                        : ArchivePhase::kLocalHeader;
   ar_cd_offset_    = cd_offset;
   ar_cd_size_      = cd_size;
   ar_source_       = current_source_;
@@ -2119,8 +2180,13 @@ void CommandProcessor::serviceArchive() {
       }
       size_t want = (ar_file_remaining_ < kChunkBytes) ? (size_t)ar_file_remaining_ : kChunkBytes;
       if (ar_file_) {
-        size_t got = (size_t)ar_file_.read(chunk, want);
-        if (got > 0) {
+        // File::read() returns int: -1 on I/O error. Check the sign BEFORE
+        // narrowing to size_t — the same -1→SIZE_MAX overread serviceDownload
+        // guards against (a -1 here would walk crc32_update/sendRaw ~4 GB
+        // past the 4 KB chunk buffer).
+        int rd = ar_file_.read(chunk, want);
+        if (rd > 0) {
+          size_t got = (size_t)rd;
           ar_crc_ = G6::crc32_update(ar_crc_, chunk, got);
           size_t sent = ar_source_->sendRaw(chunk, got);
           if (sent < got) { abortArchive(); return; }
