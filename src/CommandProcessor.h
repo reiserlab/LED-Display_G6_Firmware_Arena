@@ -71,6 +71,15 @@ class CommandProcessor {
   uint16_t cur_frame_index_ = 0;   // 0-based
   int16_t  frame_rate_hz_   = 0;   // frame-advance rate (Mode 2); negative = reverse
   int8_t   gain_            = 0;   // Mode 4 velocity scaling (10x fps/V)
+  // Per-trial duty (issue #33, stateless redesign): declared in trial_params
+  // param[10] at trial start. 0 = the pattern's stored duty_cycle flows
+  // through (default, and what zero-padding legacy hosts already send);
+  // 1-255 = every frame this trial ships with this duty byte instead
+  // (patchTrialDuty in loadFrame — transmit-time only, SD data untouched).
+  // Cleared on ALL_OFF; SET_PATTERN_ID (0x03) declares no duty so it clears
+  // too. Deliberately NOT a sticky global: brightness always appears in the
+  // command that started the trial it affects (see PR #34 discussion).
+  uint8_t  trial_duty_      = 0;
   uint32_t last_advance_us_ = 0;   // Mode 2 frame-advance clock
   uint32_t last_sample_us_  = 0;   // Mode 4 AIN sample clock
   float    frame_accum_     = 0.0f;// Mode 4 fractional-frame accumulator
@@ -293,6 +302,7 @@ class CommandProcessor {
   const char *dioRoleName(DioRole role) const;    // for error payloads / debug prints
   uint8_t dispOpcodeFor(bool gs16) const; // pick DISP_* opcode for panel_disp_mode_ × gs level
   void    patchDispMode();                // rewrite block[1]+parity in every panel block in frame_buf_
+  void    patchTrialDuty();               // rewrite last byte+parity of every v1 block (no-op when trial_duty_ == 0)
 
   // Is 1-based pattern idx the target of an active download or upload? (PR
   // #27 review point 8.) Used to refuse a mutation that would race the

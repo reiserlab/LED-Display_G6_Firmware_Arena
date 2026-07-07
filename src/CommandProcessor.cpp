@@ -608,6 +608,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
         break;
       }
+      trial_duty_ = 0;  // 0x03 declares no per-trial duty → stored duty (#33)
       if (!enterPatternMode(ArenaState::SHOW_FRAME, pattern_id, 0, 0, 0)) {
         current_source_->sendResponse(command_byte, 1, "SET_PATTERN_ID: load failed");
         break;
@@ -980,7 +981,11 @@ void CommandProcessor::handleGetControllerInfo() {
 //   param[3:4] frame_rate  int16 LE  (Hz; Mode 2: positive = forward, negative = reverse)
 //   param[5]   gain        int8       (Mode 4 velocity scaling, 10x fps/V)
 //   param[6:7] init_pos    uint16 LE  (initial frame index, 0-based)
-//   param[8:]  reserved    (legacy G4 fields; ignored)
+//   param[8:9] reserved    (controller-run duration, issue #4; ignored for now)
+//   param[10]  duty        uint8: 0 = pattern's stored duty_cycle (default —
+//                          and what zero-padding legacy hosts already send),
+//                          1-255 = display every frame of THIS trial at this
+//                          duty (issue #33; transmit-time only, SD untouched)
 //
 // NOTE: the exact 12-byte G4 trial-params layout is host-canonical and still
 // being reconciled for G6 (g6_03 § Modify). This layout covers every field
@@ -1012,6 +1017,9 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
   int16_t  frame_rate = (int16_t)((uint16_t)p[3] | ((uint16_t)p[4] << 8));
   int8_t   gain       = (int8_t)p[5];
   uint16_t init_pos   = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
+  // Absent field (short legacy message) == 0 == stored duty: both spellings
+  // of "no per-trial duty" decode identically.
+  uint8_t  duty       = (param_len >= 11) ? p[10] : 0;
 
   ArenaState target;
   switch (mode) {
@@ -1024,6 +1032,8 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
                         "TRIAL_PARAMS: mode must be 2/3/4");
       return;
   }
+
+  trial_duty_ = duty;  // set BEFORE enterPatternMode — loadFrame() applies it
 
   if (enterPatternMode(target, pattern_id, frame_rate, gain, init_pos)) {
     current_source_->sendResponse(TRIAL_PARAMS_CMD, 0, "");
@@ -1501,6 +1511,7 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + (uint32_t)sd_.info().num_panels * block_byte_count_);
   patchDispMode();
+  patchTrialDuty();
   if (ao_mode_ == 1) {
     // frame_number AO (#135): DAC tracks the frame position, 0 V = frame 0 ..
     // 5 V = last frame. loadFrame only runs when the index CHANGES, so the
@@ -1531,6 +1542,7 @@ void CommandProcessor::enterAllOff() {
   }
   state_ = ArenaState::ALL_OFF;
   frame_byte_count_ = 0;
+  trial_duty_ = 0;  // trial over — per-trial duty does not outlive it (#33)
 }
 
 void CommandProcessor::enterAllOn() {
@@ -1629,6 +1641,24 @@ void CommandProcessor::patchDispMode() {
     // 0x5x / 0x6x); rewrite only the mode in the low 2 bits. Works for any
     // display block without assuming the grayscale level from block size.
     block[1] = G6::disp_opcode_with_mode((uint8_t)(block[1] & 0xFC), panel_disp_mode_);
+    G6::stamp_header_parity(block, block_byte_count_);
+  }
+}
+
+void CommandProcessor::patchTrialDuty() {
+  if (trial_duty_ == 0) return;  // 0 = pattern's stored duty flows through
+  // v1 display blocks only — the duty_cycle is each block's last byte. Only
+  // the loadFrame() path (Modes 2/3/4) reaches here, so blanking frames, the
+  // error glyph, streamed frames, and V2 PSRAM blocks are never touched.
+  if (block_byte_count_ != G6::block_byte_count_gs2 &&
+      block_byte_count_ != G6::block_byte_count_gs16) return;
+  if (frame_byte_count_ <= stream_frame_prefix_byte_count) return;
+  uint8_t *base = frame_buf_ + stream_frame_prefix_byte_count;
+  uint16_t count = (uint16_t)((frame_byte_count_ - stream_frame_prefix_byte_count)
+                               / block_byte_count_);
+  for (uint16_t p = 0; p < count; ++p) {
+    uint8_t *block = base + (uint32_t)p * block_byte_count_;
+    block[block_byte_count_ - 1] = trial_duty_;
     G6::stamp_header_parity(block, block_byte_count_);
   }
 }
