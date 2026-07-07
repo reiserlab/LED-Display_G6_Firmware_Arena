@@ -49,7 +49,6 @@ Run:
 
 import io
 import struct
-import threading
 import time
 import zipfile
 from pathlib import Path
@@ -147,39 +146,51 @@ def test_second_archive_rejected_while_one_in_flight(transport):
     an independent TCP connection must be rejected immediately. This proves
     ar_active_/ar_source_ gates a second transfer the way dl_active_ does
     for 0x84, without reproducing PR #27 review point 1's re-dispatch bug
-    (0x8A has no bulk payload, so it's always consumed right away either way)."""
+    (0x8A has no bulk payload, so it's always consumed right away either way).
+
+    Uses begin_get_sd_archive() (header-only) rather than a background
+    thread plus a fixed sleep: handleGetSdArchive()'s entry collection scans
+    every existing pattern before arming ar_active_, so on a long test
+    session with many accumulated patterns a short fixed sleep can elapse
+    before ar_active_ is actually set, a flaky false negative. The header
+    response itself is sent synchronously right after arming ar_active_, so
+    waiting for it is a deterministic signal instead of a guess.
+
+    Opens the TCP connection BEFORE arming the serial archive, not after:
+    _open_tcp_via_serial() queries the controller's IP over serial, and
+    processCommand()'s skip-dispatch guard (ar_active_ && ar_source_ ==
+    &serial_) means that query never gets a response once serial itself
+    owns an active transfer. The read loop then just accumulates raw ZIP
+    bytes and can misparse them as a garbage "response", corrupting the
+    stream for every test that runs afterward. Same reason
+    test_gh16_bulk_download.py's tests open TCP first too.
+    """
     transport.command(ALL_OFF_CMD)
     _upload(transport, GRATING_PAT, "pr27_concurrent.pat")
 
+    archive_size, leftover = 0, b""
     tcp = _open_tcp_via_serial(transport)
     try:
-        result = {}
-
-        def _archive():
-            result["r"] = transport.get_sd_archive(timeout=60.0)
-
-        th = threading.Thread(target=_archive, daemon=True)
-        th.start()
-
-        # get_sd_archive()'s first action is to send the request; give the
-        # controller a moment to receive it, run handleGetSdArchive() (which
-        # sends the header response and sets ar_active_), and start
-        # serviceArchive() streaming before firing the second request on TCP.
-        # The rejection this proves is about ar_active_ already being true,
-        # not a race at request time, so this only needs to be comfortably
-        # longer than one loop() iteration.
-        time.sleep(0.2)
-
-        st2, echo2, data2, _ = tcp.command(GET_SD_ARCHIVE_CMD, timeout=5.0)
-        th.join(timeout=65.0)
-
-        assert st2 != 0, "second concurrent GET_SD_ARCHIVE_CMD was accepted"
-        assert echo2 == GET_SD_ARCHIVE_CMD
-        assert data2 == b""
-
-        st1, echo1, data1, diag1 = result["r"]
-        assert st1 == 0, f"first (serial) archive failed: status={st1}, diag={diag1}"
+        status1, echo1, archive_size, leftover, diag1 = transport.begin_get_sd_archive(timeout=10.0)
+        assert status1 == 0, f"first (serial) archive failed: status={status1}, diag={diag1}"
         assert echo1 == GET_SD_ARCHIVE_CMD
+
+        try:
+            st2, echo2, data2, _ = tcp.command(GET_SD_ARCHIVE_CMD, timeout=5.0)
+            assert st2 != 0, "second concurrent GET_SD_ARCHIVE_CMD was accepted"
+            assert echo2 == GET_SD_ARCHIVE_CMD
+            assert b"progress" in bytes(data2).lower()
+        finally:
+            # Drain the first (legitimate) archive fully regardless of
+            # whether the probe above passed: serviceArchive() aborts the
+            # whole transfer on the first sendRaw() stall (~2 s), so a
+            # failed assertion here can't be allowed to leave the ZIP
+            # stream half-read on the shared serial connection for the
+            # next test to choke on.
+            remaining = archive_size - len(leftover)
+            more = transport._recv_more(remaining, timeout=60.0) if remaining > 0 else b""
+            data1 = leftover + more
+
         zf = zipfile.ZipFile(io.BytesIO(data1))
         assert zf.testzip() is None, "first archive has a CRC mismatch"
 
@@ -193,7 +204,8 @@ def test_second_archive_rejected_while_one_in_flight(transport):
         zf3 = zipfile.ZipFile(io.BytesIO(data3))
         assert zf3.testzip() is None, "second archive has a CRC mismatch"
     finally:
-        tcp.close()
+        if tcp is not None:
+            tcp.close()
 
 
 def _drain_serial(transport, quiet_seconds: float = 0.5):

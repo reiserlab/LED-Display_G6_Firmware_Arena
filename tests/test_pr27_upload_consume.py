@@ -131,12 +131,24 @@ def test_rejected_upload_consumed_once_not_redispatched(transport):
     def _upload():
         result["r"] = transport.upload_file(0, data, timeout=upload_timeout)
 
+    # Open the TCP connection FIRST, before starting the background upload:
+    # it queries the controller's IP over THIS SAME serial connection, and
+    # processCommand()'s skip-dispatch guard (ul_active_ && ul_source_ ==
+    # &serial_) means that query never gets a response once serial itself
+    # owns an active transfer. The read loop then just accumulates raw
+    # upload-ack bytes and can misparse them as a garbage "response",
+    # corrupting the stream for every test that runs afterward.
+    #
+    # th.start() lives inside the try (not before it) so th.join() in
+    # finally always runs, even if setup fails partway through. Otherwise
+    # the background upload's ul_active_ (and the thread itself) is left
+    # running unjoined into the next test.
     th = threading.Thread(target=_upload, daemon=True)
-    th.start()
-    time.sleep(0.3)  # let ul_active_ actually become true before firing T1's probe
-
     tcp = _open_tcp_via_serial(transport)
     try:
+        th.start()
+        time.sleep(0.3)  # let ul_active_ actually become true before firing T1's probe
+
         rejected_payload = b"\x00" * 16
         header = bytes([SET_PATTERN_FILE_CMD]) + struct.pack("<HQ", 0, len(rejected_payload))
         tcp._send(header + rejected_payload)
@@ -156,9 +168,11 @@ def test_rejected_upload_consumed_once_not_redispatched(transport):
         assert status != 0, "second concurrent upload attempt was accepted"
         assert echo == SET_PATTERN_FILE_CMD
     finally:
-        tcp.close()
+        if tcp is not None:
+            tcp.close()
+        th.join(timeout=upload_timeout + 10.0)
 
-    th.join(timeout=upload_timeout + 10.0)
+    assert "r" in result, "the background upload thread never finished"
     st, echo, _, _ = result["r"]
     assert st == 0, f"legitimate (serial) upload failed: status={st}"
     assert echo == SET_PATTERN_FILE_CMD
@@ -182,11 +196,11 @@ def test_firmware_upload_rejected_while_transfer_active(transport):
         result["r"] = transport.upload_file(0, data, timeout=upload_timeout)
 
     th = threading.Thread(target=_upload, daemon=True)
-    th.start()
-    time.sleep(0.3)
-
     tcp = _open_tcp_via_serial(transport)
     try:
+        th.start()
+        time.sleep(0.3)
+
         fw_payload = b"\x00" * 8  # content is irrelevant: the guard fires before any I/O
         header = bytes([SET_FIRMWARE_FILE_CMD]) + struct.pack("<Q", len(fw_payload))
         tcp._send(header + fw_payload)
@@ -204,9 +218,11 @@ def test_firmware_upload_rejected_while_transfer_active(transport):
         )
         assert echo == SET_FIRMWARE_FILE_CMD
     finally:
-        tcp.close()
+        if tcp is not None:
+            tcp.close()
+        th.join(timeout=upload_timeout + 10.0)
 
-    th.join(timeout=upload_timeout + 10.0)
+    assert "r" in result, "the background upload thread never finished"
     st, echo, _, _ = result["r"]
     assert st == 0, f"legitimate (serial) upload failed: status={st}"
     assert echo == SET_PATTERN_FILE_CMD

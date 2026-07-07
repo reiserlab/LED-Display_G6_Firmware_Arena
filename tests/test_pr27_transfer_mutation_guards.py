@@ -41,9 +41,11 @@ Run:
     pixi run test-serial -- -k pr27_transfer_mutation
 """
 
+import io
 import struct
 import threading
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -100,14 +102,6 @@ def _enc_trial_params(mode: int, pattern_id: int,
             + b"\x00\x00\x00")
 
 
-def _drain_download(transport, file_size: int, leftover: bytes, timeout: float = 30.0):
-    """Finish a begin_download()'d transfer so dl_active_ clears cleanly,
-    instead of leaving it to time out (kDownloadIdleTimeoutMs = 60 s)."""
-    remaining = file_size - len(leftover)
-    if remaining > 0:
-        transport._recv_more(remaining, timeout)
-
-
 # ── T1: delete-pattern guard is index-specific ────────────────────────────────
 
 @pytest.mark.serial_only
@@ -118,12 +112,38 @@ def test_delete_pattern_index_specific_while_downloading(transport):
     idx_busy = _upload(transport, GRATING_PAT, "pr27_busy.pat")
     idx_other = _upload(transport, GRATING_PAT, "pr27_other.pat")
 
-    status, echo, file_size, leftover, diag = transport.begin_download(idx_busy, timeout=5.0)
-    assert status == 0, f"begin_download failed: status={status}, diag={diag}"
-    assert echo == 0x84
-
+    # Open the TCP connection FIRST, before arming the download: it queries
+    # the controller's IP over THIS SAME serial connection, and
+    # processCommand()'s skip-dispatch guard (dl_active_ && dl_source_ ==
+    # &serial_) means that query never gets a response once serial itself
+    # owns an active transfer. The read loop then just accumulates raw
+    # file bytes and can misparse them as a garbage "response", corrupting
+    # the stream for every test that runs afterward.
+    #
+    # begin_download() (header-only) stays on the MAIN thread so arming is
+    # synchronous and deterministic: dl_active_ is guaranteed true by the
+    # time the probes below fire. The body is then drained on a BACKGROUND
+    # thread concurrently with the probes: serviceDownload() aborts the
+    # whole transfer the moment a single sendRaw() call stalls
+    # (SerialManager::sendRaw's 2 s kStallTimeoutMs), and the two TCP probes
+    # below, each with their own multi-second timeout, are easily enough
+    # idle time on serial to trip that if nothing drains meanwhile.
+    file_size, leftover = 0, b""
     tcp = _open_tcp_via_serial(transport)
+    th = None
+    drained = {}
     try:
+        status, echo, file_size, leftover, diag = transport.begin_download(idx_busy, timeout=5.0)
+        assert status == 0, f"begin_download failed: status={status}, diag={diag}"
+        assert echo == 0x84
+
+        def _drain():
+            remaining = file_size - len(leftover)
+            drained["body"] = transport._recv_more(remaining, timeout=60.0) if remaining > 0 else b""
+
+        th = threading.Thread(target=_drain, daemon=True)
+        th.start()
+
         st_busy, echo_busy, payload_busy, _ = tcp.command(
             DELETE_PATTERN_FILE_CMD, struct.pack("<H", idx_busy), timeout=5.0
         )
@@ -137,8 +157,15 @@ def test_delete_pattern_index_specific_while_downloading(transport):
         assert st_other == 0, "deleting an UNRELATED pattern was refused"
         assert echo_other == DELETE_PATTERN_FILE_CMD
     finally:
-        tcp.close()
-        _drain_download(transport, file_size, leftover)
+        if tcp is not None:
+            tcp.close()
+        if th is not None:
+            th.join(timeout=70.0)
+
+    if th is not None:
+        assert "body" in drained, "the background drain thread never finished"
+        got = leftover + drained["body"]
+        assert got == GRATING_PAT.read_bytes(), "the legitimate (serial) download was corrupted"
 
 
 # ── T2: upload-vs-download guard is index-specific ────────────────────────────
@@ -150,12 +177,27 @@ def test_upload_index_specific_while_downloading(transport):
     transport.command(ALL_OFF_CMD)
     idx_busy = _upload(transport, GRATING_PAT, "pr27_busy2.pat")
 
-    status, echo, file_size, leftover, diag = transport.begin_download(idx_busy, timeout=5.0)
-    assert status == 0, f"begin_download failed: status={status}, diag={diag}"
-    assert echo == 0x84
-
+    # See T1's comment: begin_download() (header-only) stays on the main
+    # thread so dl_active_ is guaranteed true by the time the probes below
+    # fire; a background thread then drains the body concurrently with the
+    # probes so it can't stall out after ~2 s of an idle serial link
+    # (SerialManager::sendRaw's kStallTimeoutMs).
+    file_size, leftover = 0, b""
     tcp = _open_tcp_via_serial(transport)
+    th = None
+    drained = {}
     try:
+        status, echo, file_size, leftover, diag = transport.begin_download(idx_busy, timeout=5.0)
+        assert status == 0, f"begin_download failed: status={status}, diag={diag}"
+        assert echo == 0x84
+
+        def _drain():
+            remaining = file_size - len(leftover)
+            drained["body"] = transport._recv_more(remaining, timeout=60.0) if remaining > 0 else b""
+
+        th = threading.Thread(target=_drain, daemon=True)
+        th.start()
+
         small = GRATING_PAT.read_bytes()[:4096]
 
         st_busy, echo_busy, payload_busy, _ = tcp.upload_file(idx_busy, small, timeout=5.0)
@@ -167,8 +209,15 @@ def test_upload_index_specific_while_downloading(transport):
         assert st_other == 0, "uploading to an UNRELATED slot (pattern.temp) was refused"
         assert echo_other == SET_PATTERN_FILE_CMD
     finally:
-        tcp.close()
-        _drain_download(transport, file_size, leftover)
+        if tcp is not None:
+            tcp.close()
+        if th is not None:
+            th.join(timeout=70.0)
+
+    if th is not None:
+        assert "body" in drained, "the background drain thread never finished"
+        got = leftover + drained["body"]
+        assert got == GRATING_PAT.read_bytes(), "the legitimate (serial) download was corrupted"
 
 
 # ── T3: delete-all guard is blanket ────────────────────────────────────────────
@@ -188,21 +237,23 @@ def test_delete_all_rejected_while_uploading(transport):
         result["r"] = transport.upload_file(0, data, timeout=upload_timeout)
 
     th = threading.Thread(target=_big_upload, daemon=True)
-    th.start()
-    time.sleep(0.3)
-
     tcp = _open_tcp_via_serial(transport)
     try:
+        th.start()
+        time.sleep(0.3)
+
         st, echo, payload, _ = tcp.command(DELETE_ALL_PATTERNS_CMD, timeout=5.0)
         assert st != 0, "DELETE_ALL_PATTERNS_CMD was accepted during an active upload"
         assert echo == DELETE_ALL_PATTERNS_CMD
         assert b"progress" in bytes(payload).lower()
     finally:
-        tcp.close()
+        if tcp is not None:
+            tcp.close()
         th.join(timeout=upload_timeout + 10.0)
-        st_up, echo_up, _, diag_up = result["r"]
-        assert st_up == 0, f"the unrelated upload itself failed: status={st_up}, diag={diag_up}"
-        assert echo_up == SET_PATTERN_FILE_CMD
+        if "r" in result:
+            st_up, echo_up, _, diag_up = result["r"]
+            assert st_up == 0, f"the unrelated upload itself failed: status={st_up}, diag={diag_up}"
+            assert echo_up == SET_PATTERN_FILE_CMD
 
 
 # ── T4: upload guard against an active archive is blanket ────────────────────
@@ -214,22 +265,43 @@ def test_upload_rejected_while_archiving(transport):
     transport.command(ALL_OFF_CMD)
     _upload(transport, GRATING_PAT, "pr27_archive_src.pat")
 
-    status, echo, archive_size, leftover, diag = transport.begin_get_sd_archive(timeout=5.0)
-    assert status == 0, f"begin_get_sd_archive failed: status={status}, diag={diag}"
-    assert echo == GET_SD_ARCHIVE_CMD
-
+    # See T1's comment: begin_get_sd_archive() (header-only) stays on the
+    # main thread so ar_active_ is guaranteed true by the time the probe
+    # below fires; a background thread then drains the ZIP body concurrently
+    # so it can't stall out from an idle serial link (serviceArchive()
+    # mirrors serviceDownload()'s abort-on-stall discipline).
+    archive_size, leftover = 0, b""
     tcp = _open_tcp_via_serial(transport)
+    th = None
+    drained = {}
     try:
+        status, echo, archive_size, leftover, diag = transport.begin_get_sd_archive(timeout=10.0)
+        assert status == 0, f"begin_get_sd_archive failed: status={status}, diag={diag}"
+        assert echo == GET_SD_ARCHIVE_CMD
+
+        def _drain():
+            remaining = archive_size - len(leftover)
+            drained["body"] = transport._recv_more(remaining, timeout=60.0) if remaining > 0 else b""
+
+        th = threading.Thread(target=_drain, daemon=True)
+        th.start()
+
         small = GRATING_PAT.read_bytes()[:4096]
         st, echo_up, payload, _ = tcp.upload_file(0, small, timeout=5.0)
         assert st != 0, "SET_PATTERN_FILE was accepted while an archive was active"
         assert echo_up == SET_PATTERN_FILE_CMD
         assert b"archive" in bytes(payload).lower()
     finally:
-        tcp.close()
-        remaining = archive_size - len(leftover)
-        if remaining > 0:
-            transport._recv_more(remaining, timeout=30.0)
+        if tcp is not None:
+            tcp.close()
+        if th is not None:
+            th.join(timeout=70.0)
+
+    if th is not None:
+        assert "body" in drained, "the background drain thread never finished"
+        data_ar = leftover + drained["body"]
+        zf = zipfile.ZipFile(io.BytesIO(data_ar))
+        assert zf.testzip() is None, "archive has a CRC mismatch"
 
 
 # ── T5: ALL_ON / TRIAL_PARAMS guards are blanket ──────────────────────────────
@@ -242,12 +314,27 @@ def test_all_on_and_trial_params_rejected_during_transfer(transport):
     transport.command(ALL_OFF_CMD)
     idx = _upload(transport, GRATING_PAT, "pr27_display_guard.pat")
 
-    status, echo, file_size, leftover, diag = transport.begin_download(idx, timeout=5.0)
-    assert status == 0, f"begin_download failed: status={status}, diag={diag}"
-    assert echo == 0x84
-
+    # See T1's comment: begin_download() (header-only) stays on the main
+    # thread so dl_active_ is guaranteed true by the time the probes below
+    # fire; a background thread then drains the body concurrently with the
+    # probes so it can't stall out after ~2 s of an idle serial link
+    # (SerialManager::sendRaw's kStallTimeoutMs).
+    file_size, leftover = 0, b""
     tcp = _open_tcp_via_serial(transport)
+    th = None
+    drained = {}
     try:
+        status, echo, file_size, leftover, diag = transport.begin_download(idx, timeout=5.0)
+        assert status == 0, f"begin_download failed: status={status}, diag={diag}"
+        assert echo == 0x84
+
+        def _drain():
+            remaining = file_size - len(leftover)
+            drained["body"] = transport._recv_more(remaining, timeout=60.0) if remaining > 0 else b""
+
+        th = threading.Thread(target=_drain, daemon=True)
+        th.start()
+
         st_on, echo_on, payload_on, _ = tcp.command(ALL_ON_CMD, timeout=5.0)
         assert st_on != 0, "ALL_ON_CMD was accepted during an active download"
         assert echo_on == ALL_ON_CMD
@@ -260,7 +347,14 @@ def test_all_on_and_trial_params_rejected_during_transfer(transport):
         assert b"progress" in bytes(payload_tp).lower()
     finally:
         # Both guarded commands were refused, so state_ never changed and
-        # there's nothing to stop; just release the TCP connection and the
-        # download's dl_active_.
-        tcp.close()
-        _drain_download(transport, file_size, leftover)
+        # there's nothing to stop; just release the TCP connection and join
+        # the drain thread.
+        if tcp is not None:
+            tcp.close()
+        if th is not None:
+            th.join(timeout=70.0)
+
+    if th is not None:
+        assert "body" in drained, "the background drain thread never finished"
+        got = leftover + drained["body"]
+        assert got == GRATING_PAT.read_bytes(), "the legitimate (serial) download was corrupted"
