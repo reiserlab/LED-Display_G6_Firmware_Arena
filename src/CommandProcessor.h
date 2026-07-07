@@ -137,6 +137,7 @@ class CommandProcessor {
   static constexpr uint32_t kDownloadIdleTimeoutMs = 60000UL;
   File           dl_file_;
   MessageSource *dl_source_    = nullptr;
+  uint16_t       dl_idx_       = 0;  // 1-based pattern index being downloaded (PR #27 review point 8)
   uint32_t       dl_remaining_ = 0;
   uint32_t       dl_deadline_  = 0;
   bool           dl_active_    = false;
@@ -292,4 +293,15 @@ class CommandProcessor {
   const char *dioRoleName(DioRole role) const;    // for error payloads / debug prints
   uint8_t dispOpcodeFor(bool gs16) const; // pick DISP_* opcode for panel_disp_mode_ × gs level
   void    patchDispMode();                // rewrite block[1]+parity in every panel block in frame_buf_
+
+  // Is 1-based pattern idx the target of an active download or upload? (PR
+  // #27 review point 8.) Used to refuse a mutation that would race the
+  // SAME file a transfer already has open, without blocking mutations to
+  // unrelated indices. Doesn't check ar_active_: an archive tolerates its
+  // target file being deleted mid-stream already (zero-pads and keeps
+  // going, same fallback as a file that never existed), so there's no
+  // narrower-than-"any archive running" check worth adding for it.
+  bool patternBusy(uint16_t idx) const {
+    return (dl_active_ && dl_idx_ == idx) || (ul_active_ && ul_idx_ == idx);
+  }
 };

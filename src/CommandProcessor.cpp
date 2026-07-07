@@ -149,6 +149,17 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
 
     case ALL_ON_CMD:
+      // PR #27 review point 8: a state transition mid-transfer doesn't
+      // disrupt the transfer itself (serviceDownload()/serviceUpload()/
+      // serviceArchive() don't read state_ at all) or corrupt anything (SD
+      // is SDIO, not shared with the panel SPI path, and loop() is
+      // single-threaded so accesses are naturally serialized), but it's
+      // still confusing at the bench to have the arena visibly change while
+      // an SD transfer nobody can see is still in flight, so refuse it.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
+        break;
+      }
       enterAllOn();
       current_source_->sendResponse(command_byte, 0, "All-On Received");
       break;
@@ -415,6 +426,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       // as long as the transfer ran.
       dl_file_      = f;
       dl_source_    = current_source_;
+      dl_idx_       = idx;
       dl_remaining_ = file_size;
       dl_deadline_  = millis() + kDownloadIdleTimeoutMs;
       dl_active_    = true;
@@ -431,6 +443,14 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       }
       uint16_t idx;
       memcpy(&idx, buf + pos, sizeof(idx));
+      // Refuse deleting the one file an active download/upload has open
+      // (PR #27 review point 8) rather than racing it. A download degrades
+      // gracefully if its file vanishes anyway, but refusing here avoids
+      // silently stranding that client instead of just telling it no.
+      if (patternBusy(idx)) {
+        current_source_->sendResponse(command_byte, 1, "Pattern is in use");
+        break;
+      }
       uint8_t err = sd_.deletePattern(idx);
       if (err != CE_NONE) {
         current_source_->sendResponse(command_byte, err, "Delete failed");
@@ -442,6 +462,13 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case DELETE_ALL_PATTERNS_CMD: {
+      // Same reasoning as DELETE_PATTERN_FILE_CMD above, but "all" has no
+      // single index to check against, so refuse outright while either
+      // mechanism is active on any pattern (PR #27 review point 8).
+      if (dl_active_ || ul_active_) {
+        current_source_->sendResponse(command_byte, 1, "A transfer is in progress");
+        break;
+      }
       uint8_t err = sd_.deleteAllPatterns();
       if (err != CE_NONE) {
         current_source_->sendResponse(command_byte, err, "Delete-all failed");
@@ -906,6 +933,17 @@ void CommandProcessor::handleGetControllerInfo() {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
+  // PR #27 review point 8: trial-start opens a pattern via sd_.openPattern(),
+  // an SD read, mid-transfer of an unrelated dl_/ul_/ar_ operation. Same
+  // reasoning as the ALL_ON guard above: not corrupting (SD is SDIO, and
+  // loop() is single-threaded so accesses are naturally serialized), but
+  // confusing to have the display change while an SD transfer is still in
+  // flight, so refuse it rather than let it interleave.
+  if (dl_active_ || ul_active_ || ar_active_) {
+    current_source_->sendResponse(TRIAL_PARAMS_CMD, 1, "SD transfer in progress");
+    return;
+  }
+
   const uint8_t *p = cmd.data + 2;          // first param byte
   uint8_t param_len = cmd.data[0] - 1;       // claimed_len minus the cmd byte
   if (param_len < 8) {
@@ -1668,6 +1706,25 @@ bool CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   if (ul_active_) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Upload already in progress");
+    return false;
+  }
+
+  // The write below (SD.remove() + reopen for write) would race whichever
+  // OTHER transfer already has this same file open for reading: a
+  // download's dl_file_, or, since an archive can be reading any pattern in
+  // the library at a given moment, any active archive at all (PR #27 review
+  // point 8). Unlike a delete (which only frees clusters a reader degrades
+  // gracefully without), a concurrent write reallocates them, so this one
+  // is refused outright rather than tolerated.
+  if (dl_active_ && dl_idx_ == idx) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Pattern is being downloaded");
+    return false;
+  }
+
+  if (ar_active_) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Archive in progress");
     return false;
   }
 
