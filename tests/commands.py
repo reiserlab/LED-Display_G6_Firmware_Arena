@@ -25,6 +25,7 @@ SET_PATTERN_FILE_CMD        = 0x85
 DELETE_PATTERN_FILE_CMD     = 0x86
 GET_SD_ARCHIVE_CMD          = 0x8A
 DELETE_ALL_PATTERNS_CMD     = 0x8F
+SET_FIRMWARE_FILE_CMD       = 0xE0   # [0xE0, len_b0..b7, data...] upload image -> /firmware/panel.bin; reply u32 LE CRC-32
 SET_AO_VOLTAGE_CMD          = 0xA0   # [03 A0 mv_lo mv_hi] set BNC J27 (MCP4725) 0-5000 mV
 GET_AO_VOLTAGE_CMD          = 0xA1   # [01 A1] returns hardware DAC readback as uint16 LE mV
 SET_AO_LUT_CMD              = 0xA2   # [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT

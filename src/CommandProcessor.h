@@ -27,7 +27,11 @@ class CommandProcessor {
 
   void begin();
   void processCommand();
+  void serviceDisconnects();  // PR #27 review point 5: abort a transfer whose source went away
   void serviceDisplay();
+  void serviceDownload();
+  void serviceUpload();
+  void serviceArchive();
 
  private:
   NetworkManager &net_;
@@ -120,6 +124,130 @@ class CommandProcessor {
   uint16_t psram_play_offset_ = 0;   // 0..count-1
   uint8_t  psram_cmd_id_      = G6::cmd_disp_psram_persist;
 
+  // GET_PATTERN_FILE (0x84) download state (issue #16, fix 2). Streamed one
+  // ~4 KB chunk per serviceDownload() call (driven from loop(), like
+  // serviceDisplay()) instead of blocking inside processCommand() for the
+  // whole file — the old single-call version starved net_.serviceTcp(),
+  // serial_.serviceUsb(), serviceDisplay(), and both flushResponses() for
+  // as long as the download ran. dl_deadline_ is idle-based (fix 3): it
+  // resets on every successfully drained chunk rather than being set once
+  // for the whole transfer, so a slow-but-still-progressing host doesn't
+  // trip the 60 s ceiling. A short return from sendRaw() (fix 1) — the host
+  // has stopped draining — aborts the transfer immediately rather than
+  // waiting out the idle deadline.
+  static constexpr uint32_t kDownloadIdleTimeoutMs = 60000UL;
+  File           dl_file_;
+  MessageSource *dl_source_    = nullptr;
+  uint16_t       dl_idx_       = 0;  // 1-based pattern index being downloaded (PR #27 review point 8)
+  uint32_t       dl_remaining_ = 0;
+  uint32_t       dl_deadline_  = 0;
+  bool           dl_active_    = false;
+
+  // SET_PATTERN_FILE (0x85) upload state (issue #16, mirroring the 0x84
+  // download fix above). Streamed one ~4 KB chunk per serviceUpload() call
+  // instead of blocking inside processCommand() for the whole transfer — the
+  // old single-call version starved net_.serviceTcp(), serial_.serviceUsb()
+  // (for the OTHER source), serviceDisplay(), and both flushResponses() for
+  // as long as the upload ran, and its 30 s idle-vs-now check could misfire
+  // on legitimately slow-but-still-arriving data the same way the pre-fix
+  // 0x84 handler's wall-clock deadline could.
+  //
+  // The pending SET_PATTERN_FILE_CMD stays un-consumed (SerialManager /
+  // NetworkManager hasCommand() keeps returning true) for as long as
+  // ul_active_ is set, which is what keeps parseIncoming() from mistaking
+  // the raw file bytes still arriving on the wire for a new framed command;
+  // readBulkBytes() drains them directly. handleBulkWriteCommand()'s return
+  // value (not a re-check of ul_active_ at the consume site, PR #27 review
+  // point 1) tells processCommand() whether THIS call handed off; on every
+  // later loop() iteration the skip-dispatch guard (ul_active_ &&
+  // ul_source_ == this source) keeps the owning source out of
+  // processCommand() entirely, so the return value only matters on the one
+  // tick the handoff happens. A REJECTED command (wrong state, already
+  // busy, bad index, SD error) is fully handled by the time it returns and
+  // must be consumed right away regardless of ul_active_'s value for an
+  // UNRELATED transfer on the other source, or it gets redispatched (and
+  // re-rejected) every loop() iteration for as long as that transfer runs.
+  // ul_phase_ tracks the post-failure phase (PR #27 review point 3): once a
+  // timeout or SD-write error aborts the write, remaining wire bytes still
+  // have to be read and discarded (not written) before the link is back in
+  // sync, so serviceUpload() transitions kWriting -> kDraining instead of
+  // finalizing on the spot. An explicit enum with an exhaustive switch in
+  // serviceUpload() (rather than a bool read at two separate sites) is
+  // deliberate: a bool plus an implicit-else read is exactly the shape that
+  // let an earlier version of this code skip the kWriting -> kDraining
+  // transition entirely, treating a first-time write-phase timeout as if
+  // resync had already been attempted and failed. Draining is itself paced
+  // by serviceUpload(), with its own bound, rather than the old blocking
+  // drainBulkData() spin. ul_drain_deadline_ is an ABSOLUTE cap set once on
+  // entering kDraining, not idle-reset like ul_deadline_: draining exists
+  // purely to resync the parser, nothing is being preserved, so a host
+  // trickling one byte in just under the bound forever shouldn't be able to
+  // keep this phase alive indefinitely the way a genuinely slow-but-
+  // progressing kWriting upload legitimately should.
+  enum class UploadPhase : uint8_t { kWriting, kDraining };
+  static constexpr uint32_t kUploadIdleTimeoutMs  = 30000UL;
+  static constexpr uint32_t kUploadDrainTimeoutMs = 5000UL;
+  File           ul_file_;
+  MessageSource *ul_source_        = nullptr;
+  uint16_t       ul_idx_           = 0;
+  uint32_t       ul_remaining_     = 0;
+  uint32_t       ul_total_         = 0;
+  uint32_t       ul_deadline_      = 0;   // kWriting: idle-reset
+  uint32_t       ul_drain_deadline_ = 0;  // kDraining: absolute, set once
+  uint32_t       ul_start_ms_      = 0;
+  bool           ul_active_        = false;
+  UploadPhase    ul_phase_         = UploadPhase::kWriting;
+  uint8_t        ul_fail_status_   = 0;
+  char           ul_fail_msg_[40] = {};
+  char           ul_path_[AC::constants::pattern_name_byte_count + 16] = {};
+
+  // GET_SD_ARCHIVE (0x8A) archive state (PR #27 review point 2, follow-up to
+  // the issue #16 fixes above). The old handleGetSdArchive() streamed the
+  // whole ZIP inline via ~8 sendRaw() calls and never checked any of their
+  // return values. MessageSource::sendRaw() can now return short after a
+  // 2 s stall (issue #16 fix 1) instead of blocking forever, but a caller
+  // that ignores that return just keeps going, silently dropping bytes into
+  // a ZIP it's already told the client is complete (status 0 sent up
+  // front). serviceArchive() streams one bounded sendRaw() per loop() call
+  // instead, driven the same way serviceDownload()/serviceUpload() are, and
+  // aborts the whole transfer on the first short write, matching
+  // serviceDownload's discipline exactly, not a new one.
+  //
+  // Entry collection (which files go in the ZIP, their sizes, and their
+  // Local File Header offsets) stays synchronous inside handleGetSdArchive():
+  // it only stats files (open+size+close), never calls sendRaw(), and isn't
+  // the failure mode this fixes. Only the streaming phases below (headers,
+  // file data, data descriptors, central directory, EOCD) are async.
+  struct ZipEntry {
+    char     zip_name[80];  // path inside ZIP (e.g. "patterns/foo.pat")
+    char     sd_path[80];   // full path on SD  (e.g. "/patterns/foo.pat")
+    uint32_t file_size;
+    uint32_t crc32;
+    uint32_t lhf_offset;    // byte offset of this entry's Local File Header
+    uint8_t  name_len;
+  };
+  enum class ArchivePhase : uint8_t {
+    kLocalHeader,     // send this entry's Local File Header + name
+    kFileData,        // stream (or zero-pad) this entry's file content
+    kDataDescriptor,  // send this entry's 16-byte data descriptor
+    kCentralDir,      // send one central-directory record + name
+    kEocd,            // send the End of Central Directory record
+  };
+  static constexpr uint16_t kArchiveMaxEntries    = 258;    // 2 manifest + up to 256 patterns
+  static constexpr uint32_t kArchiveIdleTimeoutMs = 60000UL;  // matches serviceDownload's ceiling
+  ZipEntry       ar_entries_[kArchiveMaxEntries];  // ~44 KB; was a function-static local
+  uint16_t       ar_entry_count_ = 0;
+  uint16_t       ar_entry_idx_   = 0;   // which entry the LFH/data/DD/CD phases act on
+  ArchivePhase   ar_phase_       = ArchivePhase::kLocalHeader;
+  File           ar_file_;              // open SD file for ar_entries_[ar_entry_idx_], kFileData only
+  uint32_t       ar_file_remaining_ = 0; // bytes of the current entry's data not yet streamed
+  uint32_t       ar_crc_            = 0; // running CRC-32 (pre-finalize) for the current entry
+  uint32_t       ar_cd_offset_      = 0; // byte offset of the Central Directory (== end of entries)
+  uint32_t       ar_cd_size_        = 0; // total Central Directory byte count
+  MessageSource *ar_source_         = nullptr;
+  uint32_t       ar_deadline_       = 0;
+  bool           ar_active_         = false;
+
   // Handlers.
   void handleBinaryCommand(const ParsedCommand &cmd);
   void handleStreamCommand(const ParsedCommand &cmd);
@@ -128,13 +256,16 @@ class CommandProcessor {
   void handleGetControllerInfo();
   void handleDisplayPsramIndex(const ParsedCommand &cmd);
   void handlePsramPlay(const ParsedCommand &cmd);
-  void handleBulkWriteCommand(const ParsedCommand &cmd);
+  bool handleBulkWriteCommand(const ParsedCommand &cmd);  // true = handed off to serviceUpload; caller must not consume yet
   void handleGetSdArchive();
-  void handleSetFirmwareFile(const ParsedCommand &cmd);  // set-firmware-file (0xE0)
+  bool handleSetFirmwareFile(const ParsedCommand &cmd);  // set-firmware-file (0xE0); always false, fully synchronous
   void handleGetFirmwareInfo();                          // get-firmware-info (0xE3)
   void handleProgramPanel(const ParsedCommand &cmd);     // g6-program-panel (0xC8) — SPI ISP
   void handleVerifyPanel(const ParsedCommand &cmd);      // g6-verify-panel (0xC9) — CRC running app flash
   void drainBulkData(uint32_t remaining_bytes);
+  void abortArchive();  // serviceArchive() teardown on a stalled/timed-out 0x8A stream
+  void endDownload();   // serviceDownload() teardown: completion, timeout, error, or stall
+  void abortUpload();   // serviceUpload() teardown for a disconnected owning source
 
   // State transitions.
   void enterAllOff();
@@ -164,4 +295,15 @@ class CommandProcessor {
   const char *dioRoleName(DioRole role) const;    // for error payloads / debug prints
   uint8_t dispOpcodeFor(bool gs16) const; // pick DISP_* opcode for panel_disp_mode_ × gs level
   void    patchDispMode();                // rewrite block[1]+parity in every panel block in frame_buf_
+
+  // Is 1-based pattern idx the target of an active download or upload? (PR
+  // #27 review point 8.) Used to refuse a mutation that would race the
+  // SAME file a transfer already has open, without blocking mutations to
+  // unrelated indices. Doesn't check ar_active_: an archive tolerates its
+  // target file being deleted mid-stream already (zero-pads and keeps
+  // going, same fallback as a file that never existed), so there's no
+  // narrower-than-"any archive running" check worth adding for it.
+  bool patternBusy(uint16_t idx) const {
+    return (dl_active_ && dl_idx_ == idx) || (ul_active_ && ul_idx_ == idx);
+  }
 };

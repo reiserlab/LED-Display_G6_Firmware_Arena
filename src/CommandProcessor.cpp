@@ -72,29 +72,59 @@ void CommandProcessor::processCommand() {
   // (lower-latency TCP path), then serial. Each source uses its own
   // response buffer; current_source_ tells the handlers which one to
   // send the reply back through.
-  if (net_.hasCommand()) {
+  //
+  // A source with an active 0x84 download (dl_active_, issue #16 fix 2),
+  // 0x85 upload (ul_active_), or 0x8A archive (ar_active_, PR #27 review
+  // point 2) is skipped here even if it has a newly-parsed command waiting.
+  //
+  // Downloads and archives: sendRaw() flushes any queued response frame
+  // before writing raw bytes, so handling a new command on that same source
+  // would splice a framed response into the middle of the in-flight raw
+  // byte stream, corrupting it from the client's point of view.
+  //
+  // Uploads: a command that hands off to serviceUpload() is deliberately
+  // left un-consumed (hasCommand() stays true) so parseIncoming() doesn't
+  // mistake its still-arriving raw file bytes for a new framed command.
+  // handleBulkWriteCommand()'s return value says whether THIS call handed
+  // off (true) or was fully, synchronously handled already (false). See
+  // the ul_* fields' comment in CommandProcessor.h (PR #27 review point 1)
+  // for why consuming based on the stale global ul_active_ flag instead let
+  // a REJECTED command get redispatched, and re-rejected, on every loop()
+  // iteration for as long as an UNRELATED transfer on the other source ran.
+  //
+  // Either way, the command stays queued until the transfer finishes. The
+  // OTHER source is unaffected — that's the concurrency fix 2 is for.
+  if (net_.hasCommand() && !(dl_active_ && dl_source_ == &net_)
+                        && !(ul_active_ && ul_source_ == &net_)
+                        && !(ar_active_ && ar_source_ == &net_)) {
     current_source_ = &net_;
     const ParsedCommand &cmd = net_.command();
     if (cmd.is_bulk) {
-      handleBulkWriteCommand(cmd);
+      bool async_handoff = handleBulkWriteCommand(cmd);
+      if (!async_handoff) net_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
+      net_.commandConsumed();
     } else {
       handleBinaryCommand(cmd);
+      net_.commandConsumed();
     }
-    net_.commandConsumed();
   }
-  if (serial_.hasCommand()) {
+  if (serial_.hasCommand() && !(dl_active_ && dl_source_ == &serial_)
+                           && !(ul_active_ && ul_source_ == &serial_)
+                           && !(ar_active_ && ar_source_ == &serial_)) {
     current_source_ = &serial_;
     const ParsedCommand &cmd = serial_.command();
     if (cmd.is_bulk) {
-      handleBulkWriteCommand(cmd);
+      bool async_handoff = handleBulkWriteCommand(cmd);
+      if (!async_handoff) serial_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
+      serial_.commandConsumed();
     } else {
       handleBinaryCommand(cmd);
+      serial_.commandConsumed();
     }
-    serial_.commandConsumed();
   }
   current_source_ = nullptr;
 }
@@ -119,6 +149,17 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
 
     case ALL_ON_CMD:
+      // PR #27 review point 8: a state transition mid-transfer doesn't
+      // disrupt the transfer itself (serviceDownload()/serviceUpload()/
+      // serviceArchive() don't read state_ at all) or corrupt anything (SD
+      // is SDIO, not shared with the panel SPI path, and loop() is
+      // single-threaded so accesses are naturally serialized), but it's
+      // still confusing at the bench to have the arena visibly change while
+      // an SD transfer nobody can see is still in flight, so refuse it.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
+        break;
+      }
       enterAllOn();
       current_source_->sendResponse(command_byte, 0, "All-On Received");
       break;
@@ -320,6 +361,15 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         current_source_->sendResponse(command_byte, 1, "Index out of range");
         break;
       }
+      // PR #27 point 8 follow-up: a rename re-sorts the 1-based index space
+      // (invalidating the dl_idx_/ul_idx_ latched by in-flight transfers) and
+      // a promote (idx 0) moves pattern.temp — possibly the very file an
+      // idx-0 upload has open. Renames are rare and transfers are short, so
+      // refuse outright rather than tracking the shift.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
+        break;
+      }
 
       char new_name[AC::constants::pattern_name_byte_count];
       memcpy(new_name, buf + pos, name_len);
@@ -339,7 +389,18 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case GET_PATTERN_FILE_CMD: {
-      // [03 84 idx_lo idx_hi]  Response: [0x0A, 0, 0x84, size_b0..b7], then raw bytes.
+      // [03 84 idx_lo idx_hi]  Response: [0x0A, 0, 0x84, size_b0..b7], then raw
+      // bytes streamed asynchronously by serviceDownload() — see fixes 1-3 in
+      // debug/issue-16-bulk-download-notes.md.
+      if (state_ != ArenaState::ALL_OFF) {
+        current_source_->sendResponse(command_byte, CE_DISPLAY_ACTIVE,
+                                      "Stop display first");
+        break;
+      }
+      if (dl_active_) {
+        current_source_->sendResponse(command_byte, 1, "Download already in progress");
+        break;
+      }
       if (claimed_len != 3) {
         current_source_->sendResponse(command_byte, 1, "Expected [03 84 idx_lo idx_hi]");
         break;
@@ -348,6 +409,13 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       memcpy(&idx, buf + pos, sizeof(idx));
       if (idx == 0 || idx > sd_.patternCount()) {
         current_source_->sendResponse(command_byte, 1, "Index out of range");
+        break;
+      }
+      // Mirror of the 0x85-side dl_idx_ guard: refuse downloading the one
+      // file an active upload has open for write, rather than streaming a
+      // torn half-written file under a status-0 header (point 8 symmetry).
+      if (patternBusy(idx)) {
+        current_source_->sendResponse(command_byte, 1, "Pattern is in use");
         break;
       }
       const char* name = sd_.patternName(idx);
@@ -367,27 +435,19 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       uint8_t size_buf[8] = {};
       memcpy(size_buf, &file_size, sizeof(file_size));
       current_source_->sendResponse(command_byte, 0, size_buf, sizeof(size_buf));
-      // Stream raw file bytes via sendRaw (flushes the header on the first call).
-      static uint8_t chunk[4096];
-      uint32_t remaining = file_size;
-      uint32_t deadline = millis() + 60000UL;
-      uint32_t t_start = millis();
-      bool timed_out = false;
-      while (remaining > 0) {
-        if (millis() > deadline) { timed_out = true; break; }
-        size_t to_read = (remaining < sizeof(chunk)) ? (size_t)remaining : sizeof(chunk);
-        size_t n = (size_t)f.read(chunk, to_read);
-        if (n == 0) break;
-        current_source_->sendRaw(chunk, n);
-        remaining -= n;
-      }
-      uint32_t elapsed_ms = millis() - t_start;
-      uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(file_size / elapsed_ms) : 0;
-      f.close();
-      DBG_PRINTF("[cmd] get-pattern-file idx=%u name=%s size=%lu elapsed=%lu ms (%lu kB/s)%s\n",
-                 (unsigned)idx, name, (unsigned long)file_size,
-                 (unsigned long)elapsed_ms, (unsigned long)kbps,
-                 timed_out ? " (TIMEOUT)" : "");
+      // Hand off to serviceDownload() (driven from loop(), like serviceDisplay())
+      // to stream the body one ~4 KB chunk per loop iteration instead of blocking
+      // here for the whole file — the old version starved everything else in
+      // loop() (TCP/USB command intake, display refresh, response flushing) for
+      // as long as the transfer ran.
+      dl_file_      = f;
+      dl_source_    = current_source_;
+      dl_idx_       = idx;
+      dl_remaining_ = file_size;
+      dl_deadline_  = millis() + kDownloadIdleTimeoutMs;
+      dl_active_    = true;
+      DBG_PRINTF("[cmd] get-pattern-file idx=%u name=%s size=%lu (async)\n",
+                 (unsigned)idx, name, (unsigned long)file_size);
       break;
     }
 
@@ -399,10 +459,28 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       }
       uint16_t idx;
       memcpy(&idx, buf + pos, sizeof(idx));
+      // Refuse deleting the one file an active download/upload has open
+      // (PR #27 review point 8) rather than racing it. A download degrades
+      // gracefully if its file vanishes anyway, but refusing here avoids
+      // silently stranding that client instead of just telling it no.
+      if (patternBusy(idx)) {
+        current_source_->sendResponse(command_byte, 1, "Pattern is in use");
+        break;
+      }
       uint8_t err = sd_.deletePattern(idx);
       if (err != CE_NONE) {
         current_source_->sendResponse(command_byte, err, "Delete failed");
         break;
+      }
+      // Deleting a lower-sorted pattern compacts the 1-based index space
+      // (SdManager::removeAt), so shift the latched transfer indices down
+      // with it — otherwise patternBusy()/the 0x85 dl_idx_ guard would keep
+      // guarding the wrong pattern for the rest of the transfer. idx 0
+      // (pattern.temp) doesn't live in the sorted array and shifts nothing;
+      // idx == dl_idx_/ul_idx_ was already refused by patternBusy() above.
+      if (idx >= 1) {
+        if (dl_active_ && dl_idx_ > idx) --dl_idx_;
+        if (ul_active_ && ul_idx_ > idx) --ul_idx_;
       }
       DBG_PRINTF("[cmd] delete-pattern-file idx=%u\n", (unsigned)idx);
       current_source_->sendResponse(command_byte, 0, "");
@@ -410,6 +488,15 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case DELETE_ALL_PATTERNS_CMD: {
+      // Same reasoning as DELETE_PATTERN_FILE_CMD above, but "all" has no
+      // single index to check against, so refuse outright while any transfer
+      // mechanism is active (PR #27 review point 8). ar_ included: wiping the
+      // library mid-archive would zero-fill every remaining ZIP entry while
+      // the client has already been promised a status-0 archive.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "A transfer is in progress");
+        break;
+      }
       uint8_t err = sd_.deleteAllPatterns();
       if (err != CE_NONE) {
         current_source_->sendResponse(command_byte, err, "Delete-all failed");
@@ -426,6 +513,17 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
                                       "Stop display first");
         break;
       }
+      if (ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "Archive already in progress");
+        break;
+      }
+      // Mirror of the 0x85-during-archive guard: an archive reads every
+      // pattern in the library, so starting one while an upload is rewriting
+      // a pattern would silently bake torn file content into a status-0 ZIP.
+      if (ul_active_) {
+        current_source_->sendResponse(command_byte, 1, "Upload in progress");
+        break;
+      }
       handleGetSdArchive();
       break;
 
@@ -439,6 +537,14 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
                                       "Stop display before flashing a panel");
         break;
       }
+      // Same rationale as the 0xE0 guard (PR #27 point 8): panel flashing
+      // blocks loop() for several seconds reading /firmware/panel.bin + SPI
+      // ISP, long enough to starve an in-flight transfer toward its idle
+      // deadline. Refuse rather than interleave.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
+        break;
+      }
       handleProgramPanel(cmd);
       break;
 
@@ -446,6 +552,12 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       if (state_ != ArenaState::ALL_OFF) {
         current_source_->sendResponse(command_byte, CE_DISPLAY_ACTIVE,
                                       "Stop display before verifying a panel");
+        break;
+      }
+      // Same rationale as G6_PROGRAM_PANEL_CMD above: multi-second blocking
+      // SD + ISP work would starve an in-flight transfer.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
         break;
       }
       handleVerifyPanel(cmd);
@@ -490,6 +602,12 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       }
       uint16_t pattern_id;
       memcpy(&pattern_id, buf + pos, sizeof(pattern_id));
+      // Same guard as handleTrialParams (PR #27 review point 8): this starts
+      // a display via sd_.openPattern(), an SD read mid-transfer otherwise.
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
+        break;
+      }
       if (!enterPatternMode(ArenaState::SHOW_FRAME, pattern_id, 0, 0, 0, 0)) {
         current_source_->sendResponse(command_byte, 1, "SET_PATTERN_ID: load failed");
         break;
@@ -867,6 +985,17 @@ void CommandProcessor::handleGetControllerInfo() {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
+  // PR #27 review point 8: trial-start opens a pattern via sd_.openPattern(),
+  // an SD read, mid-transfer of an unrelated dl_/ul_/ar_ operation. Same
+  // reasoning as the ALL_ON guard above: not corrupting (SD is SDIO, and
+  // loop() is single-threaded so accesses are naturally serialized), but
+  // confusing to have the display change while an SD transfer is still in
+  // flight, so refuse it rather than let it interleave.
+  if (dl_active_ || ul_active_ || ar_active_) {
+    current_source_->sendResponse(TRIAL_PARAMS_CMD, 1, "SD transfer in progress");
+    return;
+  }
+
   const uint8_t *p = cmd.data + 2;          // first param byte
   uint8_t param_len = cmd.data[0] - 1;       // claimed_len minus the cmd byte
   if (param_len < 11) {
@@ -1028,6 +1157,25 @@ void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
 }
 
 // ---------------------------------------------------------------------------
+// serviceDisconnects: called every loop() iteration, before the per-
+// transfer service functions. PR #27 review point 5: a TCP client can
+// disconnect out from under an active 0x84/0x85/0x8A transfer, and
+// NetworkManager::serviceTcp() will happily accept a brand-new client on
+// the very same source afterward. Without this check, dl_/ul_/ar_active_
+// stay set with a stale dl_/ul_/ar_source_ pointer, so the NEW client's
+// bytes (or, for downloads/archives, its next command) get fed into or
+// blocked by a transfer it never started. isConnected() defaults to true
+// on MessageSource (serial has no equivalent failure mode, matching the
+// review's USB exclusion), so this is a no-op for serial_-owned transfers.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::serviceDisconnects() {
+  if (dl_active_ && !dl_source_->isConnected()) endDownload();
+  if (ul_active_ && !ul_source_->isConnected()) abortUpload();
+  if (ar_active_ && !ar_source_->isConnected()) abortArchive();
+}
+
+// ---------------------------------------------------------------------------
 // Display service — called every loop iteration
 // ---------------------------------------------------------------------------
 
@@ -1095,6 +1243,188 @@ void CommandProcessor::serviceTrialTimer() {
   if ((int32_t)(millis() - trial_end_ms_) < 0) return;
   trial_end_ms_ = 0;
   enterAllOff();  // revert to a safe state, like G4
+}
+
+// ---------------------------------------------------------------------------
+// serviceDownload — one GET_PATTERN_FILE (0x84) chunk per loop() call.
+//
+// Issue #16 fixes 1-3: the old handler streamed the whole file inline inside
+// processCommand(), blocking net_.serviceTcp(), serial_.serviceUsb(),
+// serviceDisplay(), and both flushResponses() for the entire transfer (fix 2).
+// This drains one ~4 KB chunk per call instead, so those all keep running.
+//
+// dl_deadline_ resets on every successfully drained chunk rather than being
+// set once for the whole transfer (fix 3), so a slow-but-progressing host
+// doesn't trip the idle ceiling just because the transfer runs long. A short
+// return from sendRaw() (fix 1's stall bound) means the host has stopped
+// draining — abort immediately rather than waiting out the idle deadline.
+// ---------------------------------------------------------------------------
+void CommandProcessor::serviceDownload() {
+  if (!dl_active_) return;
+
+  if ((int32_t)(millis() - dl_deadline_) >= 0) {
+    DBG_PRINTF("[cmd] get-pattern-file idle TIMEOUT, %lu bytes remaining\n",
+               (unsigned long)dl_remaining_);
+    endDownload();
+    return;
+  }
+
+  if (dl_remaining_ == 0) {
+    endDownload();
+    return;
+  }
+
+  static uint8_t chunk[4096];
+  size_t to_read = (dl_remaining_ < sizeof(chunk)) ? (size_t)dl_remaining_ : sizeof(chunk);
+  // File::read() returns int: -1 on I/O error, 0 on EOF, else bytes read.
+  // Check the sign BEFORE narrowing to size_t — casting -1 straight to
+  // size_t (as an earlier version of this code did) yields SIZE_MAX, which
+  // then gets handed to sendRaw() as the length of a 4096-byte buffer:
+  // an out-of-bounds read that crashes/reboots the controller instead of
+  // cleanly aborting the download.
+  int rd = dl_file_.read(chunk, to_read);
+  if (rd <= 0) {  // unexpected EOF/read error before dl_remaining_ hit 0
+    DBG_PRINTF("[cmd] get-pattern-file EOF/read-error rd=%d, %lu bytes remaining\n",
+               rd, (unsigned long)dl_remaining_);
+    endDownload();
+    return;
+  }
+  size_t n = (size_t)rd;
+
+  size_t sent = dl_source_->sendRaw(chunk, n);
+  dl_remaining_ -= sent;
+  if (sent < n) {
+    DBG_PRINTF("[cmd] get-pattern-file STALL sent=%lu/%lu, %lu bytes remaining\n",
+               (unsigned long)sent, (unsigned long)n, (unsigned long)dl_remaining_);
+    endDownload();
+    return;
+  }
+
+  dl_deadline_ = millis() + kDownloadIdleTimeoutMs;
+  if (dl_remaining_ == 0) {
+    endDownload();
+  }
+}
+
+// Common teardown for serviceDownload(), on completion, timeout, read error,
+// stall, or (PR #27 review point 5) the owning source disconnecting. No
+// response is sent either way: the header response already promised the
+// file's total size; the client infers success or failure from how many
+// bytes it actually received.
+void CommandProcessor::endDownload() {
+  dl_file_.close();
+  dl_active_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// serviceUpload — one SET_PATTERN_FILE (0x85) chunk per loop() call.
+//
+// Mirrors serviceDownload() above (issue #16): reads+writes one ~4 KB chunk
+// per call instead of blocking inside processCommand() for the whole
+// transfer, and ul_deadline_ resets on every chunk actually read off the
+// wire rather than staying fixed from the start, so a slow-but-progressing
+// host doesn't trip the idle ceiling just because the transfer runs long.
+//
+// Unlike the download side, a failure here (idle timeout or SD write error)
+// doesn't mean the transfer can just stop: the host already committed to
+// sending total_len bytes, and whatever it hasn't sent yet will still land
+// on the wire and get misparsed as a bogus command unless something reads
+// and discards it first. ul_phase_'s kDraining value is that second phase:
+// same chunked service loop, just discarding instead of writing, with its
+// own bound (kUploadDrainTimeoutMs) since by then the transfer is already a
+// lost cause and this is purely resync, not recovery. See the ul_* fields'
+// comment in CommandProcessor.h (PR #27 review point 3) for why this is an
+// explicit phase transition rather than a bool checked at two sites: an
+// earlier version of this function used the latter and, on the FIRST
+// write-phase timeout, fell straight into the same "give up" response this
+// function now only reaches on a SECOND (drain-phase) timeout, never
+// reading the bytes still in flight, so they landed on the wire and got
+// misparsed as bogus commands once the source was freed up.
+// ---------------------------------------------------------------------------
+void CommandProcessor::serviceUpload() {
+  if (!ul_active_) return;
+
+  if (ul_phase_ == UploadPhase::kWriting) {
+    if ((int32_t)(millis() - ul_deadline_) >= 0) {
+      // First (write-phase) timeout: transition into draining instead of
+      // finalizing here. ul_drain_deadline_ is an absolute cap from now,
+      // not idle-reset; see the field comment in CommandProcessor.h.
+      ul_file_.close();
+      SD.remove(ul_path_);
+      ul_fail_status_ = 1;
+      strncpy(ul_fail_msg_, "Upload timeout", sizeof(ul_fail_msg_) - 1);
+      ul_phase_ = UploadPhase::kDraining;
+      ul_drain_deadline_ = millis() + kUploadDrainTimeoutMs;
+      return;
+    }
+  } else {  // kDraining
+    if ((int32_t)(millis() - ul_drain_deadline_) >= 0) {
+      // Draining also timed out — give up on resync too; the next framed
+      // byte the parser sees may be garbage, but continuing to wait
+      // indefinitely isn't better.
+      ul_source_->sendResponse(SET_PATTERN_FILE_CMD, ul_fail_status_, ul_fail_msg_);
+      ul_active_ = false;
+      ul_source_->commandConsumed();
+      return;
+    }
+  }
+
+  static uint8_t chunk[4096];
+  size_t want = (ul_remaining_ < sizeof(chunk)) ? (size_t)ul_remaining_ : sizeof(chunk);
+  size_t got = ul_source_->readBulkBytes(chunk, want);
+  if (got == 0) return;  // nothing new this tick; the checks above cover staleness
+
+  if (ul_phase_ == UploadPhase::kWriting) {
+    size_t written = ul_file_.write(chunk, got);
+    if (written != got) {
+      ul_file_.close();
+      SD.remove(ul_path_);
+      ul_fail_status_ = 1;
+      strncpy(ul_fail_msg_, "SD write error (card full?)", sizeof(ul_fail_msg_) - 1);
+      ul_phase_ = UploadPhase::kDraining;
+      ul_drain_deadline_ = millis() + kUploadDrainTimeoutMs;
+    }
+  }
+  ul_remaining_ -= (uint32_t)got;
+  // kDraining's deadline is an absolute cap set once above, not reset here.
+  if (ul_phase_ == UploadPhase::kWriting) {
+    ul_deadline_ = millis() + kUploadIdleTimeoutMs;
+  }
+
+  if (ul_remaining_ == 0) {
+    switch (ul_phase_) {
+      case UploadPhase::kDraining:
+        ul_source_->sendResponse(SET_PATTERN_FILE_CMD, ul_fail_status_, ul_fail_msg_);
+        break;
+      case UploadPhase::kWriting: {
+        uint32_t elapsed_ms = millis() - ul_start_ms_;
+        uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(ul_total_ / elapsed_ms) : 0;
+        DBG_PRINTF("[cmd] set-pattern-file idx=%u wrote %lu bytes in %lu ms (%lu kB/s) to %s\n",
+                   (unsigned)ul_idx_, (unsigned long)ul_total_,
+                   (unsigned long)elapsed_ms, (unsigned long)kbps, ul_path_);
+        ul_file_.close();
+        ul_source_->sendResponse(SET_PATTERN_FILE_CMD, 0, "");
+        break;
+      }
+    }
+    ul_active_ = false;
+    ul_source_->commandConsumed();
+  }
+}
+
+// Teardown for an upload whose owning source disconnected (PR #27 review
+// point 5), distinct from serviceUpload()'s own timeout/error paths: those
+// still expect the host to resume (kWriting -> kDraining) or have already
+// finished, so they respond and consume normally. A disconnected source has
+// nothing left to respond to and nothing left to resync, so this always
+// deletes the partial file and fully deactivates in one step; there's no
+// draining phase to enter since no more bytes will ever arrive on this
+// connection.
+void CommandProcessor::abortUpload() {
+  ul_file_.close();
+  SD.remove(ul_path_);
+  ul_active_ = false;
+  ul_source_->commandConsumed();
 }
 
 void CommandProcessor::serviceOpenLoop() {
@@ -1401,17 +1731,24 @@ void CommandProcessor::fillFrameBufferDark() {
 
 // ---------------------------------------------------------------------------
 // handleBulkWriteCommand — set-pattern-file (0x85)
+//
+// Returns true only on the one path that hands off to serviceUpload():
+// the caller must leave that command unconsumed so parseIncoming() doesn't
+// mistake the still-arriving raw bytes for a new command. Every other path
+// is rejected, drained, and responded to synchronously right here, so it
+// returns false: the caller must consume the command immediately regardless
+// of ul_active_'s value for an unrelated transfer on the OTHER source (PR
+// #27 review point 1; see the ul_* fields' comment in CommandProcessor.h).
 // ---------------------------------------------------------------------------
 
-void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
+bool CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   if (cmd.cmd == SET_FIRMWARE_FILE_CMD) {
-    handleSetFirmwareFile(cmd);
-    return;
+    return handleSetFirmwareFile(cmd);
   }
   if (cmd.cmd != SET_PATTERN_FILE_CMD) {
     drainBulkData(cmd.bulk_payload_len);
     current_source_->sendResponse(cmd.cmd, 1, "Unknown bulk command");
-    return;
+    return false;
   }
 
   // Header: [0x85, idx_lo, idx_hi, len_b0..b7] (already parsed by transport)
@@ -1419,21 +1756,55 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   memcpy(&idx, cmd.data + 1, sizeof(idx));
   uint32_t total_len = cmd.bulk_payload_len;
 
+  // A 0-byte pattern file isn't a valid pattern (no header, no frames);
+  // reject it outright rather than opening/keeping an empty file around for
+  // something to fail on later (PR #27 review point 7). No drainBulkData()
+  // needed: total_len == 0 means no payload bytes follow the header at all.
+  if (total_len == 0) {
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Empty upload not supported");
+    return false;
+  }
+
   if (state_ != ArenaState::ALL_OFF) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, CE_DISPLAY_ACTIVE,
                                   "Stop display before writing to SD");
-    return;
+    return false;
+  }
+
+  if (ul_active_) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Upload already in progress");
+    return false;
+  }
+
+  // The write below (SD.remove() + reopen for write) would race whichever
+  // OTHER transfer already has this same file open for reading: a
+  // download's dl_file_, or, since an archive can be reading any pattern in
+  // the library at a given moment, any active archive at all (PR #27 review
+  // point 8). Unlike a delete (which only frees clusters a reader degrades
+  // gracefully without), a concurrent write reallocates them, so this one
+  // is refused outright rather than tolerated.
+  if (dl_active_ && dl_idx_ == idx) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Pattern is being downloaded");
+    return false;
+  }
+
+  if (ar_active_) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Archive in progress");
+    return false;
   }
 
   if (idx > sd_.patternCount()) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "Index out of range");
-    return;
+    return false;
   }
 
   // Build destination path.
-  char path[AC::constants::pattern_name_byte_count + 16];
+  char path[sizeof(ul_path_)];
   if (idx == 0) {
     snprintf(path, sizeof(path), "%s/pattern.temp", AC::constants::pattern_dir);
   } else {
@@ -1447,54 +1818,24 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
   if (!f) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, "SD open failed");
-    return;
+    return false;
   }
 
-  static constexpr size_t CHUNK = 4096;
-  static uint8_t chunk[CHUNK];
-  uint32_t remaining = total_len;
-  uint32_t t_idle = millis();   // tracks last data arrival (timeout)
-  uint32_t t_start = millis();  // start of write phase (throughput)
-  bool ok = true;
-  const char *fail_msg = "Upload timeout";
-
-  while (remaining > 0) {
-    size_t want = (remaining < CHUNK) ? (size_t)remaining : CHUNK;
-    size_t got = current_source_->readBulkBytes(chunk, want);
-    if (got > 0) {
-      size_t written = f.write(chunk, got);
-      if (written != got) {
-        fail_msg = "SD write error (card full?)";
-        ok = false;
-        break;
-      }
-      remaining -= (uint32_t)got;
-      t_idle = millis();
-    } else {
-      if ((uint32_t)(millis() - t_idle) > 30000U) {
-        ok = false;
-        break;
-      }
-      yield();
-    }
-  }
-
-  uint32_t elapsed_ms = millis() - t_start;
-  f.close();
-  if (!ok) {
-    SD.remove(path);
-    // Consume the undelivered payload before returning to the command loop; otherwise
-    // the leftover file bytes are parsed as bogus commands and desync the link.
-    drainBulkData(remaining);
-    current_source_->sendResponse(SET_PATTERN_FILE_CMD, 1, fail_msg);
-    return;
-  }
-
-  uint32_t kbps = elapsed_ms > 0 ? (uint32_t)(total_len / elapsed_ms) : 0;
-  DBG_PRINTF("[cmd] set-pattern-file idx=%u wrote %lu bytes in %lu ms (%lu kB/s) to %s\n",
-             (unsigned)idx, (unsigned long)total_len,
-             (unsigned long)elapsed_ms, (unsigned long)kbps, path);
-  current_source_->sendResponse(SET_PATTERN_FILE_CMD, 0, "");
+  // Hand off to serviceUpload() (driven from loop(), like serviceDownload())
+  // to read+write one ~4 KB chunk per loop iteration instead of blocking here
+  // for the whole transfer — see the ul_* fields' comment in
+  // CommandProcessor.h for why this doesn't desync the command parser.
+  snprintf(ul_path_, sizeof(ul_path_), "%s", path);
+  ul_file_      = f;
+  ul_source_    = current_source_;
+  ul_idx_       = idx;
+  ul_remaining_ = total_len;
+  ul_total_     = total_len;
+  ul_start_ms_  = millis();
+  ul_deadline_  = millis() + kUploadIdleTimeoutMs;
+  ul_phase_     = UploadPhase::kWriting;
+  ul_active_    = true;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1503,15 +1844,36 @@ void CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
 // Streams the uploaded panel firmware image to /firmware/panel.bin (single
 // image, no index) and replies with the uint32 LE CRC-32 of the stored bytes
 // so the host can confirm the upload before issuing g6-program-panel.
+//
+// Still a single blocking call, unlike 0x84/0x85/0x8A, which all stream one
+// chunk per loop() call. While this runs, nothing else in loop() executes,
+// including serviceDownload()/serviceUpload()/serviceArchive() for an
+// unrelated transfer on the OTHER source. That transfer's idle deadline
+// measures wall-clock time since its last successfully drained chunk, not
+// whether its own host stopped sending, so a long firmware flash here could
+// starve it long enough to trip a false timeout and delete its partial
+// file (PR #27 review point 1's follow-on hazard, beyond the redispatch bug
+// the ownership fix targets). Refusing to start while ANY of
+// dl_/ul_/ar_active_ is set avoids that outright, rather than letting this
+// run and silently wreck an unrelated transfer's timing. Always returns
+// false (no async handoff): every path here, success or failure, is fully
+// synchronous by the time it returns.
 
-void CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
+bool CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
   uint32_t total_len = cmd.bulk_payload_len;
 
   if (state_ != ArenaState::ALL_OFF) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, CE_DISPLAY_ACTIVE,
                                   "Stop display before writing to SD");
-    return;
+    return false;
+  }
+
+  if (dl_active_ || ul_active_ || ar_active_) {
+    drainBulkData(total_len);
+    current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 1,
+                                  "Bulk transfer already in progress");
+    return false;
   }
 
   SD.mkdir(AC::constants::firmware_dir);
@@ -1520,7 +1882,7 @@ void CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
   if (!f) {
     drainBulkData(total_len);
     current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 1, "SD open failed");
-    return;
+    return false;
   }
 
   static constexpr size_t CHUNK = 4096;
@@ -1558,7 +1920,7 @@ void CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
     // Drain undelivered payload so leftover bytes don't desync the command loop.
     drainBulkData(remaining);
     current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 1, fail_msg);
-    return;
+    return false;
   }
 
   crc ^= 0xFFFFFFFFu;  // CRC-32 final XOR
@@ -1569,6 +1931,7 @@ void CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
   uint8_t crc_buf[4];
   memcpy(crc_buf, &crc, sizeof(crc));  // uint32 LE
   current_source_->sendResponse(SET_FIRMWARE_FILE_CMD, 0, crc_buf, sizeof(crc_buf));
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1653,45 +2016,59 @@ void CommandProcessor::handleVerifyPanel(const ParsedCommand &cmd) {
   current_source_->sendResponse(G6_VERIFY_PANEL_CMD, ok ? 0 : 1, msg);
 }
 
+// Reads and discards a rejected/undelivered bulk payload so the host's
+// trailing bytes don't get misparsed as the start of a new command. Two
+// give-up conditions, whichever comes first (PR #27 review point 6):
+//   - idle: no bytes at all for kIdleTimeoutMs
+//   - absolute: kAbsoluteTimeoutMs total, from when draining started,
+//     regardless of how many times the idle deadline got reset
+// The idle-only bound let a sender pacing bytes just under it keep this call
+// "making progress" indefinitely, blocking loop() for minutes over a single
+// rejected upload. This is purely resync after a decision that's already
+// been made (the command was already rejected), nothing is being preserved,
+// so there's no reason to tolerate an unbounded drain the way a real
+// transfer's own idle-reset deadline legitimately does.
 void CommandProcessor::drainBulkData(uint32_t remaining) {
+  static constexpr uint32_t kIdleTimeoutMs     = 5000UL;
+  static constexpr uint32_t kAbsoluteTimeoutMs = 15000UL;
   uint8_t buf[256];
-  uint32_t t0 = millis();
+  uint32_t start = millis();
+  uint32_t t0 = start;
   while (remaining > 0) {
+    if ((uint32_t)(millis() - start) > kAbsoluteTimeoutMs) break;
     size_t want = (remaining < sizeof(buf)) ? (size_t)remaining : sizeof(buf);
     size_t got = current_source_->readBulkBytes(buf, want);
     if (got > 0) {
       remaining -= (uint32_t)got;
       t0 = millis();
     } else {
-      if ((uint32_t)(millis() - t0) > 5000U) break;
+      if ((uint32_t)(millis() - t0) > kIdleTimeoutMs) break;
       yield();
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// handleGetSdArchive — 0x8A: stream full SD content as a ZIP (store mode).
-// Sends a bulk-read response: 8-byte uint64 LE total size, then ZIP bytes.
+// handleGetSdArchive: 0x8A, arms a full-SD-content ZIP (store mode) stream.
+// Sends a bulk-read response header (8-byte uint64 LE total size) here,
+// synchronously (entry collection only stats files, open+size+close; it
+// never calls sendRaw() and can't stall a transport). The ZIP bytes
+// themselves (headers, file data, data descriptors, central directory,
+// EOCD) are streamed asynchronously afterward by serviceArchive(), one
+// bounded sendRaw() per loop() call; see the ar_* fields' comment in
+// CommandProcessor.h for why (PR #27 review point 2).
+//
 // ZIP uses data descriptors (flags=0x0008) so CRC/sizes are deferred — the
 // total size can be computed before streaming any file data.
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleGetSdArchive() {
-  struct ZipEntry {
-    char     zip_name[80];  // path inside ZIP (e.g. "patterns/foo.pat")
-    char     sd_path[80];   // full path on SD  (e.g. "/patterns/foo.pat")
-    uint32_t file_size;
-    uint32_t crc32;
-    uint32_t lhf_offset;    // byte offset of this entry's Local File Header
-    uint8_t  name_len;
-  };
-  static ZipEntry entries[258];  // 2 manifest + up to 256 patterns; ~44 KB BSS
   uint16_t entry_count = 0;
 
   // --- Collect root manifest files ---
   static const char *const kRootFiles[] = { "MANIFEST.bin", "MANIFEST.txt" };
   for (uint8_t i = 0; i < 2; ++i) {
-    ZipEntry &e = entries[entry_count];
+    ZipEntry &e = ar_entries_[entry_count];
     e.name_len = (uint8_t)strlen(kRootFiles[i]);
     memcpy(e.zip_name, kRootFiles[i], e.name_len + 1);
     snprintf(e.sd_path, sizeof(e.sd_path), "/%s", kRootFiles[i]);
@@ -1706,10 +2083,10 @@ void CommandProcessor::handleGetSdArchive() {
 
   // --- Collect pattern files ---
   uint16_t pc = sd_.patternCount();
-  for (uint16_t i = 1; i <= pc && entry_count < 258; ++i) {
+  for (uint16_t i = 1; i <= pc && entry_count < kArchiveMaxEntries; ++i) {
     const char *name = sd_.patternName(i);
     if (!name) continue;
-    ZipEntry &e = entries[entry_count];
+    ZipEntry &e = ar_entries_[entry_count];
     snprintf(e.zip_name, sizeof(e.zip_name), "patterns/%s", name);
     e.name_len = (uint8_t)strlen(e.zip_name);
     snprintf(e.sd_path, sizeof(e.sd_path), "%s/%s", AC::constants::pattern_dir, name);
@@ -1729,9 +2106,9 @@ void CommandProcessor::handleGetSdArchive() {
   uint32_t offset  = 0;
   uint32_t cd_size = 0;
   for (uint16_t i = 0; i < entry_count; ++i) {
-    entries[i].lhf_offset = offset;
-    offset  += 30u + entries[i].name_len + entries[i].file_size + 16u;
-    cd_size += 46u + entries[i].name_len;
+    ar_entries_[i].lhf_offset = offset;
+    offset  += 30u + ar_entries_[i].name_len + ar_entries_[i].file_size + 16u;
+    cd_size += 46u + ar_entries_[i].name_len;
   }
   uint32_t cd_offset  = offset;
   uint64_t total_size = (uint64_t)cd_offset + cd_size + 22u;
@@ -1741,91 +2118,183 @@ void CommandProcessor::handleGetSdArchive() {
   memcpy(size_buf, &total_size, sizeof(total_size));
   current_source_->sendResponse(GET_SD_ARCHIVE_CMD, 0, size_buf, sizeof(size_buf));
 
-  // --- Stream each entry: LFH + data + DataDescriptor ---
-  static uint8_t chunk[512];
-  static const uint8_t kZeros[64] = {};
+  // --- Arm the async stream; serviceArchive() sends the ZIP body from loop() ---
+  ar_entry_count_ = entry_count;
+  ar_entry_idx_    = 0;
+  // Empty library (blank/absent SD): the promised total_size is the 22-byte
+  // EOCD alone. Arm straight into kEocd — kLocalHeader and kCentralDir both
+  // dereference ar_entries_[ar_entry_idx_] before any bound check, so
+  // entering either with entry_count == 0 streams a garbage (or stale, since
+  // ar_entries_ persists across archives) entry against that promise.
+  ar_phase_        = (entry_count == 0) ? ArchivePhase::kEocd
+                                        : ArchivePhase::kLocalHeader;
+  ar_cd_offset_    = cd_offset;
+  ar_cd_size_      = cd_size;
+  ar_source_       = current_source_;
+  ar_deadline_     = millis() + kArchiveIdleTimeoutMs;
+  ar_active_       = true;
 
-  for (uint16_t i = 0; i < entry_count; ++i) {
-    ZipEntry &e = entries[i];
-
-    // Local File Header (30 bytes, flags=0x0008 → data descriptor follows)
-    uint8_t lfh[30] = {};
-    lfh[0]=0x50; lfh[1]=0x4B; lfh[2]=0x03; lfh[3]=0x04;  // PK\x03\x04
-    lfh[4]=20;                                              // version needed 2.0
-    lfh[6]=0x08;                                            // flags: data descriptor
-    lfh[26]=(uint8_t)e.name_len;                            // file name length LE
-    current_source_->sendRaw(lfh, sizeof(lfh));
-    current_source_->sendRaw((const uint8_t *)e.zip_name, e.name_len);
-
-    // Stream file data, accumulate CRC-32
-    uint32_t crc      = 0xFFFFFFFFu;
-    uint32_t leftover = e.file_size;
-    File f = SD.open(e.sd_path, FILE_READ);
-    if (f) {
-      uint32_t deadline = millis() + 60000UL;
-      while (leftover > 0) {
-        if (millis() > deadline) break;
-        size_t want = (leftover < sizeof(chunk)) ? (size_t)leftover : sizeof(chunk);
-        size_t got  = (size_t)f.read(chunk, want);
-        if (got == 0) break;
-        crc = G6::crc32_update(crc, chunk, got);
-        current_source_->sendRaw(chunk, got);
-        leftover -= (uint32_t)got;
-      }
-      f.close();
-    }
-    // Pad with zeros if file is short or unavailable (preserves ZIP structure)
-    while (leftover > 0) {
-      size_t n = (leftover < sizeof(kZeros)) ? (size_t)leftover : sizeof(kZeros);
-      crc = G6::crc32_update(crc, kZeros, n);
-      current_source_->sendRaw(kZeros, n);
-      leftover -= (uint32_t)n;
-    }
-    e.crc32 = crc ^ 0xFFFFFFFFu;
-
-    // Data Descriptor (16 bytes): PK\x07\x08 + crc32 + comp_size + uncomp_size
-    uint8_t dd[16];
-    dd[0]=0x50; dd[1]=0x4B; dd[2]=0x07; dd[3]=0x08;
-    dd[4] =(uint8_t)e.crc32;         dd[5] =(uint8_t)(e.crc32>>8);
-    dd[6] =(uint8_t)(e.crc32>>16);   dd[7] =(uint8_t)(e.crc32>>24);
-    dd[8] =(uint8_t)e.file_size;     dd[9] =(uint8_t)(e.file_size>>8);
-    dd[10]=(uint8_t)(e.file_size>>16);dd[11]=(uint8_t)(e.file_size>>24);
-    dd[12]=(uint8_t)e.file_size;     dd[13]=(uint8_t)(e.file_size>>8);
-    dd[14]=(uint8_t)(e.file_size>>16);dd[15]=(uint8_t)(e.file_size>>24);
-    current_source_->sendRaw(dd, sizeof(dd));
-  }
-
-  // --- Central Directory (one entry per file) ---
-  for (uint16_t i = 0; i < entry_count; ++i) {
-    ZipEntry &e = entries[i];
-    uint8_t cde[46] = {};
-    cde[0]=0x50; cde[1]=0x4B; cde[2]=0x01; cde[3]=0x02;  // PK\x01\x02
-    cde[4]=20;   cde[6]=20;                                // version made by / needed
-    cde[8]=0x08;                                           // flags
-    cde[16]=(uint8_t)e.crc32;          cde[17]=(uint8_t)(e.crc32>>8);
-    cde[18]=(uint8_t)(e.crc32>>16);    cde[19]=(uint8_t)(e.crc32>>24);
-    cde[20]=(uint8_t)e.file_size;      cde[21]=(uint8_t)(e.file_size>>8);
-    cde[22]=(uint8_t)(e.file_size>>16);cde[23]=(uint8_t)(e.file_size>>24);
-    cde[24]=(uint8_t)e.file_size;      cde[25]=(uint8_t)(e.file_size>>8);
-    cde[26]=(uint8_t)(e.file_size>>16);cde[27]=(uint8_t)(e.file_size>>24);
-    cde[28]=(uint8_t)e.name_len;                           // file name length
-    cde[42]=(uint8_t)e.lhf_offset;     cde[43]=(uint8_t)(e.lhf_offset>>8);
-    cde[44]=(uint8_t)(e.lhf_offset>>16);cde[45]=(uint8_t)(e.lhf_offset>>24);
-    current_source_->sendRaw(cde, sizeof(cde));
-    current_source_->sendRaw((const uint8_t *)e.zip_name, e.name_len);
-  }
-
-  // --- End of Central Directory Record (22 bytes) ---
-  uint8_t eocd[22] = {};
-  eocd[0]=0x50; eocd[1]=0x4B; eocd[2]=0x05; eocd[3]=0x06;  // PK\x05\x06
-  eocd[8] =(uint8_t)entry_count;      eocd[9] =(uint8_t)(entry_count>>8);
-  eocd[10]=(uint8_t)entry_count;      eocd[11]=(uint8_t)(entry_count>>8);
-  eocd[12]=(uint8_t)cd_size;          eocd[13]=(uint8_t)(cd_size>>8);
-  eocd[14]=(uint8_t)(cd_size>>16);    eocd[15]=(uint8_t)(cd_size>>24);
-  eocd[16]=(uint8_t)cd_offset;        eocd[17]=(uint8_t)(cd_offset>>8);
-  eocd[18]=(uint8_t)(cd_offset>>16);  eocd[19]=(uint8_t)(cd_offset>>24);
-  current_source_->sendRaw(eocd, sizeof(eocd));
-
-  DBG_PRINTF("[cmd] get-sd-archive %u files %lu bytes\n",
+  DBG_PRINTF("[cmd] get-sd-archive armed: %u files, %lu bytes\n",
              (unsigned)entry_count, (unsigned long)total_size);
+}
+
+// ---------------------------------------------------------------------------
+// serviceArchive: one bounded step of the GET_SD_ARCHIVE (0x8A) ZIP stream
+// per loop() call. Mirrors serviceDownload()/serviceUpload() (issue #16):
+// each phase does at most one sendRaw() (file data is additionally chunked
+// to kChunkBytes, same as serviceDownload), checks its return, and aborts
+// the WHOLE transfer on the first short write. It never retries a partial
+// send inline, per MessageSource::sendRaw()'s documented contract.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::serviceArchive() {
+  if (!ar_active_) return;
+
+  if ((int32_t)(millis() - ar_deadline_) >= 0) {
+    DBG_PRINTF("[cmd] get-sd-archive idle TIMEOUT at entry %u/%u phase=%u\n",
+               (unsigned)ar_entry_idx_, (unsigned)ar_entry_count_,
+               (unsigned)ar_phase_);
+    abortArchive();
+    return;
+  }
+
+  static constexpr size_t kChunkBytes = 4096;
+  static uint8_t chunk[kChunkBytes];
+  static const uint8_t kZeros[kChunkBytes] = {};
+
+  switch (ar_phase_) {
+    case ArchivePhase::kLocalHeader: {
+      ZipEntry &e = ar_entries_[ar_entry_idx_];
+      uint8_t buf[30 + sizeof(e.zip_name)] = {};
+      buf[0]=0x50; buf[1]=0x4B; buf[2]=0x03; buf[3]=0x04;  // PK\x03\x04
+      buf[4]=20;                                              // version needed 2.0
+      buf[6]=0x08;                                            // flags: data descriptor
+      buf[26]=(uint8_t)e.name_len;                            // file name length LE
+      memcpy(buf + 30, e.zip_name, e.name_len);
+      size_t total = 30u + e.name_len;
+      size_t sent = ar_source_->sendRaw(buf, total);
+      if (sent < total) { abortArchive(); return; }
+
+      // Hand off to kFileData: open (or fail to open) the entry's file now,
+      // once, rather than re-attempting it every tick.
+      ar_crc_           = 0xFFFFFFFFu;
+      ar_file_remaining_ = e.file_size;
+      ar_file_          = SD.open(e.sd_path, FILE_READ);
+      ar_phase_         = ArchivePhase::kFileData;
+      ar_deadline_      = millis() + kArchiveIdleTimeoutMs;
+      break;
+    }
+
+    case ArchivePhase::kFileData: {
+      if (ar_file_remaining_ == 0) {
+        if (ar_file_) ar_file_.close();
+        ar_entries_[ar_entry_idx_].crc32 = ar_crc_ ^ 0xFFFFFFFFu;
+        ar_phase_ = ArchivePhase::kDataDescriptor;
+        break;
+      }
+      size_t want = (ar_file_remaining_ < kChunkBytes) ? (size_t)ar_file_remaining_ : kChunkBytes;
+      if (ar_file_) {
+        // File::read() returns int: -1 on I/O error. Check the sign BEFORE
+        // narrowing to size_t — the same -1→SIZE_MAX overread serviceDownload
+        // guards against (a -1 here would walk crc32_update/sendRaw ~4 GB
+        // past the 4 KB chunk buffer).
+        int rd = ar_file_.read(chunk, want);
+        if (rd > 0) {
+          size_t got = (size_t)rd;
+          ar_crc_ = G6::crc32_update(ar_crc_, chunk, got);
+          size_t sent = ar_source_->sendRaw(chunk, got);
+          if (sent < got) { abortArchive(); return; }
+          ar_file_remaining_ -= (uint32_t)got;
+          ar_deadline_ = millis() + kArchiveIdleTimeoutMs;
+          break;
+        }
+        // EOF/read-error before ar_file_remaining_ hit 0, so fall back to
+        // zero-padding the rest so the ZIP's promised file_size still holds
+        // (mirrors the old code's short-file/unavailable-file fallback).
+        ar_file_.close();
+      }
+      // No file open (never opened, or just closed above): zero-pad this tick.
+      ar_crc_ = G6::crc32_update(ar_crc_, kZeros, want);
+      size_t sent = ar_source_->sendRaw(kZeros, want);
+      if (sent < want) { abortArchive(); return; }
+      ar_file_remaining_ -= (uint32_t)want;
+      ar_deadline_ = millis() + kArchiveIdleTimeoutMs;
+      break;
+    }
+
+    case ArchivePhase::kDataDescriptor: {
+      ZipEntry &e = ar_entries_[ar_entry_idx_];
+      uint8_t dd[16];
+      dd[0]=0x50; dd[1]=0x4B; dd[2]=0x07; dd[3]=0x08;
+      dd[4] =(uint8_t)e.crc32;          dd[5] =(uint8_t)(e.crc32>>8);
+      dd[6] =(uint8_t)(e.crc32>>16);    dd[7] =(uint8_t)(e.crc32>>24);
+      dd[8] =(uint8_t)e.file_size;      dd[9] =(uint8_t)(e.file_size>>8);
+      dd[10]=(uint8_t)(e.file_size>>16);dd[11]=(uint8_t)(e.file_size>>24);
+      dd[12]=(uint8_t)e.file_size;      dd[13]=(uint8_t)(e.file_size>>8);
+      dd[14]=(uint8_t)(e.file_size>>16);dd[15]=(uint8_t)(e.file_size>>24);
+      size_t sent = ar_source_->sendRaw(dd, sizeof(dd));
+      if (sent < sizeof(dd)) { abortArchive(); return; }
+
+      ++ar_entry_idx_;
+      ar_deadline_ = millis() + kArchiveIdleTimeoutMs;
+      if (ar_entry_idx_ < ar_entry_count_) {
+        ar_phase_ = ArchivePhase::kLocalHeader;
+      } else {
+        ar_entry_idx_ = 0;  // reused below as the Central Directory index
+        ar_phase_ = ArchivePhase::kCentralDir;
+      }
+      break;
+    }
+
+    case ArchivePhase::kCentralDir: {
+      ZipEntry &e = ar_entries_[ar_entry_idx_];
+      uint8_t buf[46 + sizeof(e.zip_name)] = {};
+      buf[0]=0x50; buf[1]=0x4B; buf[2]=0x01; buf[3]=0x02;  // PK\x01\x02
+      buf[4]=20;   buf[6]=20;                                // version made by / needed
+      buf[8]=0x08;                                           // flags
+      buf[16]=(uint8_t)e.crc32;           buf[17]=(uint8_t)(e.crc32>>8);
+      buf[18]=(uint8_t)(e.crc32>>16);     buf[19]=(uint8_t)(e.crc32>>24);
+      buf[20]=(uint8_t)e.file_size;       buf[21]=(uint8_t)(e.file_size>>8);
+      buf[22]=(uint8_t)(e.file_size>>16); buf[23]=(uint8_t)(e.file_size>>24);
+      buf[24]=(uint8_t)e.file_size;       buf[25]=(uint8_t)(e.file_size>>8);
+      buf[26]=(uint8_t)(e.file_size>>16); buf[27]=(uint8_t)(e.file_size>>24);
+      buf[28]=(uint8_t)e.name_len;                           // file name length
+      buf[42]=(uint8_t)e.lhf_offset;      buf[43]=(uint8_t)(e.lhf_offset>>8);
+      buf[44]=(uint8_t)(e.lhf_offset>>16);buf[45]=(uint8_t)(e.lhf_offset>>24);
+      memcpy(buf + 46, e.zip_name, e.name_len);
+      size_t total = 46u + e.name_len;
+      size_t sent = ar_source_->sendRaw(buf, total);
+      if (sent < total) { abortArchive(); return; }
+
+      ++ar_entry_idx_;
+      ar_deadline_ = millis() + kArchiveIdleTimeoutMs;
+      if (ar_entry_idx_ >= ar_entry_count_) ar_phase_ = ArchivePhase::kEocd;
+      break;
+    }
+
+    case ArchivePhase::kEocd: {
+      uint8_t eocd[22] = {};
+      eocd[0]=0x50; eocd[1]=0x4B; eocd[2]=0x05; eocd[3]=0x06;  // PK\x05\x06
+      eocd[8] =(uint8_t)ar_entry_count_;  eocd[9] =(uint8_t)(ar_entry_count_>>8);
+      eocd[10]=(uint8_t)ar_entry_count_;  eocd[11]=(uint8_t)(ar_entry_count_>>8);
+      eocd[12]=(uint8_t)ar_cd_size_;      eocd[13]=(uint8_t)(ar_cd_size_>>8);
+      eocd[14]=(uint8_t)(ar_cd_size_>>16);eocd[15]=(uint8_t)(ar_cd_size_>>24);
+      eocd[16]=(uint8_t)ar_cd_offset_;    eocd[17]=(uint8_t)(ar_cd_offset_>>8);
+      eocd[18]=(uint8_t)(ar_cd_offset_>>16);eocd[19]=(uint8_t)(ar_cd_offset_>>24);
+      size_t sent = ar_source_->sendRaw(eocd, sizeof(eocd));
+      if (sent < sizeof(eocd)) { abortArchive(); return; }
+
+      DBG_PRINTF("[cmd] get-sd-archive complete: %u files\n", (unsigned)ar_entry_count_);
+      ar_active_ = false;
+      break;
+    }
+  }
+}
+
+// Common teardown for an aborted (stalled or timed-out) archive stream.
+// serviceArchive() calls this instead of retrying a short sendRaw() inline,
+// per MessageSource::sendRaw()'s documented contract.
+void CommandProcessor::abortArchive() {
+  if (ar_file_) ar_file_.close();
+  ar_active_ = false;
 }

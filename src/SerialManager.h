@@ -25,13 +25,13 @@ class SerialManager : public MessageSource {
 
   bool hasCommand() const { return cmd_ready_; }
   const ParsedCommand &command() const { return parsed_cmd_; }
-  void commandConsumed() { cmd_ready_ = false; }
+  void commandConsumed() override { cmd_ready_ = false; }
 
   using MessageSource::sendResponse;  // keep the char* convenience overload
   void sendResponse(uint8_t cmd_echo, uint8_t status,
                     const uint8_t *payload, size_t payload_len) override;
   size_t readBulkBytes(uint8_t* buf, size_t max_len) override;
-  void sendRaw(const uint8_t* buf, size_t len) override;
+  size_t sendRaw(const uint8_t* buf, size_t len) override;
 
  private:
   static constexpr size_t RX_BUF_SIZE
