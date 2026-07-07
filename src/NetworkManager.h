@@ -50,6 +50,12 @@ class NetworkManager : public MessageSource {
   EthernetServer server_{AC::constants::ethernet_server_port};
   EthernetClient client_;
 
+  // False when begin() found no populated Ethernet PHY (see
+  // EthernetPhyDetect.h). serviceTcp()/flushResponses() no-op in that case;
+  // Ethernet.begin() itself is never called, since QNEthernet's own PHY
+  // presence check hangs the whole MCU when no PHY is on the bus.
+  bool net_enabled_ = false;
+
   // Receive buffer sized for the largest GS16 stream frame plus headroom.
   static constexpr size_t RX_BUF_SIZE
       = AC::constants::stream_header_byte_count

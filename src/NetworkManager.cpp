@@ -1,12 +1,26 @@
 #include "NetworkManager.h"
 #include "commands.h"
+#include "EthernetPhyDetect.h"
 
 void NetworkManager::begin() {
+  // QNEthernet's own PHY presence check (driver_teensy41.c init_phy() ->
+  // mdio_read()) hangs the whole MCU, including USB, on any board without a
+  // populated Ethernet PHY -- the MDIO "transaction complete" flag it polls
+  // never sets when there's no PHY to finish the transaction. Probe for the
+  // PHY ourselves first, with a bounded timeout, before ever calling into
+  // QNEthernet.
+  net_enabled_ = ethernetPhyPopulated();
+  if (!net_enabled_) {
+    DBG_PRINTF("[net] no Ethernet PHY detected -- network disabled\n");
+    return;
+  }
+
   Ethernet.begin();  // DHCP
   server_.begin();
 }
 
 void NetworkManager::serviceTcp() {
+  if (!net_enabled_) return;
   if (!client_ || !client_.connected()) {
     rx_len_ = 0;
     cmd_ready_ = false;
@@ -183,6 +197,7 @@ void NetworkManager::parseIncoming() {
 }
 
 void NetworkManager::flushResponses() {
+  if (!net_enabled_) return;
   if (!client_ || !client_.connected()) return;
   if (resp_len_ == 0) return;
 
