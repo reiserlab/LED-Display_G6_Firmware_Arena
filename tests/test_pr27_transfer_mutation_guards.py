@@ -312,7 +312,14 @@ def test_all_on_and_trial_params_rejected_during_transfer(transport):
     unrelated download is active, even though neither targets a pattern
     index the transfer is using."""
     transport.command(ALL_OFF_CMD)
-    idx = _upload(transport, GRATING_PAT, "pr27_display_guard.pat")
+    # SINE_PAT (~8.1 MB), not GRATING_PAT (~81 KB): unlike T1/T2, this test
+    # fires TWO sequential TCP probes and both must land while the download
+    # is still active. An 81 KB body drains in tens of milliseconds at this
+    # link's throughput, so the second probe raced the download's completion
+    # (observed on the bench: ALL_ON refused, then TRIAL_PARAMS accepted
+    # status-0 because dl_active_ had legitimately cleared). The 8.1 MB body
+    # keeps the download active for a second-plus — a comfortable window.
+    idx = _upload(transport, SINE_PAT, "pr27_display_guard.pat")
 
     # See T1's comment: begin_download() (header-only) stays on the main
     # thread so dl_active_ is guaranteed true by the time the probes below
@@ -357,4 +364,4 @@ def test_all_on_and_trial_params_rejected_during_transfer(transport):
     if th is not None:
         assert "body" in drained, "the background drain thread never finished"
         got = leftover + drained["body"]
-        assert got == GRATING_PAT.read_bytes(), "the legitimate (serial) download was corrupted"
+        assert got == SINE_PAT.read_bytes(), "the legitimate (serial) download was corrupted"
