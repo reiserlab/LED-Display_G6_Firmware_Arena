@@ -189,9 +189,13 @@ size_t SerialManager::readBulkBytes(uint8_t* buf, size_t max_len) {
 
 size_t SerialManager::sendRaw(const uint8_t* buf, size_t len) {
   // Flush any queued response frame (e.g. the 0x84 size header) first.
-  // Spin-wait up to 5 s in case the TX buffer is momentarily full.
+  // Spin-wait up to 5 s in case the TX buffer is momentarily full. Wrap-safe
+  // signed-difference deadline check (PR #27 review point 9) rather than a
+  // raw millis() < deadline comparison, which misfires at the ~49.7-day
+  // millis() wrap; mirrors the idiom already used by serviceDownload() and
+  // (below) this function's own stall_deadline check.
   uint32_t deadline = millis() + 5000UL;
-  while (resp_len_ > 0 && millis() < deadline) flushResponses();
+  while (resp_len_ > 0 && (int32_t)(millis() - deadline) < 0) flushResponses();
   if (!buf || len == 0) return 0;
   // Pace the bulk body to the USB-CDC TX FIFO. A single Serial.write() larger than
   // availableForWrite() blocks inside loop() until the host drains, which starves the
@@ -220,7 +224,8 @@ size_t SerialManager::sendRaw(const uint8_t* buf, size_t len) {
   while (off < len) {
     int room = Serial.availableForWrite();
     if (room <= 0) {
-      if (millis() > stall_deadline) break;
+      // Wrap-safe (PR #27 review point 9): see the deadline comment above.
+      if ((int32_t)(millis() - stall_deadline) >= 0) break;
       yield();
       continue;
     }
