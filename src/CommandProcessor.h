@@ -60,6 +60,15 @@ class CommandProcessor {
   // Error-glyph frames are exempt — they always use the opcode from buildErrorFrame.
   uint8_t panel_disp_mode_ = 1;
 
+  // Duty-cycle override (#33, SET_DUTY_OVERRIDE 0x1D): -1 = off (pattern's
+  // stored duty flows through), 0..255 = every panel block the controller
+  // ships carries this value instead. Transmit-time only — SD data is never
+  // modified. Sticky like panel_disp_mode_. v1 blocks are patched in place
+  // (patchDutyOverride); the V2 PSRAM path switches to the 0x6x explicit-duty
+  // opcode family (buildPsramFrame). Blanking frames and the error glyph are
+  // exempt: blanking stays maximally dark, diagnostics keep fixed brightness.
+  int16_t duty_override_ = -1;
+
   // Frame buffer holds the current frame (streamed, SD-loaded, all-on, or
   // error glyph) including the 4-byte prefix the SPI dispatcher skips.
   uint8_t frame_buf_[AC::constants::frame_buf_byte_count_max];
@@ -118,10 +127,12 @@ class CommandProcessor {
   // index" command per frame; the panel renders its locally-stored frame.
   // count==1 => static single index; count>1 + frame_rate_hz_>0 => auto-advance
   // [start, start+count) (reuses frame_rate_hz_ / last_advance_us_).
+  // The V2 opcode is computed fresh on every buildPsramFrame() from
+  // panel_disp_mode_ + duty_override_ (not cached at 0x3A/0x3B time), so live
+  // changes to either survive auto-advance rebuilds.
   uint16_t psram_start_index_ = 0;
   uint16_t psram_play_count_  = 1;
   uint16_t psram_play_offset_ = 0;   // 0..count-1
-  uint8_t  psram_cmd_id_      = G6::cmd_disp_psram_persist;
 
   // GET_PATTERN_FILE (0x84) download state (issue #16, fix 2). Streamed one
   // ~4 KB chunk per serviceDownload() call (driven from loop(), like
@@ -293,6 +304,8 @@ class CommandProcessor {
   const char *dioRoleName(DioRole role) const;    // for error payloads / debug prints
   uint8_t dispOpcodeFor(bool gs16) const; // pick DISP_* opcode for panel_disp_mode_ × gs level
   void    patchDispMode();                // rewrite block[1]+parity in every panel block in frame_buf_
+  void    patchDutyOverride();            // rewrite last byte+parity of every v1 block (no-op when off)
+  void    applyDutyOverrideLive();        // re-source frame_buf_ after duty_override_ changes
 
   // Is 1-based pattern idx the target of an active download or upload? (PR
   // #27 review point 8.) Used to refuse a mutation that would race the

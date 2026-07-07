@@ -218,6 +218,40 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       current_source_->sendResponse(command_byte, 0, &panel_disp_mode_, 1);
       break;
 
+    case SET_DUTY_OVERRIDE_CMD: {
+      // [03, 1D, enable, duty]  enable uint8 0|1, duty uint8 0-255 (#33).
+      // While enabled, every panel block shipped to the panels carries `duty`
+      // in place of the pattern's stored duty_cycle — transmit-time only, the
+      // SD data is never modified. duty is ignored (but still required, for a
+      // uniform wire format) when disabling.
+      if (claimed_len != 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [03 1D enable duty]");
+        break;
+      }
+      uint8_t enable = buf[pos];
+      uint8_t duty   = buf[pos + 1];
+      if (enable > 1) {
+        current_source_->sendResponse(command_byte, 1, "enable must be 0|1");
+        break;
+      }
+      duty_override_ = enable ? (int16_t)duty : (int16_t)-1;
+      applyDutyOverrideLive();  // reach the panels now, not at the next frame advance
+      uint8_t payload[2] = { enable, (uint8_t)(enable ? duty : 0) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      DBG_PRINTF("[cmd] set-duty-override enable=%u duty=%u\n",
+                 (unsigned)enable, (unsigned)duty);
+      break;
+    }
+
+    case GET_DUTY_OVERRIDE_CMD: {
+      uint8_t payload[2] = {
+          (uint8_t)(duty_override_ >= 0 ? 1 : 0),
+          (uint8_t)(duty_override_ >= 0 ? duty_override_ : 0),
+      };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      break;
+    }
+
     case GET_ETHERNET_IP_ADDRESS_CMD:
       current_source_->sendResponse(command_byte, 0, net_.ipAddress());
       break;
@@ -927,6 +961,7 @@ void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
   frame_byte_count_  = (uint16_t)frame_byte_count;
   block_byte_count_  = block_size;
   patchDispMode();
+  patchDutyOverride();
 
   // First-time entry into streaming, or grayscale-mode change → re-arm timer.
   bool need_rearm = (state_ != ArenaState::STREAMING_FRAME);
@@ -1090,11 +1125,23 @@ void CommandProcessor::buildPsramFrame(uint16_t index) {
   frame_buf_[2] = (uint8_t)(index & 0xFF);
   frame_buf_[3] = (uint8_t)(index >> 8);
 
-  uint16_t blk = G6::block_byte_count_psram;
+  // Opcode computed fresh on every build (not cached at 0x3A/0x3B handler
+  // time) so a live SET_PANEL_DISPLAY_MODE or SET_DUTY_OVERRIDE mid-play
+  // survives the auto-advance rebuilds. Duty override on → 0x6x explicit-duty
+  // family, 5-byte block (the panel uses our byte); off → 0x5x, 4-byte block
+  // (the panel uses the duty stored with its PSRAM frame).
+  const bool explicit_duty = duty_override_ >= 0;
+  uint8_t cmd_id = G6::disp_opcode_with_mode(
+      explicit_duty ? G6::cmd_disp_psram_duty_oneshot
+                    : G6::cmd_disp_psram_oneshot,
+      panel_disp_mode_);
+  const uint16_t blk = explicit_duty ? G6::block_byte_count_psram_duty
+                                     : G6::block_byte_count_psram;
   for (uint8_t p = 0; p < panel_count_per_frame; ++p) {
     uint8_t *block = frame_buf_ + stream_frame_prefix_byte_count
-                     + (uint32_t)p * G6::block_byte_count_psram;
-    blk = G6::build_psram_index_block(block, index, psram_cmd_id_, 0);
+                     + (uint32_t)p * blk;
+    G6::build_psram_index_block(block, index, cmd_id,
+                                (uint8_t)(explicit_duty ? duty_override_ : 0));
   }
   block_byte_count_ = blk;
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
@@ -1111,8 +1158,6 @@ void CommandProcessor::handleDisplayPsramIndex(const ParsedCommand &cmd) {
   uint16_t index = (uint16_t)cmd.data[2] | ((uint16_t)cmd.data[3] << 8);
 
   spi_.disarmRefreshTimer();
-  psram_cmd_id_      = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
-                                                 panel_disp_mode_);
   psram_start_index_ = index;
   psram_play_count_  = 1;          // static single index
   psram_play_offset_ = 0;
@@ -1138,8 +1183,6 @@ void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
   if (count == 0) count = 1;
 
   spi_.disarmRefreshTimer();
-  psram_cmd_id_      = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
-                                                 panel_disp_mode_);
   psram_start_index_ = start;
   psram_play_count_  = count;
   psram_play_offset_ = 0;
@@ -1501,6 +1544,7 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + (uint32_t)sd_.info().num_panels * block_byte_count_);
   patchDispMode();
+  patchDutyOverride();
   if (ao_mode_ == 1) {
     // frame_number AO (#135): DAC tracks the frame position, 0 V = frame 0 ..
     // 5 V = last frame. loadFrame only runs when the index CHANGES, so the
@@ -1540,6 +1584,7 @@ void CommandProcessor::enterAllOn() {
     refresh_rate_hz_ = refresh_rate_gs16_default;
   }
   fillFrameBufferAllOn(block_byte_count_);
+  patchDutyOverride();  // all-on honors the override — dimmable bench full-field
   state_ = ArenaState::ALL_ON;
   spi_.armRefreshTimer(refresh_rate_hz_);
 #ifdef DEBUG_SERIAL
@@ -1630,6 +1675,55 @@ void CommandProcessor::patchDispMode() {
     // display block without assuming the grayscale level from block size.
     block[1] = G6::disp_opcode_with_mode((uint8_t)(block[1] & 0xFC), panel_disp_mode_);
     G6::stamp_header_parity(block, block_byte_count_);
+  }
+}
+
+void CommandProcessor::patchDutyOverride() {
+  if (duty_override_ < 0) return;
+  // v1 display blocks only — the duty byte is the block's last byte. V2 PSRAM
+  // blocks carry their override via the 0x6x opcode family in buildPsramFrame.
+  if (block_byte_count_ != G6::block_byte_count_gs2 &&
+      block_byte_count_ != G6::block_byte_count_gs16) return;
+  if (frame_byte_count_ <= stream_frame_prefix_byte_count) return;
+  uint8_t *base = frame_buf_ + stream_frame_prefix_byte_count;
+  uint16_t count = (uint16_t)((frame_byte_count_ - stream_frame_prefix_byte_count)
+                               / block_byte_count_);
+  for (uint16_t p = 0; p < count; ++p) {
+    uint8_t *block = base + (uint32_t)p * block_byte_count_;
+    block[block_byte_count_ - 1] = (uint8_t)duty_override_;
+    G6::stamp_header_parity(block, block_byte_count_);
+  }
+}
+
+// Re-source the buffered frame after duty_override_ changes so the new value
+// reaches the panels on the next refresh, not at the next frame advance.
+// Mirrors the live patchDispMode() call in SET_PANEL_DISPLAY_MODE, except
+// DISABLING needs the original duty bytes back, which an in-place patch can't
+// recover — so each state rebuilds/reloads from its source of truth instead.
+void CommandProcessor::applyDutyOverrideLive() {
+  switch (state_) {
+    case ArenaState::OPEN_LOOP:
+    case ArenaState::SHOW_FRAME:
+    case ArenaState::CLOSED_LOOP:
+      loadFrame(cur_frame_index_);  // SD re-read restores or re-patches
+      break;
+    case ArenaState::PSRAM_PLAY:
+      // Rebuild swaps the 0x5x/0x6x opcode family (and the 4/5-byte block).
+      buildPsramFrame((uint16_t)(psram_start_index_ + psram_play_offset_));
+      break;
+    case ArenaState::ALL_ON:
+      fillFrameBufferAllOn(block_byte_count_);  // rebuilds with duty 0xFF
+      patchDutyOverride();
+      break;
+    case ArenaState::STREAMING_FRAME:
+      // Enable / value change: patch the held frame in place. Disable: the
+      // held frame keeps the last override; the host's next STREAM_FRAME
+      // carries its own duty bytes and restores itself.
+      patchDutyOverride();
+      break;
+    case ArenaState::ALL_OFF:
+    case ArenaState::ERROR_DISPLAY:
+      break;  // blanking + error glyph are exempt by design
   }
 }
 
