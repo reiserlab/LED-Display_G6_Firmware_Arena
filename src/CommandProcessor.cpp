@@ -1090,11 +1090,17 @@ void CommandProcessor::buildPsramFrame(uint16_t index) {
   frame_buf_[2] = (uint8_t)(index & 0xFF);
   frame_buf_[3] = (uint8_t)(index >> 8);
 
+  // Opcode computed fresh on every build (not cached at 0x3A/0x3B handler
+  // time). The old cached psram_cmd_id_ meant a live SET_PANEL_DISPLAY_MODE
+  // during auto-advance was patched into the buffered frame by patchDispMode()
+  // but silently reverted on the next servicePsramPlay() rebuild.
+  uint8_t cmd_id = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
+                                             panel_disp_mode_);
   uint16_t blk = G6::block_byte_count_psram;
   for (uint8_t p = 0; p < panel_count_per_frame; ++p) {
     uint8_t *block = frame_buf_ + stream_frame_prefix_byte_count
                      + (uint32_t)p * G6::block_byte_count_psram;
-    blk = G6::build_psram_index_block(block, index, psram_cmd_id_, 0);
+    blk = G6::build_psram_index_block(block, index, cmd_id, 0);
   }
   block_byte_count_ = blk;
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
@@ -1111,8 +1117,6 @@ void CommandProcessor::handleDisplayPsramIndex(const ParsedCommand &cmd) {
   uint16_t index = (uint16_t)cmd.data[2] | ((uint16_t)cmd.data[3] << 8);
 
   spi_.disarmRefreshTimer();
-  psram_cmd_id_      = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
-                                                 panel_disp_mode_);
   psram_start_index_ = index;
   psram_play_count_  = 1;          // static single index
   psram_play_offset_ = 0;
@@ -1138,8 +1142,6 @@ void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
   if (count == 0) count = 1;
 
   spi_.disarmRefreshTimer();
-  psram_cmd_id_      = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
-                                                 panel_disp_mode_);
   psram_start_index_ = start;
   psram_play_count_  = count;
   psram_play_offset_ = 0;

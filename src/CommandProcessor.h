@@ -118,10 +118,12 @@ class CommandProcessor {
   // index" command per frame; the panel renders its locally-stored frame.
   // count==1 => static single index; count>1 + frame_rate_hz_>0 => auto-advance
   // [start, start+count) (reuses frame_rate_hz_ / last_advance_us_).
+  // The V2 opcode is computed fresh from panel_disp_mode_ on every
+  // buildPsramFrame() (not cached at 0x3A/0x3B handler time), so a live
+  // SET_PANEL_DISPLAY_MODE survives auto-advance rebuilds.
   uint16_t psram_start_index_ = 0;
   uint16_t psram_play_count_  = 1;
   uint16_t psram_play_offset_ = 0;   // 0..count-1
-  uint8_t  psram_cmd_id_      = G6::cmd_disp_psram_persist;
 
   // GET_PATTERN_FILE (0x84) download state (issue #16, fix 2). Streamed one
   // ~4 KB chunk per serviceDownload() call (driven from loop(), like
