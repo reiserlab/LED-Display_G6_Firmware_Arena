@@ -187,25 +187,54 @@ size_t SerialManager::readBulkBytes(uint8_t* buf, size_t max_len) {
   return n;
 }
 
-void SerialManager::sendRaw(const uint8_t* buf, size_t len) {
+size_t SerialManager::sendRaw(const uint8_t* buf, size_t len) {
   // Flush any queued response frame (e.g. the 0x84 size header) first.
-  // Spin-wait up to 5 s in case the TX buffer is momentarily full.
+  // Spin-wait up to 5 s in case the TX buffer is momentarily full. Wrap-safe
+  // signed-difference deadline check (PR #27 review point 9) rather than a
+  // raw millis() < deadline comparison, which misfires at the ~49.7-day
+  // millis() wrap; mirrors the idiom already used by serviceDownload() and
+  // (below) this function's own stall_deadline check.
   uint32_t deadline = millis() + 5000UL;
-  while (resp_len_ > 0 && millis() < deadline) flushResponses();
-  if (!buf || len == 0) return;
+  while (resp_len_ > 0 && (int32_t)(millis() - deadline) < 0) flushResponses();
+  if (!buf || len == 0) return 0;
   // Pace the bulk body to the USB-CDC TX FIFO. A single Serial.write() larger than
   // availableForWrite() blocks inside loop() until the host drains, which starves the
   // USB service and can trip the CDC transmit watchdog on big files (the host then sees
   // a "Break"). Chunk to the free FIFO space and yield() between writes, mirroring the
   // framed flushResponses() discipline.
+  //
+  // The room<=0 spin below has its own short stall deadline, reset on every
+  // successful partial write. If the host stops draining entirely (a stalled
+  // reader, not just a slow one), this returns short instead of spinning
+  // forever — issue #16: the old unbounded spin here is what let a stalled
+  // host wedge sendRaw (and therefore all of loop()) indefinitely, which
+  // macOS's CDC-ACM driver would eventually report to the host as a "Break".
+  //
+  // 2000 ms, not the notes' original ~1-2 s lower end: on-hardware testing
+  // (Linux host, native Teensy 4.1 USB) showed a genuinely slow-but-still-
+  // draining host can leave availableForWrite() at 0 for a bit over 1.5 s at
+  // a stretch even while the host reads every ~20 ms — likely USB/host-driver
+  // buffer-release latency, not an application-level gap. 1500 ms produced
+  // false aborts on a real, continuously-progressing transfer; 2000-5000 ms
+  // all worked reliably, so 2000 ms was chosen for the smallest margin that
+  // stopped false-triggering in repeated on-hardware runs.
+  static constexpr uint32_t kStallTimeoutMs = 2000UL;
   size_t off = 0;
+  uint32_t stall_deadline = millis() + kStallTimeoutMs;
   while (off < len) {
     int room = Serial.availableForWrite();
-    if (room <= 0) { yield(); continue; }
+    if (room <= 0) {
+      // Wrap-safe (PR #27 review point 9): see the deadline comment above.
+      if ((int32_t)(millis() - stall_deadline) >= 0) break;
+      yield();
+      continue;
+    }
     size_t n = ((size_t)room < (len - off)) ? (size_t)room : (len - off);
     Serial.write(buf + off, n);
     off += n;
+    stall_deadline = millis() + kStallTimeoutMs;
   }
+  return off;
 }
 
 void SerialManager::sendResponse(uint8_t cmd_echo, uint8_t status,

@@ -27,7 +27,7 @@ class NetworkManager : public MessageSource {
 
   bool hasCommand() const { return cmd_ready_; }
   const ParsedCommand &command() const { return parsed_cmd_; }
-  void commandConsumed() { cmd_ready_ = false; }
+  void commandConsumed() override { cmd_ready_ = false; }
 
   // Build and queue a response: [len, status, echo_cmd, ...payload].
   using MessageSource::sendResponse;  // keep the char* convenience overload
@@ -35,7 +35,8 @@ class NetworkManager : public MessageSource {
                     const uint8_t *payload, size_t payload_len) override;
 
   size_t readBulkBytes(uint8_t* buf, size_t max_len) override;
-  void sendRaw(const uint8_t* buf, size_t len) override;
+  size_t sendRaw(const uint8_t* buf, size_t len) override;
+  bool   isConnected() override { return client_ && client_.connected(); }
 
   const char *ipAddress() const { return ip_str_; }
   const char *macAddress() const { return mac_str_; }

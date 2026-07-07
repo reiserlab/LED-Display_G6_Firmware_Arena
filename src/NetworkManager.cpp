@@ -191,29 +191,45 @@ void NetworkManager::flushResponses() {
   resp_len_ = 0;
 }
 
-void NetworkManager::sendRaw(const uint8_t* buf, size_t len) {
+size_t NetworkManager::sendRaw(const uint8_t* buf, size_t len) {
   // Flush any queued response frame first, then write raw bytes.
   flushResponses();
-  if (!buf || len == 0 || !client_ || !client_.connected()) return;
-  // Loop until every byte is handed to the TCP stack. QNEthernet's write()
-  // returns fewer bytes than requested when the LWIP send buffer is full
-  // (ERR_MEM from tcp_write). A 1 ms delay lets the network timer fire and
-  // drain the send queue before we retry.
-  const uint8_t *p = buf;
-  size_t remaining = len;
-  while (remaining > 0 && client_.connected()) {
-    size_t n = client_.write(p, remaining);
+  if (!buf || len == 0 || !client_ || !client_.connected()) return 0;
+  // Pace to the TCP send buffer and retry on a full queue, mirroring
+  // SerialManager::sendRaw's discipline (issue #16 fix 1) with the same
+  // guarantee: a stalled client returns short instead of blocking loop()
+  // indefinitely. TCP needs this too, and for a harder reason than USB does:
+  // client_.connected() alone can't detect a client that stopped reading
+  // while holding the socket open (PR #27 review point 4); a zero-window
+  // persist probe gets ACKed by the peer's own kernel even if the receiving
+  // PROCESS never drains it, so connected() keeps reporting true. The
+  // room<=0 spin below has its own short stall deadline, reset on every
+  // successful partial write, so that case is caught the same way a
+  // genuine disconnect already is. availableForWrite() already flushes
+  // (altcp_output) and services incoming TCP data (Ethernet.loop()) when
+  // the send buffer is empty, same as the old code's explicit flush() call,
+  // so there's no separate flush needed here.
+  static constexpr uint32_t kStallTimeoutMs = 2000UL;
+  size_t off = 0;
+  uint32_t stall_deadline = millis() + kStallTimeoutMs;
+  while (off < len && client_.connected()) {
+    int room = client_.availableForWrite();
+    if (room <= 0) {
+      if ((int32_t)(millis() - stall_deadline) >= 0) break;
+      delayMicroseconds(250);
+      continue;
+    }
+    size_t want = ((size_t)room < (len - off)) ? (size_t)room : (len - off);
+    size_t n = client_.write(buf + off, want);
     if (n > 0) {
-      p         += n;
-      remaining -= n;
+      off += n;
+      stall_deadline = millis() + kStallTimeoutMs;
     } else {
-      // LWIP send queue full — flush queued segments so the network interrupt
-      // can transmit them, then spin briefly for the receiver ACK to open the
-      // window before retrying.
-      client_.flush();
+      if ((int32_t)(millis() - stall_deadline) >= 0) break;
       delayMicroseconds(250);
     }
   }
+  return off;
 }
 
 void NetworkManager::sendResponse(uint8_t cmd_echo, uint8_t status,

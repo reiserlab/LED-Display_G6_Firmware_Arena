@@ -51,10 +51,19 @@ void setup() {
 // net against U3 (boot contention). applyDioRole tri-states D35 first.
 
 void loop() {
+  // Must run BEFORE net.serviceTcp(): net_'s client_ is a single reused slot,
+  // so if the client owning an active 0x84/0x85/0x8A transfer disconnected,
+  // serviceTcp() below would silently swap in a brand-new client on the same
+  // slot and start parsing/streaming its bytes before this ever got a chance
+  // to see the OLD (dead) connection state (PR #27 review point 5).
+  cmdProc.serviceDisconnects();
   net.serviceTcp();           // 1a. Accept TCP client, read and parse commands
   serial.serviceUsb();        // 1b. Read and parse commands from USB CDC
   cmdProc.processCommand();   // 2.  Handle one parsed command per source
   cmdProc.serviceDisplay();   // 3.  Re-transmit current frame at refresh rate
+  cmdProc.serviceDownload();  // 3b. Stream one 0x84 download chunk, if one is in flight
+  cmdProc.serviceUpload();    // 3c. Stream one 0x85 upload chunk, if one is in flight
+  cmdProc.serviceArchive();   // 3d. Stream one 0x8A archive step, if one is in flight
   net.flushResponses();       // 4a. Send queued responses over TCP
   serial.flushResponses();    // 4b. Send queued responses over USB CDC
 
