@@ -1038,7 +1038,13 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
   if (enterPatternMode(target, pattern_id, frame_rate, gain, init_pos)) {
     current_source_->sendResponse(TRIAL_PARAMS_CMD, 0, "");
   } else {
-    // enterPatternMode already raised the error display + parked in ALL_OFF.
+    // enterPatternMode already raised the error glyph (ERROR_DISPLAY; it
+    // parks in ALL_OFF when the glyph expires). The trial FAILED to start,
+    // so its declared duty must not stay armed: openPattern() may have
+    // succeeded before loadFrame failed, leaving the pattern open — a 0x70
+    // during the glyph window would otherwise display at the failed trial's
+    // duty (review finding on PR #37).
+    trial_duty_ = 0;
     current_source_->sendResponse(TRIAL_PARAMS_CMD, 1, "TRIAL_PARAMS: load failed");
   }
 }
