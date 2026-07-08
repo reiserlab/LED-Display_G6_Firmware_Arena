@@ -45,15 +45,17 @@ _PAYLOAD_MD5 = hashlib.md5(_PAYLOAD).hexdigest()
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _enc_trial_params(mode: int, pattern_id: int,
-                      frame_rate: int = 10, gain: int = 0, init_pos: int = 0) -> bytes:
-    """Build the 11-byte trial-params payload for a [0x0C, 0x08, …] frame."""
+def _enc_trial_params(mode: int, pattern_id: int, frame_rate: int = 10,
+                      init_pos: int = 0, gain: int = 0,
+                      duration_ticks: int = 0) -> bytes:
+    """Build the 11-byte trial-params payload for a [0x0C, 0x08, …] frame.
+    Wire order: mode, pattern_id, frame_rate, init_pos, gain (int16), duration."""
     return (bytes([mode])
             + struct.pack("<H", pattern_id)
-            + struct.pack("<H", frame_rate)
-            + bytes([gain & 0xFF])
+            + struct.pack("<h", frame_rate)
             + struct.pack("<H", init_pos)
-            + b"\x00\x00\x00")
+            + struct.pack("<h", gain)
+            + struct.pack("<H", duration_ticks))
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────

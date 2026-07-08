@@ -608,6 +608,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
         break;
       }
+      trial_duty_ = 0;  // 0x03 declares no per-trial duty → stored duty (#33)
       if (!enterPatternMode(ArenaState::SHOW_FRAME, pattern_id, 0, 0, 0, 0)) {
         current_source_->sendResponse(command_byte, 1, "SET_PATTERN_ID: load failed");
         break;
@@ -975,13 +976,21 @@ void CommandProcessor::handleGetControllerInfo() {
 // trial-params (0x08) — selects display mode 2/3/4 and the SD pattern.
 //
 // Payload layout (after the [len, 0x08] framing):
-//   param[0]   mode        (2 = open loop, 3 = show frame, 4 = closed loop)
-//   param[1:2] pattern_id  uint16 LE (1-based index into /patterns/*.pat)
-//   param[3:4] frame_rate  int16 LE  (Hz; Mode 2: positive = forward, negative = reverse)
-//   param[5:6] init_pos    uint16 LE  (initial frame index, 0-based)
-//   param[7:8] gain        int16 LE  (Mode 4 velocity scaling, 10x fps/V)
-//   param[9:10] duration   uint16 LE  (AC::constants::duration_tick_ms ticks;
-//                                      0 = no controller-run auto-stop)
+//   param[0]    mode        (2 = open loop, 3 = show frame, 4 = closed loop)
+//   param[1:2]  pattern_id  uint16 LE (1-based index into /patterns/*.pat)
+//   param[3:4]  frame_rate  int16 LE  (Hz; Mode 2: positive = forward, negative = reverse)
+//   param[5:6]  init_pos    uint16 LE  (initial frame index, 0-based)
+//   param[7:8]  gain        int16 LE  (Mode 4 velocity scaling, 10x fps/V)
+//   param[9:10] duration    uint16 LE  (AC::constants::duration_tick_ms ticks;
+//                                       0 = no controller-run auto-stop)
+//   param[11]   duty        uint8: 0 = pattern's stored duty_cycle (default —
+//                           and what messages that omit this byte already
+//                           mean), 1-255 = display every frame of THIS trial
+//                           at this duty (issue #33; transmit-time only, SD
+//                           untouched)
+//
+// Frame length is 0x0C (11 params) for messages that don't declare a duty
+// override, or 0x0D (12 params) to append one; both are accepted.
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
@@ -1010,6 +1019,8 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
   uint16_t init_pos   = (uint16_t)p[5] | ((uint16_t)p[6] << 8);
   int16_t  gain       = (int16_t)((uint16_t)p[7] | ((uint16_t)p[8] << 8));
   uint16_t duration   = (uint16_t)p[9] | ((uint16_t)p[10] << 8);
+  // Absent field (message omits the byte) == 0 == stored duty.
+  uint8_t  duty       = (param_len >= 12) ? p[11] : 0;
 
   ArenaState target;
   switch (mode) {
@@ -1023,10 +1034,18 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
       return;
   }
 
+  trial_duty_ = duty;  // set BEFORE enterPatternMode — loadFrame() applies it
+
   if (enterPatternMode(target, pattern_id, frame_rate, gain, init_pos, duration)) {
     current_source_->sendResponse(TRIAL_PARAMS_CMD, 0, "");
   } else {
-    // enterPatternMode already raised the error display + parked in ALL_OFF.
+    // enterPatternMode already raised the error glyph (ERROR_DISPLAY; it
+    // parks in ALL_OFF when the glyph expires). The trial FAILED to start,
+    // so its declared duty must not stay armed: openPattern() may have
+    // succeeded before loadFrame failed, leaving the pattern open — a 0x70
+    // during the glyph window would otherwise display at the failed trial's
+    // duty (review finding on PR #37).
+    trial_duty_ = 0;
     current_source_->sendResponse(TRIAL_PARAMS_CMD, 1, "TRIAL_PARAMS: load failed");
   }
 }
@@ -1088,11 +1107,17 @@ void CommandProcessor::buildPsramFrame(uint16_t index) {
   frame_buf_[2] = (uint8_t)(index & 0xFF);
   frame_buf_[3] = (uint8_t)(index >> 8);
 
+  // Opcode computed fresh on every build (not cached at 0x3A/0x3B handler
+  // time). The old cached psram_cmd_id_ meant a live SET_PANEL_DISPLAY_MODE
+  // during auto-advance was patched into the buffered frame by patchDispMode()
+  // but silently reverted on the next servicePsramPlay() rebuild.
+  uint8_t cmd_id = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
+                                             panel_disp_mode_);
   uint16_t blk = G6::block_byte_count_psram;
   for (uint8_t p = 0; p < panel_count_per_frame; ++p) {
     uint8_t *block = frame_buf_ + stream_frame_prefix_byte_count
                      + (uint32_t)p * G6::block_byte_count_psram;
-    blk = G6::build_psram_index_block(block, index, psram_cmd_id_, 0);
+    blk = G6::build_psram_index_block(block, index, cmd_id, 0);
   }
   block_byte_count_ = blk;
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
@@ -1109,8 +1134,6 @@ void CommandProcessor::handleDisplayPsramIndex(const ParsedCommand &cmd) {
   uint16_t index = (uint16_t)cmd.data[2] | ((uint16_t)cmd.data[3] << 8);
 
   spi_.disarmRefreshTimer();
-  psram_cmd_id_      = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
-                                                 panel_disp_mode_);
   psram_start_index_ = index;
   psram_play_count_  = 1;          // static single index
   psram_play_offset_ = 0;
@@ -1136,8 +1159,6 @@ void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
   if (count == 0) count = 1;
 
   spi_.disarmRefreshTimer();
-  psram_cmd_id_      = G6::disp_opcode_with_mode(G6::cmd_disp_psram_oneshot,
-                                                 panel_disp_mode_);
   psram_start_index_ = start;
   psram_play_count_  = count;
   psram_play_offset_ = 0;
@@ -1512,6 +1533,7 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + (uint32_t)sd_.info().num_panels * block_byte_count_);
   patchDispMode();
+  patchTrialDuty();
   if (ao_mode_ == 1) {
     // frame_number AO (#135): DAC tracks the frame position, 0 V = frame 0 ..
     // 5 V = last frame. loadFrame only runs when the index CHANGES, so the
@@ -1542,6 +1564,7 @@ void CommandProcessor::enterAllOff() {
   }
   state_ = ArenaState::ALL_OFF;
   frame_byte_count_ = 0;
+  trial_duty_ = 0;  // trial over — per-trial duty does not outlive it (#33)
 }
 
 void CommandProcessor::enterAllOn() {
@@ -1643,6 +1666,24 @@ void CommandProcessor::patchDispMode() {
     // 0x5x / 0x6x); rewrite only the mode in the low 2 bits. Works for any
     // display block without assuming the grayscale level from block size.
     block[1] = G6::disp_opcode_with_mode((uint8_t)(block[1] & 0xFC), panel_disp_mode_);
+    G6::stamp_header_parity(block, block_byte_count_);
+  }
+}
+
+void CommandProcessor::patchTrialDuty() {
+  if (trial_duty_ == 0) return;  // 0 = pattern's stored duty flows through
+  // v1 display blocks only — the duty_cycle is each block's last byte. Only
+  // the loadFrame() path (Modes 2/3/4) reaches here, so blanking frames, the
+  // error glyph, streamed frames, and V2 PSRAM blocks are never touched.
+  if (block_byte_count_ != G6::block_byte_count_gs2 &&
+      block_byte_count_ != G6::block_byte_count_gs16) return;
+  if (frame_byte_count_ <= stream_frame_prefix_byte_count) return;
+  uint8_t *base = frame_buf_ + stream_frame_prefix_byte_count;
+  uint16_t count = (uint16_t)((frame_byte_count_ - stream_frame_prefix_byte_count)
+                               / block_byte_count_);
+  for (uint16_t p = 0; p < count; ++p) {
+    uint8_t *block = base + (uint32_t)p * block_byte_count_;
+    block[block_byte_count_ - 1] = trial_duty_;
     G6::stamp_header_parity(block, block_byte_count_);
   }
 }

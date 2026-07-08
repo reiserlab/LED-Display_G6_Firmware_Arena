@@ -71,6 +71,15 @@ class CommandProcessor {
   uint16_t cur_frame_index_ = 0;   // 0-based
   int16_t  frame_rate_hz_   = 0;   // frame-advance rate (Mode 2); negative = reverse
   int16_t  gain_            = 0;   // Mode 4 velocity scaling (10x fps/V)
+  // Per-trial duty (issue #33, stateless redesign): declared in trial_params
+  // param[11] at trial start. 0 = the pattern's stored duty_cycle flows
+  // through (default, and what messages that omit the byte already mean);
+  // 1-255 = every frame this trial ships with this duty byte instead
+  // (patchTrialDuty in loadFrame — transmit-time only, SD data untouched).
+  // Cleared on ALL_OFF; SET_PATTERN_ID (0x03) declares no duty so it clears
+  // too. Deliberately NOT a sticky global: brightness always appears in the
+  // command that started the trial it affects (see PR #34 discussion).
+  uint8_t  trial_duty_      = 0;
   uint32_t last_advance_us_ = 0;   // Mode 2 frame-advance clock
   uint32_t last_sample_us_  = 0;   // Mode 4 AIN sample clock
   float    frame_accum_     = 0.0f;// Mode 4 fractional-frame accumulator
@@ -90,58 +99,6 @@ class CommandProcessor {
     kOutProgrammable = 2, // translator A→B, host drives the BNC via 0xAA
     kOutFramescan = 3     // as output, gated by SpiManager per frame transfer
   };
-  DioRole dio_role_[2] = { DioRole::kOff, DioRole::kOff };  // set in begin()
-
-  // Analog output — last commanded level (mV). 0 = DAC code 0 (power-up default).
-  uint16_t ao_mv_ = 0;
-
-  // AO mode (#135, SET_AO_MODE 0xA3). 0 = programmable (0xA0 levels + 0xA2
-  // LUT — today's behavior); 1 = frame_number: the DAC tracks the SD-pattern
-  // frame index, normalized 0 V = frame 0 .. 5 V = last frame (updated in
-  // loadFrame, Modes 2/3/4). 0xA0/0xA2 are refused while in frame_number.
-  uint8_t ao_mode_ = 0;
-
-  // AO LUT playback (LAB-82). mode 0 = frame-locked (advances with cur_frame_index_);
-  // mode 1 = time-based (steps at ao_lut_step_hz_, max 1000 Hz).
-  // ao_lut_len_ == 0 means the LUT is inactive. Send SET_AO_VOLTAGE (0xA0) to stop.
-  static constexpr uint16_t kAoLutMaxLen = 4096;
-  uint16_t ao_lut_[kAoLutMaxLen];
-  uint16_t ao_lut_len_     = 0;
-  uint8_t  ao_lut_mode_    = 0;
-  uint16_t ao_lut_step_hz_ = 0;
-  uint16_t ao_lut_idx_     = 0;
-  uint32_t ao_lut_last_us_ = 0;
-
-  // Error display.
-  uint32_t error_until_ms_ = 0;
-
-  // V2 PSRAM playback (LAB-41/42). The arena streams a tiny V2 "display PSRAM
-  // index" command per frame; the panel renders its locally-stored frame.
-  // count==1 => static single index; count>1 + frame_rate_hz_>0 => auto-advance
-  // [start, start+count) (reuses frame_rate_hz_ / last_advance_us_).
-  uint16_t psram_start_index_ = 0;
-  uint16_t psram_play_count_  = 1;
-  uint16_t psram_play_offset_ = 0;   // 0..count-1
-  uint8_t  psram_cmd_id_      = G6::cmd_disp_psram_persist;
-
-  // GET_PATTERN_FILE (0x84) download state (issue #16, fix 2). Streamed one
-  // ~4 KB chunk per serviceDownload() call (driven from loop(), like
-  // serviceDisplay()) instead of blocking inside processCommand() for the
-  // whole file — the old single-call version starved net_.serviceTcp(),
-  // serial_.serviceUsb(), serviceDisplay(), and both flushResponses() for
-  // as long as the download ran. dl_deadline_ is idle-based (fix 3): it
-  // resets on every successfully drained chunk rather than being set once
-  // for the whole transfer, so a slow-but-still-progressing host doesn't
-  // trip the 60 s ceiling. A short return from sendRaw() (fix 1) — the host
-  // has stopped draining — aborts the transfer immediately rather than
-  // waiting out the idle deadline.
-  static constexpr uint32_t kDownloadIdleTimeoutMs = 60000UL;
-  File           dl_file_;
-  MessageSource *dl_source_    = nullptr;
-  uint16_t       dl_idx_       = 0;  // 1-based pattern index being downloaded (PR #27 review point 8)
-  uint32_t       dl_remaining_ = 0;
-  uint32_t       dl_deadline_  = 0;
-  bool           dl_active_    = false;
 
   // SET_PATTERN_FILE (0x85) upload state (issue #16, mirroring the 0x84
   // download fix above). Streamed one ~4 KB chunk per serviceUpload() call
@@ -185,21 +142,6 @@ class CommandProcessor {
   // keep this phase alive indefinitely the way a genuinely slow-but-
   // progressing kWriting upload legitimately should.
   enum class UploadPhase : uint8_t { kWriting, kDraining };
-  static constexpr uint32_t kUploadIdleTimeoutMs  = 30000UL;
-  static constexpr uint32_t kUploadDrainTimeoutMs = 5000UL;
-  File           ul_file_;
-  MessageSource *ul_source_        = nullptr;
-  uint16_t       ul_idx_           = 0;
-  uint32_t       ul_remaining_     = 0;
-  uint32_t       ul_total_         = 0;
-  uint32_t       ul_deadline_      = 0;   // kWriting: idle-reset
-  uint32_t       ul_drain_deadline_ = 0;  // kDraining: absolute, set once
-  uint32_t       ul_start_ms_      = 0;
-  bool           ul_active_        = false;
-  UploadPhase    ul_phase_         = UploadPhase::kWriting;
-  uint8_t        ul_fail_status_   = 0;
-  char           ul_fail_msg_[40] = {};
-  char           ul_path_[AC::constants::pattern_name_byte_count + 16] = {};
 
   // GET_SD_ARCHIVE (0x8A) archive state (PR #27 review point 2, follow-up to
   // the issue #16 fixes above). The old handleGetSdArchive() streamed the
@@ -233,6 +175,75 @@ class CommandProcessor {
     kCentralDir,      // send one central-directory record + name
     kEocd,            // send the End of Central Directory record
   };
+  DioRole dio_role_[2] = { DioRole::kOff, DioRole::kOff };  // set in begin()
+
+  // Analog output — last commanded level (mV). 0 = DAC code 0 (power-up default).
+  uint16_t ao_mv_ = 0;
+
+  // AO mode (#135, SET_AO_MODE 0xA3). 0 = programmable (0xA0 levels + 0xA2
+  // LUT — today's behavior); 1 = frame_number: the DAC tracks the SD-pattern
+  // frame index, normalized 0 V = frame 0 .. 5 V = last frame (updated in
+  // loadFrame, Modes 2/3/4). 0xA0/0xA2 are refused while in frame_number.
+  uint8_t ao_mode_ = 0;
+
+  // AO LUT playback (LAB-82). mode 0 = frame-locked (advances with cur_frame_index_);
+  // mode 1 = time-based (steps at ao_lut_step_hz_, max 1000 Hz).
+  // ao_lut_len_ == 0 means the LUT is inactive. Send SET_AO_VOLTAGE (0xA0) to stop.
+  static constexpr uint16_t kAoLutMaxLen = 4096;
+  uint16_t ao_lut_[kAoLutMaxLen];
+  uint16_t ao_lut_len_     = 0;
+  uint8_t  ao_lut_mode_    = 0;
+  uint16_t ao_lut_step_hz_ = 0;
+  uint16_t ao_lut_idx_     = 0;
+  uint32_t ao_lut_last_us_ = 0;
+
+  // Error display.
+  uint32_t error_until_ms_ = 0;
+
+  // V2 PSRAM playback (LAB-41/42). The arena streams a tiny V2 "display PSRAM
+  // index" command per frame; the panel renders its locally-stored frame.
+  // count==1 => static single index; count>1 + frame_rate_hz_>0 => auto-advance
+  // [start, start+count) (reuses frame_rate_hz_ / last_advance_us_).
+  // The V2 opcode is computed fresh from panel_disp_mode_ on every
+  // buildPsramFrame() (not cached at 0x3A/0x3B handler time), so a live
+  // SET_PANEL_DISPLAY_MODE survives auto-advance rebuilds.
+  uint16_t psram_start_index_ = 0;
+  uint16_t psram_play_count_  = 1;
+  uint16_t psram_play_offset_ = 0;   // 0..count-1
+
+  // GET_PATTERN_FILE (0x84) download state (issue #16, fix 2). Streamed one
+  // ~4 KB chunk per serviceDownload() call (driven from loop(), like
+  // serviceDisplay()) instead of blocking inside processCommand() for the
+  // whole file — the old single-call version starved net_.serviceTcp(),
+  // serial_.serviceUsb(), serviceDisplay(), and both flushResponses() for
+  // as long as the download ran. dl_deadline_ is idle-based (fix 3): it
+  // resets on every successfully drained chunk rather than being set once
+  // for the whole transfer, so a slow-but-still-progressing host doesn't
+  // trip the 60 s ceiling. A short return from sendRaw() (fix 1) — the host
+  // has stopped draining — aborts the transfer immediately rather than
+  // waiting out the idle deadline.
+  static constexpr uint32_t kDownloadIdleTimeoutMs = 60000UL;
+  File           dl_file_;
+  MessageSource *dl_source_    = nullptr;
+  uint16_t       dl_idx_       = 0;  // 1-based pattern index being downloaded (PR #27 review point 8)
+  uint32_t       dl_remaining_ = 0;
+  uint32_t       dl_deadline_  = 0;
+  bool           dl_active_    = false;
+  static constexpr uint32_t kUploadIdleTimeoutMs  = 30000UL;
+  static constexpr uint32_t kUploadDrainTimeoutMs = 5000UL;
+  File           ul_file_;
+  MessageSource *ul_source_        = nullptr;
+  uint16_t       ul_idx_           = 0;
+  uint32_t       ul_remaining_     = 0;
+  uint32_t       ul_total_         = 0;
+  uint32_t       ul_deadline_      = 0;   // kWriting: idle-reset
+  uint32_t       ul_drain_deadline_ = 0;  // kDraining: absolute, set once
+  uint32_t       ul_start_ms_      = 0;
+  bool           ul_active_        = false;
+  UploadPhase    ul_phase_         = UploadPhase::kWriting;
+  uint8_t        ul_fail_status_   = 0;
+  char           ul_fail_msg_[40] = {};
+  char           ul_path_[AC::constants::pattern_name_byte_count + 16] = {};
   static constexpr uint16_t kArchiveMaxEntries    = 258;    // 2 manifest + up to 256 patterns
   static constexpr uint32_t kArchiveIdleTimeoutMs = 60000UL;  // matches serviceDownload's ceiling
   ZipEntry       ar_entries_[kArchiveMaxEntries];  // ~44 KB; was a function-static local
@@ -295,6 +306,7 @@ class CommandProcessor {
   const char *dioRoleName(DioRole role) const;    // for error payloads / debug prints
   uint8_t dispOpcodeFor(bool gs16) const; // pick DISP_* opcode for panel_disp_mode_ × gs level
   void    patchDispMode();                // rewrite block[1]+parity in every panel block in frame_buf_
+  void    patchTrialDuty();               // rewrite last byte+parity of every v1 block (no-op when trial_duty_ == 0)
 
   // Is 1-based pattern idx the target of an active download or upload? (PR
   // #27 review point 8.) Used to refuse a mutation that would race the

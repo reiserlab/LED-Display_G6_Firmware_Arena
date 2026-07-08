@@ -48,14 +48,16 @@ def _enc_lut(mode: int, step_hz: int, mv_list: list) -> bytes:
     return params
 
 
-def _enc_trial_params(mode: int, pattern_id: int,
-                      frame_rate: int = 10, gain: int = 0, init_pos: int = 0) -> bytes:
+def _enc_trial_params(mode: int, pattern_id: int, frame_rate: int = 10,
+                      init_pos: int = 0, gain: int = 0,
+                      duration_ticks: int = 0) -> bytes:
+    """Wire order: mode, pattern_id, frame_rate, init_pos, gain (int16), duration."""
     return (bytes([mode])
             + struct.pack("<H", pattern_id)
-            + struct.pack("<H", frame_rate)
-            + bytes([gain & 0xFF])
+            + struct.pack("<h", frame_rate)
             + struct.pack("<H", init_pos)
-            + b"\x00\x00\x00")
+            + struct.pack("<h", gain)
+            + struct.pack("<H", duration_ticks))
 
 
 def _get_ao_mv(transport) -> int:
