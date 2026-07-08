@@ -5,7 +5,7 @@ ALL_OFF_CMD                 = 0x00
 SYSTEM_RESET_CMD            = 0x01   # software system reset (SCB_AIRCR SYSRESETREQ)
 SET_PATTERN_ID_CMD          = 0x03   # [03 03 id_lo id_hi] load 1-based pattern into Mode 3 at frame 0
 SWITCH_GRAYSCALE_CMD        = 0x06   # dropped for G6 — firmware returns status=1
-TRIAL_PARAMS_CMD            = 0x08
+TRIAL_PARAMS_CMD            = 0x08   # Modes 2/3/4; param[10] = per-trial duty, 0 = pattern's stored (#33)
 SET_REFRESH_RATE_CMD        = 0x16
 GET_REFRESH_RATE_CMD        = 0x17   # returns uint16 LE Hz
 SET_PANEL_DISPLAY_MODE_CMD  = 0x1B   # [02 1B mode] 0=oneshot 1=persist 2=triggered 3=gated; default=persist
