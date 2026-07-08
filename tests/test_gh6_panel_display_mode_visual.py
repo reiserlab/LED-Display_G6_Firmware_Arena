@@ -69,14 +69,16 @@ def _get_mode(transport) -> int:
 
 
 def _start_mode2(transport, pat_id: int, fps: int, init_pos: int = 0):
-    """trial_params: Mode 2 (open-loop auto-advance) at fps, signed int16 rate."""
+    """trial_params: Mode 2 (open-loop auto-advance) at fps, signed int16 rate.
+    Post-relayout wire order: mode, pattern_id, frame_rate, init_pos, gain
+    (int16), duration (uint16 ticks; 0 = no auto-stop)."""
     params = (
         bytes([2])
         + struct.pack("<H", pat_id)   # pattern_id
         + struct.pack("<h", fps)      # frame_rate (int16; >0 forward)
-        + struct.pack("<b", 0)        # gain
         + struct.pack("<H", init_pos) # init_pos
-        + b"\x00\x00\x00"             # reserved
+        + struct.pack("<h", 0)        # gain
+        + struct.pack("<H", 0)        # duration
     )
     st, _, _, _ = transport.command(TRIAL_PARAMS_CMD, params)
     assert st == 0, f"trial_params (mode 2) failed: status={st}"

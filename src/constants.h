@@ -238,6 +238,7 @@ enum ControllerError : uint8_t {
 
 constexpr uint32_t microseconds_per_second = 1'000'000;
 constexpr uint32_t milliseconds_per_second = 1'000;
+constexpr uint32_t duration_tick_ms = 10;  // trial_params (0x08) Duration field unit
 
 } // namespace constants
 } // namespace AC

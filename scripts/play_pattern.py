@@ -71,21 +71,19 @@ def main():
                         help="after trial-params, send set-frame-position to this index")
     args = parser.parse_args()
 
-    if not -128 <= args.gain <= 127:
-        parser.error("--gain must fit in a signed byte (-128..127)")
+    if not -32768 <= args.gain <= 32767:
+        parser.error("--gain must fit in a signed int16 (-32768..32767)")
 
-    gain_byte = args.gain & 0xFF  # int8 -> unsigned byte
-
-    # trial-params: [len=0x0c, 0x08, mode, pat(LE16), rate(LE16), gain,
-    # init(LE16), 0, 0, 0]. The 3 trailing reserved bytes pad to the
-    # documented 12-byte combined-command length.
+    # trial-params: [len=0x0c, 0x08, mode, pat(LE16), rate(LE16), init(LE16),
+    # gain(LE16), duration(LE16)]. duration is in 10 ms ticks; 0 = no
+    # controller-run auto-stop (GH #4 canonical re-layout).
     params = (
         [args.mode & 0xFF]
         + _u16le(args.pattern)
         + _u16le(args.rate)
-        + [gain_byte]
         + _u16le(args.init)
-        + [0, 0, 0]
+        + _u16le(args.gain)
+        + [0, 0]
     )
     trial = [0x0C, TRIAL_PARAMS_CMD] + params
 

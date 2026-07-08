@@ -34,7 +34,11 @@ void setup() {
   // after the SPI bus is up, or the SCK will glitch during traffic.
   blinkStartupPattern();
 
-  net.begin();
+  // DEBUG BISECT: NetworkManager::begin() (QNEthernet) hangs the whole board
+  // (including USB) on this unit, which has no Ethernet link. Disabled so
+  // the bench build stays usable over USB/SPI. See debug write-up before
+  // restoring — root cause not yet fixed.
+  // net.begin();
   serial.begin();
   cmdProc.begin();
   spi.begin();
@@ -57,14 +61,14 @@ void loop() {
   // slot and start parsing/streaming its bytes before this ever got a chance
   // to see the OLD (dead) connection state (PR #27 review point 5).
   cmdProc.serviceDisconnects();
-  net.serviceTcp();           // 1a. Accept TCP client, read and parse commands
+  // net.serviceTcp();           // 1a. Accept TCP client, read and parse commands
   serial.serviceUsb();        // 1b. Read and parse commands from USB CDC
   cmdProc.processCommand();   // 2.  Handle one parsed command per source
   cmdProc.serviceDisplay();   // 3.  Re-transmit current frame at refresh rate
   cmdProc.serviceDownload();  // 3b. Stream one 0x84 download chunk, if one is in flight
   cmdProc.serviceUpload();    // 3c. Stream one 0x85 upload chunk, if one is in flight
   cmdProc.serviceArchive();   // 3d. Stream one 0x8A archive step, if one is in flight
-  net.flushResponses();       // 4a. Send queued responses over TCP
+  // net.flushResponses();       // 4a. Send queued responses over TCP
   serial.flushResponses();    // 4b. Send queued responses over USB CDC
 
 #ifdef DEBUG_SERIAL

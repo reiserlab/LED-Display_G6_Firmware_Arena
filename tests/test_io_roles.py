@@ -165,9 +165,10 @@ def test_ao_frame_number_tracks_position(transport, pat, io_restore):
     frame_count = struct.unpack("<H", bytes(payload[:2]))[0]
     if frame_count < 8:
         pytest.skip(f"--pat has only {frame_count} frames; need >= 8 for a useful ramp")
-    # Load in SHOW_FRAME mode at frame 0, then enable frame_number.
-    tp = (bytes([3]) + struct.pack("<H", pat) + struct.pack("<H", 0)
-          + bytes([0]) + struct.pack("<H", 0) + b"\x00\x00\x00")
+    # Load in SHOW_FRAME mode at frame 0, then enable frame_number. Wire
+    # order: mode, pattern_id, frame_rate, init_pos, gain (int16), duration.
+    tp = (bytes([3]) + struct.pack("<H", pat) + struct.pack("<h", 0)
+          + struct.pack("<H", 0) + struct.pack("<h", 0) + struct.pack("<H", 0))
     st, _, _, _ = transport.command(TRIAL_PARAMS_CMD, tp, timeout=10.0)
     assert st == 0, "trial-params mode=3 rejected"
     st, _, _, _ = transport.command(SET_AO_MODE_CMD, bytes([1]))

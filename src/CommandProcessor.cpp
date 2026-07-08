@@ -609,7 +609,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         break;
       }
       trial_duty_ = 0;  // 0x03 declares no per-trial duty → stored duty (#33)
-      if (!enterPatternMode(ArenaState::SHOW_FRAME, pattern_id, 0, 0, 0)) {
+      if (!enterPatternMode(ArenaState::SHOW_FRAME, pattern_id, 0, 0, 0, 0)) {
         current_source_->sendResponse(command_byte, 1, "SET_PATTERN_ID: load failed");
         break;
       }
@@ -975,21 +975,22 @@ void CommandProcessor::handleGetControllerInfo() {
 // ---------------------------------------------------------------------------
 // trial-params (0x08) — selects display mode 2/3/4 and the SD pattern.
 //
-// Payload layout (after the [len, 0x08] framing), parsed defensively:
-//   param[0]   mode        (2 = open loop, 3 = show frame, 4 = closed loop)
-//   param[1:2] pattern_id  uint16 LE (1-based index into /patterns/*.pat)
-//   param[3:4] frame_rate  int16 LE  (Hz; Mode 2: positive = forward, negative = reverse)
-//   param[5]   gain        int8       (Mode 4 velocity scaling, 10x fps/V)
-//   param[6:7] init_pos    uint16 LE  (initial frame index, 0-based)
-//   param[8:9] reserved    (controller-run duration, issue #4; ignored for now)
-//   param[10]  duty        uint8: 0 = pattern's stored duty_cycle (default —
-//                          and what zero-padding legacy hosts already send),
-//                          1-255 = display every frame of THIS trial at this
-//                          duty (issue #33; transmit-time only, SD untouched)
+// Payload layout (after the [len, 0x08] framing):
+//   param[0]    mode        (2 = open loop, 3 = show frame, 4 = closed loop)
+//   param[1:2]  pattern_id  uint16 LE (1-based index into /patterns/*.pat)
+//   param[3:4]  frame_rate  int16 LE  (Hz; Mode 2: positive = forward, negative = reverse)
+//   param[5:6]  init_pos    uint16 LE  (initial frame index, 0-based)
+//   param[7:8]  gain        int16 LE  (Mode 4 velocity scaling, 10x fps/V)
+//   param[9:10] duration    uint16 LE  (AC::constants::duration_tick_ms ticks;
+//                                       0 = no controller-run auto-stop)
+//   param[11]   duty        uint8: 0 = pattern's stored duty_cycle (default —
+//                           and what messages that omit this byte already
+//                           mean), 1-255 = display every frame of THIS trial
+//                           at this duty (issue #33; transmit-time only, SD
+//                           untouched)
 //
-// NOTE: the exact 12-byte G4 trial-params layout is host-canonical and still
-// being reconciled for G6 (g6_03 § Modify). This layout covers every field
-// the G6 doc names; confirm offsets with the host during bring-up.
+// Frame length is 0x0C (11 params) for messages that don't declare a duty
+// override, or 0x0D (12 params) to append one; both are accepted.
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
@@ -1006,7 +1007,7 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
 
   const uint8_t *p = cmd.data + 2;          // first param byte
   uint8_t param_len = cmd.data[0] - 1;       // claimed_len minus the cmd byte
-  if (param_len < 8) {
+  if (param_len < 11) {
     showError(CE_BAD_PAYLOAD_LEN);
     current_source_->sendResponse(TRIAL_PARAMS_CMD, 1, "TRIAL_PARAMS too short");
     return;
@@ -1015,11 +1016,11 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
   uint8_t  mode       = p[0];
   uint16_t pattern_id = (uint16_t)p[1] | ((uint16_t)p[2] << 8);
   int16_t  frame_rate = (int16_t)((uint16_t)p[3] | ((uint16_t)p[4] << 8));
-  int8_t   gain       = (int8_t)p[5];
-  uint16_t init_pos   = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
-  // Absent field (short legacy message) == 0 == stored duty: both spellings
-  // of "no per-trial duty" decode identically.
-  uint8_t  duty       = (param_len >= 11) ? p[10] : 0;
+  uint16_t init_pos   = (uint16_t)p[5] | ((uint16_t)p[6] << 8);
+  int16_t  gain       = (int16_t)((uint16_t)p[7] | ((uint16_t)p[8] << 8));
+  uint16_t duration   = (uint16_t)p[9] | ((uint16_t)p[10] << 8);
+  // Absent field (message omits the byte) == 0 == stored duty.
+  uint8_t  duty       = (param_len >= 12) ? p[11] : 0;
 
   ArenaState target;
   switch (mode) {
@@ -1035,7 +1036,7 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
 
   trial_duty_ = duty;  // set BEFORE enterPatternMode — loadFrame() applies it
 
-  if (enterPatternMode(target, pattern_id, frame_rate, gain, init_pos)) {
+  if (enterPatternMode(target, pattern_id, frame_rate, gain, init_pos, duration)) {
     current_source_->sendResponse(TRIAL_PARAMS_CMD, 0, "");
   } else {
     // enterPatternMode already raised the error glyph (ERROR_DISPLAY; it
@@ -1218,6 +1219,8 @@ void CommandProcessor::serviceDisplay() {
     }
   }
 
+  serviceTrialTimer();
+
   switch (state_) {
     case ArenaState::ALL_OFF:
       break;
@@ -1250,6 +1253,17 @@ void CommandProcessor::serviceDisplay() {
       }
       break;
   }
+}
+
+// trial_params (0x08) Duration field: controller-run auto-stop. Checked every
+// serviceDisplay() call regardless of state_, so a trial started in any of
+// Modes 2/3/4 reverts to ALL_OFF on its own even if the host never sends a
+// follow-up stop command.
+void CommandProcessor::serviceTrialTimer() {
+  if (trial_end_ms_ == 0) return;
+  if ((int32_t)(millis() - trial_end_ms_) < 0) return;
+  trial_end_ms_ = 0;
+  enterAllOff();  // revert to a safe state, like G4
 }
 
 // ---------------------------------------------------------------------------
@@ -1581,8 +1595,8 @@ void CommandProcessor::enterStreamingFrame(uint16_t block_byte_count) {
 }
 
 bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
-                                        int16_t frame_rate_hz, int8_t gain,
-                                        uint16_t init_frame) {
+                                        int16_t frame_rate_hz, int16_t gain,
+                                        uint16_t init_frame, uint16_t duration_ticks) {
   spi_.disarmRefreshTimer();
 
   uint8_t err = sd_.openPattern(pattern_id);
@@ -1608,6 +1622,9 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
   uint32_t now = micros();
   last_advance_us_ = now;
   last_sample_us_  = now;
+  trial_end_ms_ = duration_ticks
+      ? millis() + (uint32_t)duration_ticks * AC::constants::duration_tick_ms
+      : 0;
   state_ = mode;
   spi_.armRefreshTimer(refresh_rate_hz_);
   DBG_PRINTF("[cmd] enterPatternMode state=%u id=%u frames=%u rate=%u gain=%d\n",

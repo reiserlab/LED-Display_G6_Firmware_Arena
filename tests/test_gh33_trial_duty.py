@@ -1,13 +1,18 @@
-"""Per-trial duty tests — trial_params (0x08) param[10], issue #33 (stateless redesign).
+"""Per-trial duty tests — trial_params (0x08) param[11], issue #33 (stateless
+redesign). Wire order matches the GH-4 re-layout (mode, pattern_id, frame_rate,
+init_pos, gain int16, duration), with duty appended as an optional 12th byte.
 
-  T1  legacy_zero_pad_is_noop   : 11 params with duty=0 accepted (what today's
-                                  zero-padding hosts send — must stay a no-op)
-  T2  short_form_accepted       : 8-param legacy message (no duty field) accepted
-  T3  duty_trial_accepted       : duty=0x40 trial starts across Modes 2 and 3
-  T4  stored_pattern_unmodified : 0x88 reports the STORED duty before, during,
-                                  and after a duty trial — transmit-time only
-  T5  set_pattern_id_clears_duty: 0x03 after a duty trial starts a stored-duty
-                                  Mode 3 (protocol-level status checks)
+  T1  duty_omitted_defaults_to_stored : 11-param message (no duty byte)
+                                        accepted, means "stored duty"
+  T2  explicit_zero_duty_is_noop      : 12-param message with duty=0 accepted,
+                                        also means "stored duty"
+  T3  duty_trial_accepted             : duty=0x40 trial starts across Modes 2
+                                        and 3
+  T4  stored_pattern_unmodified       : 0x88 reports the STORED duty before,
+                                        during, and after a duty trial
+                                        (transmit-time only)
+  T5  set_pattern_id_clears_duty      : 0x03 after a duty trial starts a
+                                        stored-duty Mode 3
 
 Observing the duty byte on the SPI bus needs a logic analyser; these cover the
 protocol layer and the SD-data invariant. All tests need --pat.
@@ -30,14 +35,16 @@ from .commands import (
 
 
 def _trial_params(transport, mode: int, pat_id: int, frame_rate_hz: int = 0,
-                  gain: int = 0, init_pos: int = 0, duty: int | None = None):
-    """Send trial_params. duty=None sends the 8-param short form; an int sends
-    the full 11-param layout (param[8:9] reserved zeros + param[10] duty)."""
+                  init_pos: int = 0, gain: int = 0, duration_ticks: int = 0,
+                  duty: int | None = None):
+    """Send trial_params in post-relayout wire order: mode, pattern_id,
+    frame_rate, init_pos, gain (int16), duration (uint16 ticks), and an
+    optional trailing duty byte (param[11]; omitted means 'stored duty')."""
     params = (bytes([mode]) + struct.pack("<H", pat_id)
-              + struct.pack("<h", frame_rate_hz) + struct.pack("<b", gain)
-              + struct.pack("<H", init_pos))
+              + struct.pack("<h", frame_rate_hz) + struct.pack("<H", init_pos)
+              + struct.pack("<h", gain) + struct.pack("<H", duration_ticks))
     if duty is not None:
-        params += b"\x00\x00" + bytes([duty])
+        params += bytes([duty])
     return transport.command(TRIAL_PARAMS_CMD, params)
 
 
@@ -56,21 +63,21 @@ def all_off_after(transport):
     transport.command(ALL_OFF_CMD)
 
 
-# ── T1: legacy zero-padded message stays a no-op ─────────────────────────────
+# ── T1: duty byte omitted defaults to stored duty ────────────────────────────
 
-def test_legacy_zero_pad_is_noop(transport, pat):
-    """11 params with duty=0 — exactly what zero-padding hosts send today —
-    must be accepted and mean 'stored duty'."""
-    st, _, _, _ = _trial_params(transport, mode=3, pat_id=pat, duty=0)
-    assert st == 0, f"legacy zero-padded trial_params rejected: status={st}"
-
-
-# ── T2: short 8-param form ────────────────────────────────────────────────────
-
-def test_short_form_accepted(transport, pat):
-    """The defensive parse keeps accepting the 8-param message (no duty field)."""
+def test_duty_omitted_defaults_to_stored(transport, pat):
+    """The base 11-param message (no duty byte) must still be accepted and
+    mean 'stored duty'."""
     st, _, _, _ = _trial_params(transport, mode=3, pat_id=pat)
-    assert st == 0, f"8-param trial_params rejected: status={st}"
+    assert st == 0, f"11-param trial_params (no duty) rejected: status={st}"
+
+
+# ── T2: explicit duty=0 is also a no-op ──────────────────────────────────────
+
+def test_explicit_zero_duty_is_noop(transport, pat):
+    """A 12-param message with duty=0 is accepted and also means 'stored duty'."""
+    st, _, _, _ = _trial_params(transport, mode=3, pat_id=pat, duty=0)
+    assert st == 0, f"trial_params with duty=0 rejected: status={st}"
 
 
 # ── T3: duty trial accepted in Modes 2 and 3 ─────────────────────────────────
