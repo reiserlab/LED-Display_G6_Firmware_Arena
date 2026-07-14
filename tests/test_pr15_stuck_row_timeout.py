@@ -9,9 +9,17 @@ off. Persistent/Gated self-correct on the next row-burst; Oneshot and
 Triggered do not, so the affected row can stay physically lit indefinitely.
 
 Prerequisite — flash ONE panel with the debug-timeout build before running
-anything in this file:
+anything in this file. From Panel-Firmware/, targeting the board by USB
+serial (`ls /dev/serial/by-id/usb-Reiser_Lab_G6_Panel_v0.3_*-if00`):
 
-    (Panel-Firmware) pixi run platformio run -d panel -e pico_v031_twopiotimeouttest -t upload
+    bash panel/tools/deploy.sh <USB_SERIAL> pico_v031_twopiotimeouttest
+
+(For a board stuck in BOOTSEL with no serial exposed:
+`pixi run platformio run -d panel -e pico_v031_twopiotimeouttest -t upload`.)
+The board must be v0.3.1 hardware — a v0.2.1 board flashed with any
+pico_v031 build is entirely dark under ALL_ON (wrong pin map), which looks
+like a firmware bug but isn't. Reflash production `pico_v031` when done;
+the debug build's display timing is not representative.
 
 That build shrinks TWOPIO_ROW_TIMEOUT_US to 5 us (a real full-duty burst
 takes ~45-50 us), so wait_burst_done() times out on (almost) every row,
