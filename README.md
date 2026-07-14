@@ -113,6 +113,29 @@ On any SD/CRC/parameter fault the controller shows a **"CE / NN" error glyph** o
 (codes in `constants.h` `ControllerError`, e.g. `04` = no card, `06` = header CRC, `07` = frame CRC,
 `08` = arena geometry mismatch) and replies with `status = 1`.
 
+## Hardware-in-the-loop tests
+
+`tests/` is a pytest suite that drives a live controller over USB-CDC or TCP
+(see `tests/conftest.py` for the transport options):
+
+```sh
+pixi run test-serial            # automated suite over USB-CDC
+pixi run test-tcp -- --ip 10.0.0.x
+pixi run test-serial-visual     # opt-in guided tests (human at the arena; -s already set)
+pixi run -e debugad3 test-serial-ad3   # opt-in AD3-instrumented tests (Analog Discovery 3)
+```
+
+Guided-visual tests are marked `visual` (need `--visual`), AD3-instrumented
+tests `ad3` (need `--ad3` plus the `debugad3` pixi environment and the
+Digilent WaveForms runtime; wiring in `tests/ad3_row_probe.py`). Both are
+skipped by default.
+
+`tests/test_pr15_stuck_row_timeout.py` additionally needs one panel flashed
+with Panel-Firmware's `pico_v031_twopiotimeouttest` forced-fault build; its
+module docstring is the full walkthrough (flash command, why the arena's
+display-mode patching makes the `0x1B` step mandatory, and why brightness,
+not shape, is the pass/fail discriminator).
+
 ## Host tooling
 
 - **[Arena Console](https://reiserlab.github.io/webDisplayTools/arena_console.html)** — the
