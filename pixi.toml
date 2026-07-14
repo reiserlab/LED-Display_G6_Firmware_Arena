@@ -47,6 +47,7 @@ pytest = ">=8"
 [feature.debugad3.dependencies]
 python = ">=3.10"
 matplotlib = "*"
+pytest = ">=8"
 
 [feature.debugad3.pypi-dependencies]
 dwfpy = "*"
@@ -59,6 +60,10 @@ dump-spi    = "python debug/dump_spi.py"
 node-scope  = "python debug/measure_shared_node.py"
 compare-node = "python debug/compare_pin4_node.py"
 cs-count    = "python debug/cs_count.py"
+# AD3-instrumented HIL tests (needs an AD3 wired per tests/ad3_row_probe.py).
+# NOTE: keep this serial/tcp task pair in sync — any change to one must mirror in the other.
+test-serial-ad3 = "pytest tests -v --transport=serial -m ad3 --ad3"
+test-tcp-ad3    = "pytest tests -v --transport=tcp -m ad3 --ad3"
 
 [environments]
 debugad3 = ["debugad3"]

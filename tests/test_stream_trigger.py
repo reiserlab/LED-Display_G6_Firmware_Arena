@@ -35,6 +35,7 @@ GS16_FRAME_BYTES          = STREAM_FRAME_PREFIX_BYTES + PANEL_COUNT_PER_FRAME * 
 # NB: same numeric value as STREAM_FRAME_CMD but a *different* layer — this byte
 # rides inside each per-panel block, not the arena command header.
 PANEL_PROTOCOL_V1        = 0x01
+PANEL_CMD_GS16_ONESHOT   = 0x30
 PANEL_CMD_GS16_TRIGGERED = 0x32
 PANEL_CMD_GS16_GATED     = 0x33
 

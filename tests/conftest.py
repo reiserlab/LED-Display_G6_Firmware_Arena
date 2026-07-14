@@ -55,6 +55,15 @@ def pytest_addoption(parser):
         help="Run opt-in guided visual tests (need a human observing the arena; "
              "pair with -s so prompts/output are shown).",
     )
+    parser.addoption(
+        "--ad3",
+        action="store_true",
+        default=False,
+        help="Run opt-in AD3-instrumented tests (need a Digilent Analog "
+             "Discovery 3 wired per the test's docstring; run under the "
+             "debugad3 pixi environment, e.g. `pixi run -e debugad3 "
+             "test-serial-ad3`).",
+    )
 
 
 def pytest_configure(config):
@@ -66,6 +75,9 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "visual: opt-in guided visual test (needs a human + --visual)"
+    )
+    config.addinivalue_line(
+        "markers", "ad3: opt-in AD3-instrumented test (needs an AD3 + --ad3)"
     )
 
 
@@ -79,6 +91,9 @@ def pytest_collection_modifyitems(config, items):
         if "visual" in item.keywords and not config.getoption("--visual"):
             item.add_marker(pytest.mark.skip(
                 reason="guided visual test — pass --visual (with -s) to run"))
+        if "ad3" in item.keywords and not config.getoption("--ad3"):
+            item.add_marker(pytest.mark.skip(
+                reason="AD3-instrumented test — pass --ad3 to run"))
 
 
 @pytest.fixture(scope="session")
