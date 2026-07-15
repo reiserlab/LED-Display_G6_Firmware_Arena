@@ -53,17 +53,61 @@ SET_PANEL_DISPLAY_MODE_CMD = 0x1B
 MODE_PERSIST = 1
 
 HEADER_BYTE_COUNT = 18
+FORMAT_VERSION = 2           # high nibble of header byte 4 (src/constants.h pattern_format_version)
 FRAME_PREFIX_BYTE_COUNT = 4  # "FR" + uint16 LE frame index
 FRAME_CRC_BYTE_COUNT = 2     # CRC-16/CCITT trailer — on-disk only, not sent on the wire
 
 
+def crc8_autosar(data):
+    """CRC-8/AUTOSAR: poly 0x2F, init 0xFF, refin=false, refout=false, xorout 0xFF.
+    Mirrors G6::crc8_autosar() in src/Crc.h -- used for the pattern-file header."""
+    crc = 0xFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x2F) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc ^ 0xFF
+
+
+def crc16_ccitt_false(data):
+    """CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, refin=false, refout=false,
+    xorout 0x0000. Mirrors G6::crc16_ccitt_false() in src/Crc.h -- used for the
+    per-frame trailer."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
 class PatternFile:
-    """Parses a v2 G6PT pattern file (docs/development/g6_04-pattern-file-format.md)."""
+    """Parses a v2 G6PT pattern file (docs/development/g6_04-pattern-file-format.md).
+
+    STREAM_FRAME bypasses the firmware's own SD-read validation (SdManager::
+    validateHeaderBytes / readFrame), which checks the header CRC-8 and each
+    frame's CRC-16 before ever displaying it -- so this constructor repeats
+    those same checks host-side. Without them a corrupted/truncated file that
+    still happens to match the expected size would stream straight to SPI as
+    garbage, which looks just like a wiring/hardware fault on the arena.
+    """
 
     def __init__(self, path):
         data = Path(path).read_bytes()
         if data[:4] != b"G6PT":
             raise ValueError(f"{path}: not a G6PT pattern (bad magic {data[:4]!r})")
+        version = (data[4] >> 4) & 0x0F
+        if version != FORMAT_VERSION:
+            raise ValueError(
+                f"{path}: header format version {version} != expected {FORMAT_VERSION}"
+            )
+        header_crc = data[HEADER_BYTE_COUNT - 1]
+        computed_crc = crc8_autosar(data[: HEADER_BYTE_COUNT - 1])
+        if computed_crc != header_crc:
+            raise ValueError(
+                f"{path}: header CRC-8 mismatch (got 0x{header_crc:02X}, "
+                f"computed 0x{computed_crc:02X}) -- header is corrupted"
+            )
         self.frame_count = struct.unpack_from("<H", data, 6)[0]
         self.row_count = data[8]
         self.col_count = data[9]
@@ -89,6 +133,28 @@ class PatternFile:
                 f"gs_val={self.gs_val})"
             )
         self._data = data
+        self._body_byte_count = (
+            FRAME_PREFIX_BYTE_COUNT + self.num_panels * self.block_byte_count
+        )
+        self._validate_frame_crcs(path)
+
+    def _validate_frame_crcs(self, path):
+        """Check every frame's 'FR' magic and CRC-16/CCITT-FALSE trailer up
+        front (once, at load time) rather than per frame_payload() call, since
+        frame_payload() is called repeatedly while a pattern loops."""
+        for i in range(self.frame_count):
+            start = HEADER_BYTE_COUNT + i * self.frame_byte_count
+            end = start + self._body_byte_count
+            body = self._data[start:end]
+            if body[0:2] != b"FR":
+                raise ValueError(f"{path}: frame {i}: bad frame magic {body[0:2]!r}")
+            want = struct.unpack_from("<H", self._data, end)[0]
+            got = crc16_ccitt_false(body)
+            if got != want:
+                raise ValueError(
+                    f"{path}: frame {i}: CRC-16 mismatch (got 0x{got:04X}, "
+                    f"expected 0x{want:04X}) -- frame data is corrupted"
+                )
 
     def frame_payload(self, i):
         """One frame's on-wire STREAM_FRAME payload: the 4-byte 'FR'+index
@@ -96,8 +162,7 @@ class PatternFile:
         trailing CRC-16 is an on-disk integrity check, not part of the wire
         message, so it's excluded here)."""
         start = HEADER_BYTE_COUNT + i * self.frame_byte_count
-        end = start + FRAME_PREFIX_BYTE_COUNT + self.num_panels * self.block_byte_count
-        return self._data[start:end]
+        return self._data[start : start + self._body_byte_count]
 
 
 # ---------------------------------------------------------------------------
