@@ -34,7 +34,7 @@ namespace AC {
 namespace constants {
 
 // -----------------------------------------------------------------------------
-// G6 panel geometry — 20x20 pixels per panel; G6_2x10 arena = 2 rows x 10 cols.
+// G6 panel geometry — 20x20 pixels per panel; G6_4x10 arena = 4 rows x 10 cols.
 // -----------------------------------------------------------------------------
 
 constexpr uint8_t panel_pixel_count_per_row = 20;
@@ -42,22 +42,22 @@ constexpr uint8_t panel_pixel_count_per_col = 20;
 constexpr uint16_t panel_pixel_count
     = (uint16_t)panel_pixel_count_per_row * panel_pixel_count_per_col;  // 400
 
-constexpr uint8_t panel_count_per_frame_row = 2;
+constexpr uint8_t panel_count_per_frame_row = 4;
 constexpr uint8_t panel_count_per_frame_col = 10;
 constexpr uint8_t panel_count_per_frame
-    = panel_count_per_frame_row * panel_count_per_frame_col;            // 20
+    = panel_count_per_frame_row * panel_count_per_frame_col;            // 40
 
 // G6 v1 panel-block sizes (header + cmd + pixel data + duty_cycle).
 constexpr uint16_t panel_block_byte_count_gs2  = 53;
 constexpr uint16_t panel_block_byte_count_gs16 = 203;
 
 // Stream frame layout: 4-byte frame prefix ("FR" + 16-bit LE frame index)
-// followed by 20 panel blocks in row-major panel order.
+// followed by 40 panel blocks in row-major panel order.
 constexpr uint16_t stream_frame_prefix_byte_count = 4;
 constexpr uint16_t stream_frame_byte_count_gs2
-    = stream_frame_prefix_byte_count + panel_count_per_frame * panel_block_byte_count_gs2;   // 1064
+    = stream_frame_prefix_byte_count + panel_count_per_frame * panel_block_byte_count_gs2;   // 2124
 constexpr uint16_t stream_frame_byte_count_gs16
-    = stream_frame_prefix_byte_count + panel_count_per_frame * panel_block_byte_count_gs16;  // 4064
+    = stream_frame_prefix_byte_count + panel_count_per_frame * panel_block_byte_count_gs16;  // 8124
 
 // Largest frame buffer we hold for SPI dispatch (= GS16 payload).
 constexpr uint16_t frame_buf_byte_count_max = stream_frame_byte_count_gs16;
@@ -103,13 +103,12 @@ constexpr uint8_t region_cipo_pins[region_count_per_frame] = { 12, 1 };
 
 // -----------------------------------------------------------------------------
 // Display refresh defaults — G6 has no SWITCH_GRAYSCALE command; the mode is
-// inferred from the streamed payload size (1064 = GS2, 4064 = GS16). Refresh
-// rates are inherited from the G4.1-ArenaSlim baseline, host-overridable via
-// SET_REFRESH_RATE.
+// inferred from the streamed payload size (2124 = GS2, 8124 = GS16). Refresh
+// rates are host-overridable via SET_REFRESH_RATE.
 // -----------------------------------------------------------------------------
 
-constexpr uint32_t refresh_rate_gs16_default = 300;
-constexpr uint32_t refresh_rate_gs2_default  = 1000;
+constexpr uint32_t refresh_rate_gs16_default = 400;
+constexpr uint32_t refresh_rate_gs2_default  = 1200;
 
 // -----------------------------------------------------------------------------
 // Ethernet / TCP framing.
