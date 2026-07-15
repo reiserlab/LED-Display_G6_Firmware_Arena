@@ -117,7 +117,7 @@ uint8_t SdManager::validateHeader(const uint8_t *hdr) {
   for (uint8_t i = 0; i < 6; ++i) mask_bits += __builtin_popcount(hdr[11 + i]);
   if (mask_bits > num_panels) return CE_ARENA_MISMATCH;
 
-  // This controller is hard-wired for the G6_2x10 arena. Reject any pattern
+  // This controller is hard-wired for the G6_4x10 arena. Reject any pattern
   // whose geometry would misroute against the compiled-in panel-set table.
   if (row != panel_count_per_frame_row || col != panel_count_per_frame_col) {
     return CE_ARENA_MISMATCH;

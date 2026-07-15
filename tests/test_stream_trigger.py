@@ -23,13 +23,13 @@ from .commands import ALL_OFF_CMD, STOP_DISPLAY_CMD, STREAM_FRAME_CMD
 from .transport import parse_response
 
 # --- arena frame geometry (src/constants.h, src/G6PanelProtocol.h) ---------
-PANEL_COUNT_PER_FRAME     = 20    # 2 rows x 10 cols
+PANEL_COUNT_PER_FRAME     = 40    # 4 rows x 10 cols
 STREAM_FRAME_PREFIX_BYTES = 4     # 'F','R', idx_lo, idx_hi (skipped by transferFrame)
 HEADER_SIZE               = 2     # version byte + cmd byte
 PANEL_SIZE                = 20    # 20x20 pixels
 GS16_PAYLOAD_BYTES        = PANEL_SIZE * PANEL_SIZE // 2 + 1   # 200 nibble bytes + 1 duty = 201
 GS16_BLOCK_BYTES          = HEADER_SIZE + GS16_PAYLOAD_BYTES   # 203
-GS16_FRAME_BYTES          = STREAM_FRAME_PREFIX_BYTES + PANEL_COUNT_PER_FRAME * GS16_BLOCK_BYTES  # 4064
+GS16_FRAME_BYTES          = STREAM_FRAME_PREFIX_BYTES + PANEL_COUNT_PER_FRAME * GS16_BLOCK_BYTES  # 8124
 
 # --- panel display-command bytes, V1 Gray_16 (panel/src/protocol.h) --------
 # NB: same numeric value as STREAM_FRAME_CMD but a *different* layer — this byte
@@ -122,7 +122,7 @@ def make_grid(name, level=15):
 def _stream(transport, cmd_id, grid, duty):
     """Send a STREAM_FRAME command and return the parsed ack tuple."""
     transport._send(build_stream_command(cmd_id, grid, duty))
-    raw = transport._recv_raw(timeout=4.0)   # longer: 4064-byte frame + SPI fan-out to 20 panels
+    raw = transport._recv_raw(timeout=4.0)   # longer: 8124-byte frame + SPI fan-out to 40 panels
     return parse_response(raw)
 
 
