@@ -12,7 +12,7 @@ class SpiManager {
   void begin();
 
   // Transmit a full frame buffer once to the panel chain. The frame buffer
-  // layout is identical to the streamed payload: [4-byte prefix][20 panel
+  // layout is identical to the streamed payload: [4-byte prefix][40 panel
   // blocks in row-major panel order], with each block already including the
   // panel-protocol header byte (parity-correct), cmd byte, pixel data, and
   // duty_cycle. block_byte_count selects GS2 (53) vs GS16 (203).
