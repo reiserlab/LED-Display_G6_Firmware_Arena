@@ -48,7 +48,6 @@ import pytest
 from .commands import (
     ALL_OFF_CMD,
     ALL_ON_CMD,
-    PURGE_MEMORY_CMD,
     GET_CONTROLLER_INFO_CMD,
     GET_ETHERNET_IP_ADDRESS_CMD,
     GET_PATTERN_FILE_CMD,

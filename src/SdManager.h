@@ -76,7 +76,8 @@ class SdManager {
   // manifests. Rewrites a fresh empty manifest afterward; /patterns and
   // /firmware are NOT recreated here (SET_PATTERN_FILE_CMD/SET_FIRMWARE_FILE_CMD
   // create them lazily on next write).
-  // Returns CE_NONE, CE_SD_FORMAT_ERROR, or CE_MANIFEST_WRITE_ERROR.
+  // Returns CE_NONE, CE_SD_NOT_PRESENT, CE_SD_FORMAT_ERROR, or
+  // CE_MANIFEST_WRITE_ERROR.
   uint8_t purgeMemory();
 
   // Rename the pattern at the given 1-based pattern_id (0 = pattern.temp) to
