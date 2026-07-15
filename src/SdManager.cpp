@@ -192,7 +192,7 @@ namespace {
 class NullPrint : public Print {
  public:
   size_t write(uint8_t) override { return 1; }
-  size_t write(const uint8_t *buffer, size_t size) override { return size; }
+  size_t write(const uint8_t *, size_t size) override { return size; }
 };
 NullPrint g_null_print;
 }  // namespace
