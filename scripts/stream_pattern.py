@@ -69,7 +69,12 @@ class PatternFile:
         self.col_count = data[9]
         self.gs_val = data[10]
         self.num_panels = self.row_count * self.col_count
-        self.block_byte_count = 53 if self.gs_val == 1 else 203
+        try:
+            self.block_byte_count = {1: 53, 2: 203}[self.gs_val]
+        except KeyError:
+            raise ValueError(
+                f"{path}: unsupported gs_val {self.gs_val} (expected 1=GS2 or 2=GS16)"
+            )
         self.frame_byte_count = (
             FRAME_PREFIX_BYTE_COUNT
             + self.num_panels * self.block_byte_count
