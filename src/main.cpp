@@ -19,6 +19,36 @@ volatile bool g_dbg_on = false;
 
 #ifdef DEBUG_SERIAL
 static bool ipPrinted = false;
+
+// Sentinel-prefixes every line so this shares the same demux convention as
+// DBG_PRINTF (constants.h) instead of injecting bare ASCII into the USB-CDC
+// binary-response channel. Can't gate on g_dbg_on like DBG_PRINTF does --
+// a host can only set that AFTER boot, and this needs to fire during boot
+// itself -- so unlike DBG_PRINTF it prints unconditionally whenever
+// DEBUG_SERIAL is compiled in. It still never blocks the boot sequence:
+// no Serial.flush(), and each byte checks availableForWrite() first and
+// silently drops instead of waiting on a full/absent host.
+class SentinelPrint : public Print {
+ public:
+  size_t write(uint8_t c) override {
+    if (Serial.availableForWrite() < (at_line_start_ ? 2 : 1)) return 0;
+    if (at_line_start_) {
+      Serial.write(AC::constants::diag_line_sentinel);
+      at_line_start_ = false;
+    }
+    Serial.write(c);
+    if (c == '\n') at_line_start_ = true;
+    return 1;
+  }
+  size_t write(const uint8_t *buffer, size_t size) override {
+    size_t n = 0;
+    for (size_t i = 0; i < size; ++i) n += write(buffer[i]);
+    return n;
+  }
+
+ private:
+  bool at_line_start_ = true;
+};
 #endif
 
 void blinkStartupPattern();
@@ -27,6 +57,29 @@ void setupInterruptPriorities();
 void setup() {
 #ifdef DEBUG_SERIAL
   Serial.begin(115200);
+  delay(50);  // let CDC settle so this print isn't lost before the host attaches
+  // TEMPORARY crash-loop diagnostic -- remove once root-caused.
+  {
+    SentinelPrint diag;
+    uint32_t srsr = SRC_SRSR;
+    diag.printf("=== SRC_SRSR (reset cause) = 0x%08lX ===\n", (unsigned long)srsr);
+    if (srsr & SRC_SRSR_IPP_USER_RESET_B)     diag.println("  IPP_USER_RESET_B (reset pin / button)");
+    if (srsr & SRC_SRSR_CSU_RESET_B)          diag.println("  CSU_RESET_B");
+    if (srsr & SRC_SRSR_WDOG_RST_B)           diag.println("  WDOG_RST_B (watchdog 1 timeout)");
+    if (srsr & SRC_SRSR_WDOG3_RST_B)          diag.println("  WDOG3_RST_B (watchdog 3 timeout)");
+    if (srsr & SRC_SRSR_LOCKUP_SYSRESETREQ)   diag.println("  LOCKUP_SYSRESETREQ (CPU lockup or software SCB_AIRCR reset)");
+    if (srsr & SRC_SRSR_JTAG_RST_B)           diag.println("  JTAG_RST_B");
+    if (srsr & SRC_SRSR_JTAG_SW_RST)          diag.println("  JTAG_SW_RST");
+    if (srsr & SRC_SRSR_IPP_RESET_B)          diag.println("  IPP_RESET_B (power-on reset)");
+    if (srsr & SRC_SRSR_TEMPSENSE_RST_B)      diag.println("  TEMPSENSE_RST_B");
+    if (CrashReport) {
+      diag.println("=== CrashReport (previous reset) ===");
+      diag.print(CrashReport);
+      diag.println("=====================================");
+    } else {
+      diag.println("=== no CrashReport (not a CPU fault) ===");
+    }
+  }
 #endif
 
   // LED_BUILTIN is shared with SCK on SPI bus B0 (D13). Drive the boot blink

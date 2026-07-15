@@ -229,6 +229,7 @@ enum ControllerError : uint8_t {
   CE_ARENA_MISMATCH       = 8,   // pattern geometry != this controller's arena
   CE_MANIFEST_WRITE_ERROR = 9,   // MANIFEST.bin or MANIFEST.txt write failed
   CE_DISPLAY_ACTIVE       = 10,  // command refused: display is running; stop first
+  CE_SD_FORMAT_ERROR      = 11,  // SD.format() failed (purge-memory, 0x8F)
 };
 
 // -----------------------------------------------------------------------------

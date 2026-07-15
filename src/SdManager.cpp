@@ -180,7 +180,24 @@ uint8_t SdManager::deletePattern(uint16_t pattern_id) {
   return CE_NONE;
 }
 
-uint8_t SdManager::deleteAllPatterns() {
+namespace {
+// Discards SdFat's format-progress text. SD.format()'s default Print& target
+// is Serial -- the same USB-CDC pipe that carries [length, status, echo]
+// binary response frames -- and FatFormatter/ExFatFormatter write plain-text
+// progress ("Writing FAT ", ".", "Format Done\r\n", ...) to whatever Print&
+// they're given whenever it's non-null, with no way to suppress it short of
+// passing a sink that swallows the bytes. Letting that text reach Serial
+// would interleave raw ASCII into the middle of the response stream and
+// desync any host parsing binary frames.
+class NullPrint : public Print {
+ public:
+  size_t write(uint8_t) override { return 1; }
+  size_t write(const uint8_t *, size_t size) override { return size; }
+};
+NullPrint g_null_print;
+}  // namespace
+
+uint8_t SdManager::purgeMemory() {
   if (!mounted_) return CE_SD_NOT_PRESENT;
 
   if (file_open_) {
@@ -188,31 +205,7 @@ uint8_t SdManager::deleteAllPatterns() {
     file_open_ = false;
   }
 
-  File dir = SD.open(pattern_dir);
-  if (dir && dir.isDirectory()) {
-    // Collect filenames first (can't remove while iterating on all SD libs).
-    char to_delete[pattern_max_count + 1][pattern_name_byte_count];
-    uint16_t count = 0;
-    for (;;) {
-      File entry = dir.openNextFile();
-      if (!entry) break;
-      if (!entry.isDirectory() && count <= pattern_max_count) {
-        strncpy(to_delete[count], entry.name(), pattern_name_byte_count - 1);
-        to_delete[count][pattern_name_byte_count - 1] = '\0';
-        ++count;
-      }
-      entry.close();
-    }
-    dir.close();
-
-    char path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
-    for (uint16_t i = 0; i < count; ++i) {
-      snprintf(path, sizeof(path), "%s/%.*s", pattern_dir, (int)(pattern_name_byte_count - 1), to_delete[i]);
-      SD.remove(path);
-    }
-  } else {
-    if (dir) dir.close();
-  }
+  if (!SD.format(0, 0, g_null_print)) return CE_SD_FORMAT_ERROR;
 
   pattern_count_ = 0;
 

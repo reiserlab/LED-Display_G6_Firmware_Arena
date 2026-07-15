@@ -27,7 +27,7 @@ import pytest
 
 from .commands import (
     ALL_OFF_CMD,
-    DELETE_ALL_PATTERNS_CMD,
+    PURGE_MEMORY_CMD,
     GET_AO_VOLTAGE_CMD,
     SET_AO_LUT_CMD,
     SET_AO_VOLTAGE_CMD,
@@ -88,13 +88,13 @@ def uploaded_pat(transport, pat_data):
     """
     if pat_data is None:
         pytest.skip("--pat not provided; pass a multi-frame .pat to run this test")
-    transport.command(DELETE_ALL_PATTERNS_CMD, timeout=15.0)
+    transport.command(PURGE_MEMORY_CMD, timeout=30.0)
     st, _, _, _ = transport.upload_file(0, pat_data, timeout=120.0)
     assert st == 0, "setup: upload_file failed"
     st2, _, payload, _ = transport.rename_file(0, "lab82.pat")
     assert st2 == 0, "setup: rename_file failed"
     yield struct.unpack("<H", payload)[0]
-    transport.command(DELETE_ALL_PATTERNS_CMD, timeout=15.0)
+    transport.command(PURGE_MEMORY_CMD, timeout=30.0)
 
 
 # ── T1: frame-locked ramp ─────────────────────────────────────────────────────

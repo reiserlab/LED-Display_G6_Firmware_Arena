@@ -1,7 +1,8 @@
 """SD card file operation tests: upload, rename, download, delete.
 
 Transport-agnostic — runs under both serial and TCP via --transport.
-Each test starts with a clean SD (DELETE_ALL_PATTERNS) via the autouse fixture.
+Each test starts with a freshly formatted SD (PURGE_MEMORY_CMD) via the
+autouse fixture.
 
 Upload/download flow:
   1. upload_file(idx=0, data)    → writes /patterns/pattern.temp (not yet listed)
@@ -16,7 +17,7 @@ import pytest
 
 from .commands import (
     ALL_OFF_CMD,
-    DELETE_ALL_PATTERNS_CMD,
+    PURGE_MEMORY_CMD,
     DELETE_PATTERN_FILE_CMD,
     GET_FILE_COUNT_CMD,
     GET_PATTERN_FILE_CMD,
@@ -38,20 +39,21 @@ def _file_count(transport) -> int:
 
 @pytest.fixture(autouse=True)
 def clean_sd(transport):
-    """Clear all pattern files (and pattern.temp) before each test."""
+    """Format the SD card before each test."""
     transport.command(ALL_OFF_CMD)
-    # SD directory iteration + manifest write can take several seconds on a
-    # populated card — give it 10 s so stale bytes don't desync the session.
-    transport.command(DELETE_ALL_PATTERNS_CMD, timeout=10.0)
+    # A full SD.format() is much slower than the per-file delete it replaced,
+    # and scales with card capacity rather than pattern count — give it a
+    # generous timeout so a large/slow card doesn't desync the session.
+    transport.command(PURGE_MEMORY_CMD, timeout=30.0)
     yield
 
 
 # ── Basic SD state ──────────────────────────────────────────────────────────
 
-def test_delete_all_patterns_acks(transport):
-    st, echo, _, _ = transport.command(DELETE_ALL_PATTERNS_CMD)
+def test_purge_memory_acks(transport):
+    st, echo, _, _ = transport.command(PURGE_MEMORY_CMD, timeout=30.0)
     assert st == 0
-    assert echo == DELETE_ALL_PATTERNS_CMD
+    assert echo == PURGE_MEMORY_CMD
     assert _file_count(transport) == 0
 
 

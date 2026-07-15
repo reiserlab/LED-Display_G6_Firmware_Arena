@@ -28,7 +28,7 @@ import pytest
 from .commands import (
     ALL_OFF_CMD,
     ALL_ON_CMD,
-    DELETE_ALL_PATTERNS_CMD,
+    PURGE_MEMORY_CMD,
     SET_PATTERN_FILE_CMD,
     STOP_DISPLAY_CMD,
     TRIAL_PARAMS_CMD,
@@ -62,9 +62,9 @@ def _enc_trial_params(mode: int, pattern_id: int, frame_rate: int = 10,
 
 @pytest.fixture(autouse=True)
 def clean_sd(transport):
-    """Clear all patterns (and pattern.temp) before each test."""
+    """Format the SD card before each test."""
     transport.command(ALL_OFF_CMD)
-    transport.command(DELETE_ALL_PATTERNS_CMD, timeout=15.0)
+    transport.command(PURGE_MEMORY_CMD, timeout=30.0)
     yield
 
 
