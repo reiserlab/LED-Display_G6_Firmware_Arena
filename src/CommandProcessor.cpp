@@ -375,6 +375,11 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       memcpy(new_name, buf + pos, name_len);
       new_name[name_len] = '\0';
 
+      // Recreate /patterns if a prior purge-memory (0x8F) wiped it; cheap
+      // and idempotent when the directory already exists (mirrors
+      // handleSetFirmwareFile / the 0x85 handler above).
+      SD.mkdir(AC::constants::pattern_dir);
+
       uint16_t new_idx = 0;
       uint8_t  err     = sd_.renamePattern(idx, new_name, &new_idx);
       if (err != CE_NONE) {
@@ -487,7 +492,18 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
     }
 
-    case DELETE_ALL_PATTERNS_CMD: {
+    case PURGE_MEMORY_CMD: {
+      // Formats the whole SD card (SdManager::purgeMemory() -> SD.format()),
+      // so it's guarded like the other SD-writing commands (0x84/0x85/0xE0):
+      // refuse while the display is running, since a format destroys
+      // whatever pattern file Mode 2/3/4 might currently be reading, and the
+      // format itself blocks this single-threaded loop for its full
+      // duration anyway (display refresh can't run concurrently either way).
+      if (state_ != ArenaState::ALL_OFF) {
+        current_source_->sendResponse(command_byte, CE_DISPLAY_ACTIVE,
+                                      "Stop display first");
+        break;
+      }
       // Same reasoning as DELETE_PATTERN_FILE_CMD above, but "all" has no
       // single index to check against, so refuse outright while any transfer
       // mechanism is active (PR #27 review point 8). ar_ included: wiping the
@@ -497,12 +513,12 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         current_source_->sendResponse(command_byte, 1, "A transfer is in progress");
         break;
       }
-      uint8_t err = sd_.deleteAllPatterns();
+      uint8_t err = sd_.purgeMemory();
       if (err != CE_NONE) {
-        current_source_->sendResponse(command_byte, err, "Delete-all failed");
+        current_source_->sendResponse(command_byte, err, "Purge-memory failed");
         break;
       }
-      DBG_PRINTF("[cmd] delete-all-patterns\n");
+      DBG_PRINTF("[cmd] purge-memory\n");
       current_source_->sendResponse(command_byte, 0, "");
       break;
     }
@@ -1852,6 +1868,10 @@ bool CommandProcessor::handleBulkWriteCommand(const ParsedCommand &cmd) {
     const char *name = sd_.patternName(idx);
     snprintf(path, sizeof(path), "%s/%s", AC::constants::pattern_dir, name);
   }
+
+  // Recreate /patterns if a prior purge-memory (0x8F) wiped it; cheap and
+  // idempotent when the directory already exists (mirrors handleSetFirmwareFile).
+  SD.mkdir(AC::constants::pattern_dir);
 
   // Remove any existing file so we get a clean write.
   SD.remove(path);

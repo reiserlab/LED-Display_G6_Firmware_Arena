@@ -33,7 +33,7 @@ enum ArenaCommands : uint8_t {
   SET_PATTERN_FILENAME_CMD    = 0x83,  // [0x83, idx_lo, idx_hi, len, chars…] rename; returns new uint16 LE index
   SET_PATTERN_FILE_CMD        = 0x85,  // [0x85, idx_lo, idx_hi, len_b0..b7, data…] upload file (bulk stream)
   DELETE_PATTERN_FILE_CMD     = 0x86,  // [03 86 idx_lo idx_hi] delete pattern file; idx=0 deletes pattern.temp
-  DELETE_ALL_PATTERNS_CMD     = 0x8F,  // [01 8F] delete all files in /patterns
+  PURGE_MEMORY_CMD            = 0x8F,  // [01 8F] format the SD card (wipes everything: patterns, firmware image, manifests)
   GET_SD_ARCHIVE_CMD          = 0x8A,  // [01 8A] stream full SD as a ZIP; only in ALL_OFF state
   SET_AO_VOLTAGE_CMD          = 0xA0,  // [03 A0 mv_lo mv_hi] set BNC J27 (MCP4725 DAC) 0-5000 mV
   GET_AO_VOLTAGE_CMD          = 0xA1,  // [01 A1] returns hardware DAC readback as uint16 LE mV

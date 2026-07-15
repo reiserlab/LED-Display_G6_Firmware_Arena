@@ -27,6 +27,29 @@ void setupInterruptPriorities();
 void setup() {
 #ifdef DEBUG_SERIAL
   Serial.begin(115200);
+  delay(50);  // let CDC settle so this print isn't lost before the host attaches
+  // TEMPORARY crash-loop diagnostic -- remove once root-caused.
+  {
+    uint32_t srsr = SRC_SRSR;
+    Serial.printf("=== SRC_SRSR (reset cause) = 0x%08lX ===\n", (unsigned long)srsr);
+    if (srsr & SRC_SRSR_IPP_USER_RESET_B)     Serial.println("  IPP_USER_RESET_B (reset pin / button)");
+    if (srsr & SRC_SRSR_CSU_RESET_B)          Serial.println("  CSU_RESET_B");
+    if (srsr & SRC_SRSR_WDOG_RST_B)           Serial.println("  WDOG_RST_B (watchdog 1 timeout)");
+    if (srsr & SRC_SRSR_WDOG3_RST_B)          Serial.println("  WDOG3_RST_B (watchdog 3 timeout)");
+    if (srsr & SRC_SRSR_LOCKUP_SYSRESETREQ)   Serial.println("  LOCKUP_SYSRESETREQ (CPU lockup or software SCB_AIRCR reset)");
+    if (srsr & SRC_SRSR_JTAG_RST_B)           Serial.println("  JTAG_RST_B");
+    if (srsr & SRC_SRSR_JTAG_SW_RST)          Serial.println("  JTAG_SW_RST");
+    if (srsr & SRC_SRSR_IPP_RESET_B)          Serial.println("  IPP_RESET_B (power-on reset)");
+    if (srsr & SRC_SRSR_TEMPSENSE_RST_B)      Serial.println("  TEMPSENSE_RST_B");
+  }
+  if (CrashReport) {
+    Serial.println("=== CrashReport (previous reset) ===");
+    Serial.print(CrashReport);
+    Serial.println("=====================================");
+  } else {
+    Serial.println("=== no CrashReport (not a CPU fault) ===");
+  }
+  Serial.flush();
 #endif
 
   // LED_BUILTIN is shared with SCK on SPI bus B0 (D13). Drive the boot blink

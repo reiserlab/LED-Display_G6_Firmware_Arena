@@ -4,7 +4,7 @@ Source: reiserlab/LED-Display_G6_Firmware_Arena#27, review comment
 pullrequestreview-4632788440. Findings and the fix implemented here:
 debug/pr27-response.md, point 8 ("Mid-transfer cross-source mutations").
 
-DELETE_PATTERN_FILE_CMD, DELETE_ALL_PATTERNS_CMD, ALL_ON_CMD, and
+DELETE_PATTERN_FILE_CMD, PURGE_MEMORY_CMD, ALL_ON_CMD, and
 TRIAL_PARAMS_CMD had no awareness of an active dl_/ul_/ar_ transfer at all,
 so a second source could delete or overwrite the exact file a download was
 reading, or flip the display mode while an unrelated SD transfer was still
@@ -15,7 +15,7 @@ in flight. The fix is a hybrid, not one blanket rule everywhere:
     file actually in use is refused, unrelated indices still work. An
     upload is additionally refused outright while ANY archive is active
     (archive can be reading any pattern in the library at a given moment).
-  - DELETE_ALL_PATTERNS_CMD, ALL_ON_CMD, and TRIAL_PARAMS_CMD are guarded
+  - PURGE_MEMORY_CMD, ALL_ON_CMD, and TRIAL_PARAMS_CMD are guarded
     BLANKET (any of dl_/ul_/ar_active_): "all" has no single index to
     check, and a display-mode transition isn't about a specific pattern at
     all, just whether the SD card is in use by anything right now.
@@ -26,8 +26,8 @@ in flight. The fix is a hybrid, not one blanket rule everywhere:
   T2  test_upload_index_specific_while_downloading
         SET_PATTERN_FILE to the pattern being downloaded is refused; to an
         unrelated slot (pattern.temp), it still succeeds.
-  T3  test_delete_all_rejected_while_uploading
-        DELETE_ALL_PATTERNS_CMD is refused while an unrelated upload runs.
+  T3  test_purge_memory_rejected_while_uploading
+        PURGE_MEMORY_CMD is refused while an unrelated upload runs.
   T4  test_upload_rejected_while_archiving
         SET_PATTERN_FILE is refused outright while an archive is active.
   T5  test_all_on_and_trial_params_rejected_during_transfer
@@ -53,7 +53,7 @@ import pytest
 from .commands import (
     ALL_OFF_CMD,
     ALL_ON_CMD,
-    DELETE_ALL_PATTERNS_CMD,
+    PURGE_MEMORY_CMD,
     DELETE_PATTERN_FILE_CMD,
     GET_ETHERNET_IP_ADDRESS_CMD,
     GET_SD_ARCHIVE_CMD,
@@ -222,11 +222,11 @@ def test_upload_index_specific_while_downloading(transport):
         assert got == GRATING_PAT.read_bytes(), "the legitimate (serial) download was corrupted"
 
 
-# ── T3: delete-all guard is blanket ────────────────────────────────────────────
+# ── T3: purge-memory guard is blanket ────────────────────────────────────────────
 
 @pytest.mark.serial_only
-def test_delete_all_rejected_while_uploading(transport):
-    """DELETE_ALL_PATTERNS_CMD must be refused while an unrelated upload is
+def test_purge_memory_rejected_while_uploading(transport):
+    """PURGE_MEMORY_CMD must be refused while an unrelated upload is
     active, even though "all" has no single index to check against."""
     transport.command(ALL_OFF_CMD)
     _upload(transport, GRATING_PAT, "pr27_keepme.pat")
@@ -244,9 +244,9 @@ def test_delete_all_rejected_while_uploading(transport):
         th.start()
         time.sleep(0.3)
 
-        st, echo, payload, _ = tcp.command(DELETE_ALL_PATTERNS_CMD, timeout=5.0)
-        assert st != 0, "DELETE_ALL_PATTERNS_CMD was accepted during an active upload"
-        assert echo == DELETE_ALL_PATTERNS_CMD
+        st, echo, payload, _ = tcp.command(PURGE_MEMORY_CMD, timeout=5.0)
+        assert st != 0, "PURGE_MEMORY_CMD was accepted during an active upload"
+        assert echo == PURGE_MEMORY_CMD
         assert b"progress" in bytes(payload).lower()
     finally:
         if tcp is not None:

@@ -71,9 +71,13 @@ class SdManager {
   // write fails after a successful delete.
   uint8_t deletePattern(uint16_t pattern_id);
 
-  // Delete every file in /patterns (*.pat and pattern.temp).
-  // Returns CE_NONE or CE_MANIFEST_WRITE_ERROR.
-  uint8_t deleteAllPatterns();
+  // Format the SD card (purge-memory, 0x8F): wipes the entire filesystem,
+  // not just /patterns -- also destroys /firmware/panel.bin and the
+  // manifests. Rewrites a fresh empty manifest afterward; /patterns and
+  // /firmware are NOT recreated here (SET_PATTERN_FILE_CMD/SET_FIRMWARE_FILE_CMD
+  // create them lazily on next write).
+  // Returns CE_NONE, CE_SD_FORMAT_ERROR, or CE_MANIFEST_WRITE_ERROR.
+  uint8_t purgeMemory();
 
   // Rename the pattern at the given 1-based pattern_id (0 = pattern.temp) to
   // new_name (bare filename, no directory prefix).
