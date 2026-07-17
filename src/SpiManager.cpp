@@ -34,11 +34,19 @@ void SpiManager::begin() {
   }
 
   // Drive every CS line HIGH (deselected) before any transaction can run.
-  // This covers all 20 CS lines (4 rows x 5 bus-column-pairs), so every
-  // column's MISO OE-decode AND (see ArenaConfig.h) starts at all-HIGH / Hi-Z.
   for (uint8_t i = 0; i < panel_set_count; ++i) {
     pinMode(panel_sets[i].cs_pin, OUTPUT);
     digitalWriteFast(panel_sets[i].cs_pin, HIGH);
+  }
+
+  // Hold the 2nd pair of per-column MISO OE-decode inputs HIGH. Without this
+  // they float (≈low), the OE̅ = CS0&CS1&CS2&CS3 AND can never reach all-HIGH,
+  // and every column's buffer stays enabled — shorting the wired-OR MISO bus so
+  // CIPO reads 00. Tied HIGH, OE̅ = CS_row0 & CS_row1, so one buffer per bus
+  // drives at a time. See ArenaConfig.h / arena-hardware-bug.md.
+  for (uint8_t i = 0; i < cs_decode_tie_high_count; ++i) {
+    pinMode(cs_decode_tie_high_pins[i], OUTPUT);
+    digitalWriteFast(cs_decode_tie_high_pins[i], HIGH);
   }
 }
 
