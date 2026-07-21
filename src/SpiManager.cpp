@@ -37,8 +37,12 @@ void SpiManager::begin() {
   // This covers all 20 CS lines (4 rows x 5 bus-column-pairs), so every
   // column's MISO OE-decode AND (see ArenaConfig.h) starts at all-HIGH / Hi-Z.
   for (uint8_t i = 0; i < panel_set_count; ++i) {
-    pinMode(panel_sets[i].cs_pin, OUTPUT);
+    // Preload HIGH before switching the pin to OUTPUT: the output register
+    // resets to LOW, so pinMode-first drives a brief CS-low pulse on every
+    // panel at controller boot (panels see a clockless "transaction" and
+    // raise PE02/PE03 glyphs).
     digitalWriteFast(panel_sets[i].cs_pin, HIGH);
+    pinMode(panel_sets[i].cs_pin, OUTPUT);
   }
 }
 
