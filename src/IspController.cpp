@@ -88,7 +88,15 @@ bool IspController::pollResp(uint8_t panel, uint8_t *resp, size_t resp_len,
       return true;
     }
     if (millis() - t0 >= timeout_ms) break;
-    delay(poll_ms);
+    // Small quasi-random skew so the poll grid never locks onto the panel's
+    // reply-parking instant. The panel's drive_response has a microsecond
+    // window (RX drain + TX FIFO preload) during which a poll's CS edge
+    // consumes the receipt half-driven; with a fixed grid and a deterministic
+    // compute time (e.g. the ~51 ms VERIFY_STAGED CRC) an unlucky panel hits
+    // that window on EVERY attempt (seen on the bench: identical
+    // "verify-staged garbled CIPO: 81 .." failures back to back). The skew
+    // makes each poll, and each retry, sample a different phase.
+    delay(poll_ms + (millis() % 5));
   }
   if (polls_out) *polls_out = polls;
   return false;
@@ -179,10 +187,19 @@ bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len)
     memcpy(enter_payload, kSentinel, 16);     // 15 chars + NUL = 16 bytes
     memcpy(enter_payload + 16, kUnlock, 4);
     mlen = buildMsg(msgbuf, AC::ISP_ENTER, enter_payload, sizeof(enter_payload));
-    if (!sendCmd(panel_index, msgbuf, mlen)) { setMsg("panel not in arena map"); break; }
     // reply: status(1) nonce(4) flash(4) page(2) sector(2) appcrc(4) bootrom(1) crc8 = 19
-    memset(resp, 0, sizeof(resp));
-    bool crc_ok = readResp(panel_index, resp, 19, &status);
+    // One internal retry: a just-flashed panel doing its one-time boot-indicator
+    // flag erase misses commands for up to a few hundred ms (kEnterRetryDelayMs).
+    bool crc_ok = false;
+    bool send_ok = true;
+    for (uint8_t attempt = 1; attempt <= 2 && !crc_ok && send_ok; ++attempt) {
+      if (attempt == 2) delay(kEnterRetryDelayMs);
+      send_ok = sendCmd(panel_index, msgbuf, mlen);
+      if (!send_ok) break;
+      memset(resp, 0, sizeof(resp));
+      crc_ok = readResp(panel_index, resp, 19, &status);
+    }
+    if (!send_ok) { setMsg("panel not in arena map"); break; }
     if (!crc_ok) {
       // Distinguish a silent panel from a garbled return so the operator knows
       // where to look. All-zero CIPO == nothing driven back.
@@ -374,9 +391,18 @@ bool IspController::verifyPanel(uint8_t panel_index, char *msg, size_t msg_len) 
     memcpy(ep, kSentinel, 16);
     memcpy(ep + 16, kUnlock, 4);
     mlen = buildMsg(msgbuf, AC::ISP_ENTER, ep, sizeof(ep));
-    if (!sendCmd(panel_index, msgbuf, mlen)) { setMsg("panel not in arena map"); break; }
-    memset(resp, 0, sizeof(resp));
-    if (!readResp(panel_index, resp, 19, &status) || status != 0) {
+    // Same one-shot ENTER retry as programPanel (post-flash flag-erase window).
+    bool crc_ok = false;
+    bool send_ok = true;
+    for (uint8_t attempt = 1; attempt <= 2 && !crc_ok && send_ok; ++attempt) {
+      if (attempt == 2) delay(kEnterRetryDelayMs);
+      send_ok = sendCmd(panel_index, msgbuf, mlen);
+      if (!send_ok) break;
+      memset(resp, 0, sizeof(resp));
+      crc_ok = readResp(panel_index, resp, 19, &status);
+    }
+    if (!send_ok) { setMsg("panel not in arena map"); break; }
+    if (!crc_ok || status != 0) {
       setMsg("ISP_ENTER: no valid reply (is the panel running this ISP firmware?)");
       break;
     }

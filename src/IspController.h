@@ -107,6 +107,14 @@ class IspController {
   static constexpr uint32_t kAlivePollMs     = 250;
   static constexpr uint32_t kAliveTimeoutMs  = 12000;
 
+  // One internal ISP_ENTER re-send. A panel holding the post-flash boot
+  // indicator does a one-time flash erase on its first content command (e.g.
+  // the STOP_DISPLAY blank right before a batch), which deafens it for up to
+  // a few hundred ms; an ENTER landing in that window is missed (fleet log
+  // 2026-07-21, panel 1). One retry after this delay recovers it; a genuinely
+  // absent panel still fails in well under a second.
+  static constexpr uint32_t kEnterRetryDelayMs = 400;
+
   // Panel-protocol v1 COMM_CHECK opcode (payload = bytes 0..199), used by
   // pollPanelAlive. Deliberately not a display command: COMM_CHECK is exempt
   // from the panel's boot-indicator retire filter, so liveness polling leaves
