@@ -22,29 +22,33 @@ size_t IspController::buildMsg(uint8_t *out, uint8_t cmd,
   return len;
 }
 
-bool IspController::sendCmd(uint8_t panel, const uint8_t *msg, size_t len) {
+bool IspController::sendCmd(uint8_t panel, const uint8_t *msg, size_t len,
+                            uint32_t gap_us) {
   // Let the panel settle back into its receive loop (parked waiting for CS)
   // before we assert CS for this command. A command sent immediately after the
   // previous reply read can arrive before the panel is listening again and be
   // missed entirely — the panel then reads the following phase-B zeros as a
   // bad-header command (PE04) and never processes the real command. WRITE_PAGE
-  // happens to be slow enough to build (SD read + per-page CRC) to hide this;
-  // VERIFY_STAGED is built instantly and exposed it.
-  delayMicroseconds(2000);
-  // Phase A: clock the COPI message; ignore CIPO.
+  // happens to be slow enough to build (SD read + per-page CRC) to hide this
+  // (and passes kPageGapUs); VERIFY_STAGED is built instantly and exposed it,
+  // so the slow one-shot commands keep the generous kCmdGapUs default.
+  delayMicroseconds(gap_us);
+  // Phase A: clock the COPI message at the fast A-clock; ignore CIPO.
+  spi_.setSpiClockMhz(kIspClockAMhz);
   return spi_.transferSinglePanel(panel, msg, nullptr, len);
 }
 
 bool IspController::readResp(uint8_t panel, uint8_t *resp, size_t resp_len,
-                             uint8_t *status, uint16_t wait_ms) {
+                             uint8_t *status, uint32_t wait_us) {
   // Give the panel time to finish processing the phase-A command and park in
   // panel_spi_drive_response() with its TX FIFO pre-loaded, BEFORE we drop CS
   // for the read. If the panel is even slightly late it skips the whole window
-  // (its "wait for CS idle" gate) and the read returns the empty line. 2 ms is
-  // generous now that the PSRAM buffer is pre-allocated at boot (bench-tunable).
-  // CRC-over-image commands pass a much larger wait_ms (the panel scans ~100 KB
-  // before it can reply).
-  delay(wait_ms);
+  // (its "wait for CS idle" gate) and the read returns the empty line. The
+  // default is generous (bench-tunable); pollResp passes wait_us=0 and retries
+  // on a cadence instead.
+  if (wait_us) delayMicroseconds(wait_us);
+  // Phase B captures CIPO: drop to the conservative B-clock (see header).
+  spi_.setSpiClockMhz(kIspClockBMhz);
 
   // Phase B: clock the reply (zeros on COPI; panel drives CIPO). The buffered
   // wired-OR CIPO return path slips by a fixed sub-bit that shows up as a whole
@@ -72,6 +76,67 @@ bool IspController::readResp(uint8_t panel, uint8_t *resp, size_t resp_len,
   return false;
 }
 
+bool IspController::pollResp(uint8_t panel, uint8_t *resp, size_t resp_len,
+                             uint8_t *status, uint32_t poll_ms,
+                             uint32_t timeout_ms, uint32_t *polls_out) {
+  uint32_t t0 = millis();
+  uint32_t polls = 0;
+  for (;;) {
+    ++polls;
+    if (readResp(panel, resp, resp_len, status, /*wait_us=*/0)) {
+      if (polls_out) *polls_out = polls;
+      return true;
+    }
+    if (millis() - t0 >= timeout_ms) break;
+    delay(poll_ms);
+  }
+  if (polls_out) *polls_out = polls;
+  return false;
+}
+
+bool IspController::pollPanelAlive(uint8_t panel, uint32_t poll_ms,
+                                   uint32_t timeout_ms) {
+  // Canonical COMM_CHECK frame: [hdr][0x01][0..199], parity-stamped.
+  uint8_t cc[2 + 200];
+  cc[0] = G6::header_version_v1;
+  cc[1] = kCommCheckCmd;
+  for (int i = 0; i < 200; ++i) cc[2 + i] = (uint8_t)i;
+  G6::stamp_header_parity(cc, sizeof(cc));
+
+  // Expected 3-byte confirmation the panel arms for the NEXT transaction:
+  // chk = CRC-8/AUTOSAR over the frame with the header parity bit masked;
+  // hdr carries even parity over the {version, cmd, chk} triple (panel
+  // message.cpp: calculate_crc8 / header_with_parity_for_3byte).
+  uint8_t masked0 = (uint8_t)(cc[0] & 0x7F);
+  uint8_t stamped0 = cc[0];
+  cc[0] = masked0;
+  uint8_t exp_chk = G6::crc8_autosar(cc, sizeof(cc));
+  cc[0] = stamped0;
+  unsigned ones = (unsigned)__builtin_popcount(masked0) +
+                  (unsigned)__builtin_popcount(kCommCheckCmd) +
+                  (unsigned)__builtin_popcount(exp_chk);
+  uint8_t exp_hdr = (uint8_t)(masked0 | ((ones & 1u) << 7));
+
+  uint8_t rx[sizeof(cc)] = {0};
+  uint32_t t0 = millis();
+  bool primed = false;  // becomes true once a frame may have been ingested
+  for (;;) {
+    spi_.setSpiClockMhz(kIspClockBMhz);  // CIPO capture: conservative clock
+    if (spi_.transferSinglePanel(panel, cc, rx, sizeof(cc)) && primed) {
+      // Same 0..2-bit CIPO realign tolerance as readResp.
+      for (uint8_t bits = 0; bits <= 2; ++bits) {
+        uint8_t b0 = bits ? (uint8_t)((rx[0] << bits) | (rx[1] >> (8 - bits))) : rx[0];
+        uint8_t b1 = bits ? (uint8_t)((rx[1] << bits) | (rx[2] >> (8 - bits))) : rx[1];
+        uint8_t b2 = bits ? (uint8_t)((rx[2] << bits) | (rx[3] >> (8 - bits))) : rx[2];
+        if (b0 == exp_hdr && b1 == kCommCheckCmd && b2 == exp_chk) return true;
+      }
+    }
+    primed = true;
+    if (millis() - t0 >= timeout_ms) return false;
+    delay(poll_ms);
+  }
+}
+
 bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len) {
   auto setMsg = [&](const char *m) { snprintf(msg, msg_len, "%s", m); };
 
@@ -91,15 +156,22 @@ bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len)
   memcpy(&image_size,  footer + 28, 4);  // u32 LE
   if (image_size != file_size - FOOT) { f.close(); setMsg("footer size mismatch"); return false; }
 
-  // --- 2. Drop to a conservative ISP clock -----------------------------------
+  // --- 2. Save the caller's SPI clock (per-phase clocks are set inside
+  //        sendCmd/readResp; see kIspClockAMhz/kIspClockBMhz) ------------------
   uint16_t saved_mhz = spi_.getSpiClockMhz();
-  spi_.setSpiClockMhz(kIspClockMhz);
+  spi_.setSpiClockMhz(kIspClockBMhz);  // safe default between phases
 
   bool ok = false;
   uint8_t resp[20];
   uint8_t status = 0xFF;
   uint8_t msgbuf[2 + 3 + 4 + kPageBytes + 4];  // largest message = WRITE_PAGE
   size_t mlen;
+
+  // Per-phase wall-clock instrumentation (DBG_PRINTF lines + a compact summary
+  // in the host-visible result msg) so pacing/clock changes are measurable.
+  uint32_t t_total0 = millis();
+  uint32_t stream_ms = 0, verify_ms = 0, commit_ms = 0, boot_ms = 0;
+  uint32_t pages_sent = 0;
 
   do {
     // --- 3. ISP_ENTER --------------------------------------------------------
@@ -140,7 +212,10 @@ bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len)
     }
     memcpy(&session_nonce_, resp + 1, 4);
 
+    DBG_PRINTF("[isp] enter ok, %lu ms\n", (unsigned long)(millis() - t_total0));
+
     // --- 4. Stream the image into panel PSRAM --------------------------------
+    uint32_t t_stream0 = millis();
     uint32_t pages = (image_size + kPageBytes - 1) / kPageBytes;
     f.seek(0);
     bool page_ok = true;
@@ -157,24 +232,37 @@ bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len)
       memcpy(pl + 7, page, kPageBytes);
       memcpy(pl + 7 + kPageBytes, &pcrc, 4);
       mlen = buildMsg(msgbuf, AC::ISP_WRITE_PAGE, pl, sizeof(pl));
-      if (!sendCmd(panel_index, msgbuf, mlen)) { setMsg("write-page send failed"); page_ok = false; break; }
+      if (!sendCmd(panel_index, msgbuf, mlen, kPageGapUs)) { setMsg("write-page send failed"); page_ok = false; break; }
       if (!readResp(panel_index, resp, 2, &status) || status != 0) {
         snprintf(msg, msg_len, "ISP_WRITE_PAGE %lu failed", (unsigned long)p);
         page_ok = false; break;
       }
     }
     if (!page_ok) break;
+    pages_sent = pages;
+    stream_ms = millis() - t_stream0;
+    DBG_PRINTF("[isp] stream %lu pages in %lu ms (%lu us/page)\n",
+               (unsigned long)pages, (unsigned long)stream_ms,
+               (unsigned long)(pages ? stream_ms * 1000ul / pages : 0));
 
     // --- 5. ISP_VERIFY_STAGED (PSRAM staging buffer) -------------------------
     {
+      uint32_t t_verify0 = millis();
+      uint32_t polls = 0;
       uint8_t pl[4 + 3 + 4];
       memcpy(pl, &session_nonce_, 4);
       pl[4] = image_size & 0xFF; pl[5] = (image_size >> 8) & 0xFF; pl[6] = (image_size >> 16) & 0xFF;
       memcpy(pl + 7, &image_crc32, 4);
       mlen = buildMsg(msgbuf, AC::ISP_VERIFY_STAGED, pl, sizeof(pl));
       if (!sendCmd(panel_index, msgbuf, mlen)) { setMsg("verify-staged send failed"); break; }
-      // Panel CRCs the whole staged image (~100 KB in PSRAM) before replying.
-      if (!readResp(panel_index, resp, 6, &status, 400)) {
+      // Panel CRCs the whole staged image in PSRAM before replying; poll for
+      // the receipt instead of one long blocking wait.
+      bool got = pollResp(panel_index, resp, 6, &status,
+                          kVerifyPollMs, kVerifyTimeoutMs, &polls);
+      verify_ms = millis() - t_verify0;
+      DBG_PRINTF("[isp] verify-staged %lu ms (%lu polls)\n",
+                 (unsigned long)verify_ms, (unsigned long)polls);
+      if (!got) {
         // Dump the raw 6-byte capture so we can see whether the panel drove a
         // reply at all (empty/residue → panel faulted/hung in the CRC scan;
         // misaligned data → CIPO realign issue).
@@ -198,23 +286,52 @@ bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len)
     // --- 6. ISP_COMMIT — panel stages the verified image into its LittleFS + an
     //     OTA command, replies, then reboots so the core's boot-time OTA stub
     //     (flash offset 0) copies it into the app region and boots the new
-    //     firmware. The panel writes ~96 KB to LittleFS before replying, so the
-    //     receipt read waits kCommitWaitMs. (The non-destructive scratch probe,
+    //     firmware. The panel writes ~96 KB to LittleFS before replying (first
+    //     commit may format the FS first); the receipt is POLLED with a
+    //     kCommitTimeoutMs ceiling. (The non-destructive scratch probe,
     //     ISP_PROBE_SCRATCH 0xEA, remains in panel firmware for manual diagnosis.)
     {
+      uint32_t t_commit0 = millis();
+      uint32_t polls = 0;
       uint8_t pl[4 + 3];
       memcpy(pl, &session_nonce_, 4);
       pl[4] = image_size & 0xFF; pl[5] = (image_size >> 8) & 0xFF; pl[6] = (image_size >> 16) & 0xFF;
       mlen = buildMsg(msgbuf, AC::ISP_COMMIT, pl, sizeof(pl));
       if (!sendCmd(panel_index, msgbuf, mlen)) { setMsg("commit send failed"); break; }
-      if (!readResp(panel_index, resp, 2, &status, kCommitWaitMs)) { setMsg("commit: no/garbled reply"); break; }
+      bool got = pollResp(panel_index, resp, 2, &status,
+                          kCommitPollMs, kCommitTimeoutMs, &polls);
+      commit_ms = millis() - t_commit0;
+      DBG_PRINTF("[isp] commit receipt %lu ms (%lu polls)\n",
+                 (unsigned long)commit_ms, (unsigned long)polls);
+      if (!got) {
+        setMsg("commit: no receipt within 15 s; run g6-verify-panel to check whether the flash took");
+        break;
+      }
       if (status == 8) { setMsg("commit: OTA staging failed on panel (LittleFS/space?)"); break; }
       if (status != 0) { snprintf(msg, msg_len, "commit rejected (status %u)", (unsigned)status); break; }
     }
-    // Panel is rebooting; the OTA stub copies the staged image into flash and boots.
-    delay(kRebootWaitMs);
-    snprintf(msg, msg_len, "panel %u flashed via OTA (%lu bytes); rebooting + applying update",
-             (unsigned)(panel_index + 1), (unsigned long)image_size);  // report 1-based
+    // Panel is rebooting; the OTA stub copies the staged image into flash and
+    // boots. Poll for the panel to answer a COMM_CHECK instead of a fixed wait.
+    {
+      uint32_t t_boot0 = millis();
+      bool alive = pollPanelAlive(panel_index, kAlivePollMs, kAliveTimeoutMs);
+      boot_ms = millis() - t_boot0;
+      DBG_PRINTF("[isp] reboot -> alive %lu ms (%s)\n",
+                 (unsigned long)boot_ms, alive ? "ok" : "TIMEOUT");
+      if (!alive) {
+        setMsg("panel did not come back within 12 s after OTA reboot; check power/wiring, then g6-verify-panel");
+        break;
+      }
+    }
+    snprintf(msg, msg_len,
+             "panel %u flashed via OTA (%lu bytes) in %lu.%01lu s "
+             "(stream %lu + verify %lu + commit %lu + boot %lu ms, %lu pages)",
+             (unsigned)(panel_index + 1), (unsigned long)image_size,  // report 1-based
+             (unsigned long)((millis() - t_total0) / 1000ul),
+             (unsigned long)(((millis() - t_total0) % 1000ul) / 100ul),
+             (unsigned long)stream_ms, (unsigned long)verify_ms,
+             (unsigned long)commit_ms, (unsigned long)boot_ms,
+             (unsigned long)pages_sent);
     ok = true;
   } while (false);
 
@@ -243,7 +360,7 @@ bool IspController::verifyPanel(uint8_t panel_index, char *msg, size_t msg_len) 
   memcpy(&image_size,  footer + 28, 4);
 
   uint16_t saved_mhz = spi_.getSpiClockMhz();
-  spi_.setSpiClockMhz(kIspClockMhz);
+  spi_.setSpiClockMhz(kIspClockBMhz);  // safe default between phases
 
   bool ok = false;
   uint8_t resp[20];
@@ -273,7 +390,11 @@ bool IspController::verifyPanel(uint8_t panel_index, char *msg, size_t msg_len) 
     memcpy(pl + 10, &image_crc32, 4);
     mlen = buildMsg(msgbuf, AC::ISP_VERIFY_CRC, pl, sizeof(pl));
     if (!sendCmd(panel_index, msgbuf, mlen)) { setMsg("verify-crc send failed"); break; }
-    if (!readResp(panel_index, resp, 6, &status, 400)) { setMsg("verify-crc: no/garbled reply"); break; }
+    // Panel CRCs the app region via XIP before replying; poll for the receipt.
+    if (!pollResp(panel_index, resp, 6, &status, kVerifyPollMs, kVerifyTimeoutMs)) {
+      setMsg("verify-crc: no/garbled reply");
+      break;
+    }
     uint32_t got = (uint32_t)resp[1] | ((uint32_t)resp[2] << 8) |
                    ((uint32_t)resp[3] << 16) | ((uint32_t)resp[4] << 24);
     bool match = (status == 0);
