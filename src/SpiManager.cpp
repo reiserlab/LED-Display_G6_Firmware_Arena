@@ -35,8 +35,12 @@ void SpiManager::begin() {
 
   // Drive every CS line HIGH (deselected) before any transaction can run.
   for (uint8_t i = 0; i < panel_set_count; ++i) {
-    pinMode(panel_sets[i].cs_pin, OUTPUT);
+    // Preload HIGH before switching the pin to OUTPUT: the output register
+    // resets to LOW, so pinMode-first drives a brief CS-low pulse on every
+    // panel at controller boot (panels see a clockless "transaction" and
+    // raise PE02/PE03 glyphs).
     digitalWriteFast(panel_sets[i].cs_pin, HIGH);
+    pinMode(panel_sets[i].cs_pin, OUTPUT);
   }
 
   // Hold the 2nd pair of per-column MISO OE-decode inputs HIGH. Without this
