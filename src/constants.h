@@ -176,8 +176,8 @@ constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // bit5 io_ext (extended I/O command set: SET_DIO_ROLE 0xAC / GET_DIO_ROLE
 // 0xAD / SET_AO_MODE 0xA3 / GET_ANALOG_IN 0xA4 — lets hosts detect the
 // #135 rig-I/O roles by capability instead of firmware-version guessing),
-// bit6 ai_cal (per-board analog-input calibration: SET_ANALOG_CAL 0xA5 /
-// GET_ANALOG_CAL 0xA6 / GET_ANALOG_IN_RAW 0xA7, stored in EEPROM).
+// bit6 ai_cal (per-board analog-input calibration: GET_ANALOG_IN_RAW 0xA5 /
+// SET_ANALOG_CAL 0xA6 / GET_ANALOG_CAL 0xA7, record in EEPROM).
 // bit7 health (GET_HEALTH 0xCA: read-only loop/SD/SPI/USB telemetry + the
 // reset-surviving breadcrumb, issue #50; also gates GET_FIRMWARE_VERSION
 // 0xCB — same build introduced both, and older firmware flashes a CE 01
@@ -295,7 +295,7 @@ constexpr uint16_t ai_cal_deadband_default_mv = 20;     // Mode 4: |v| below thi
 constexpr uint16_t ai_cal_deadband_max_mv     = 2000;
 constexpr char     ai_cal_sd_dir[]  = "/config";
 constexpr char     ai_cal_sd_path[] = "/config/analog_cal.json";
-// SET_ANALOG_CAL (0xA5) actions.
+// SET_ANALOG_CAL (0xA6) actions.
 constexpr uint8_t  ai_cal_action_sample_gnd   = 0;      // sample now as the 0 V (ground cap) point
 constexpr uint8_t  ai_cal_action_sample_open  = 1;      // sample now as the +10 V (open input) point
 constexpr uint8_t  ai_cal_action_set_deadband = 2;      // [mv_lo mv_hi]

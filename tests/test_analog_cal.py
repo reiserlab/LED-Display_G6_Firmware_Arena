@@ -1,5 +1,5 @@
-"""Per-board analog-input calibration (F2): GET_ANALOG_CAL 0xA6, SET_ANALOG_CAL 0xA5,
-GET_ANALOG_IN_RAW 0xA7 and the 0xA4 flags byte (analog-input-plan § 3 / § 5.2).
+"""Per-board analog-input calibration (F2): GET_ANALOG_IN_RAW 0xA5, SET_ANALOG_CAL 0xA6,
+GET_ANALOG_CAL 0xA7 and the 0xA4 flags byte (analog-input-plan § 3 / § 5.2).
 
 Non-destructive by default: the record shape, the raw read, and a deadband
 round trip that restores the previous value. Sampling the two points or clearing

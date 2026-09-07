@@ -31,9 +31,9 @@ GET_AO_VOLTAGE_CMD          = 0xA1   # [01 A1] returns hardware DAC readback as 
 SET_AO_LUT_CMD              = 0xA2   # [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
 SET_AO_MODE_CMD             = 0xA3   # [02 A3 mode] 0=programmable | 1=frame_number (DAC tracks frame index, 0-5V)
 GET_ANALOG_IN_CMD           = 0xA4   # [01 A4] returns Analog In 1+2 as two int16 LE mV + flags byte
-SET_ANALOG_CAL_CMD          = 0xA5   # [len A5 ch action (mv_lo mv_hi)] two-point cal / deadband / clear
-GET_ANALOG_CAL_CMD          = 0xA6   # [01 A6] → 18-byte calibration record
-GET_ANALOG_IN_RAW_CMD       = 0xA7   # [01 A7] → raw ADC counts, two uint16 LE
+GET_ANALOG_IN_RAW_CMD       = 0xA5   # [01 A5] → raw ADC counts, two uint16 LE
+SET_ANALOG_CAL_CMD          = 0xA6   # [len A6 ch action (mv_lo mv_hi)] two-point cal / deadband / clear
+GET_ANALOG_CAL_CMD          = 0xA7   # [01 A7] → 18-byte calibration record
 SET_TELEMETRY_CMD           = 0xA8   # [04 A8 flags rate_lo rate_hi] or [02 A8 flags]; bit0 = record events (default ON), bit7 = synthetic producer at rate/s; bit4 = watchdog bits present (bit6 off, bit5 starve)
 GET_TELEMETRY_BLOCK_CMD     = 0xA9   # [08 A9 ack_seq(u32) max_bytes(u16) flags] ack cursor + framed chunk of ring records; see telemetry_codec.py
 SET_DIGITAL_OUT_CMD         = 0xAA   # [03 AA ch state] drive "Digital IO 1/2 (5V)" BNC (role-gated, #135)
