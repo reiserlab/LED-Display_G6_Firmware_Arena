@@ -830,7 +830,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case GET_ANALOG_IN_RAW_CMD: {
-      // [01 A7] → [raw1 u16 LE][raw2 u16 LE] — one averaged conversion each, the
+      // [01 A5] → [raw1 u16 LE][raw2 u16 LE] — one averaged conversion each, the
       // counts the calibration UI shows next to the mV so a user can see the
       // points being sampled.
       uint16_t r1 = (uint16_t)analogRead(mode4_ain_pin);
@@ -841,19 +841,19 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case GET_ANALOG_CAL_CMD: {
-      // [01 A6] → the 18-byte calibration record (see ainCalReply).
+      // [01 A7] → the 18-byte calibration record (see ainCalReply).
       ainCalReply(command_byte);
       break;
     }
 
     case SET_ANALOG_CAL_CMD: {
-      // [len A5 ch action (mv_lo mv_hi)] — two-point calibration + deadband,
+      // [len A6 ch action (mv_lo mv_hi)] — two-point calibration + deadband,
       // persisted to EEPROM (+ SD mirror) on every accepted action. The host
       // orchestrates the two steps ("unplug the BNC → sample +10 V", "ground cap
       // → sample 0 V"); the controller samples, validates, stores and applies —
       // it must own the record because Mode 4 runs on the controller.
       if (claimed_len < 3) {
-        current_source_->sendResponse(command_byte, 1, "Expected [len A5 ch action (mv_lo mv_hi)]");
+        current_source_->sendResponse(command_byte, 1, "Expected [len A6 ch action (mv_lo mv_hi)]");
         break;
       }
       uint8_t ch     = buf[pos++];

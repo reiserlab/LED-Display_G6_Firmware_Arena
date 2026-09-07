@@ -101,7 +101,7 @@ tracks it and is updated alongside firmware changes.
 |---|---|---|
 | 2 | Open loop | Load frames from SD and auto-advance at `frame_rate` |
 | 3 | Show frame | Host sets the frame index via `SET_FRAME_POSITION` |
-| 4 | Closed loop | Integrate AIN0 (D14) velocity at 500 Hz to advance frames — `fps = V · 100 · gain/10` (G3-faithful: `gain` is 10× the gain, 10 = unity = 100 fps/V, 2–5 = 20–50 fps/V; EWMA-smoothed input, per-board calibration + deadband from the 0xA5/0xA6 record when present) |
+| 4 | Closed loop | Integrate AIN0 (D14) velocity at 500 Hz to advance frames — `fps = V · 100 · gain/10` (G3-faithful: `gain` is 10× the gain, 10 = unity = 100 fps/V, 2–5 = 20–50 fps/V; EWMA-smoothed input, per-board calibration + deadband from the 0xA6/0xA7 record when present) |
 | 5 | Streaming | Host streams raw arena frames (the `0x32` path); no SD access |
 
 Mode is selected by the `TRIAL_PARAMS` payload (`mode`, `pattern_id`, `frame_rate`, `gain`, `init_pos`; see `commands.h` / `CommandProcessor.cpp` for the byte layout, which is still being reconciled with the host). Mode 1 (TSI Position Function) is **not** implemented — it is a v2 / PSRAM feature.
