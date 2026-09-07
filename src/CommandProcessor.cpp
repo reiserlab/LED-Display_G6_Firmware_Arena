@@ -1,6 +1,7 @@
 #include "CommandProcessor.h"
 #include "Crc.h"
 #include "ErrorGlyph.h"
+#include <EEPROM.h>
 #include <Wire.h>
 
 using namespace AC;
@@ -23,6 +24,8 @@ void CommandProcessor::begin() {
   // hardware averaging on both ADCs. Must precede any analogRead().
   analogReadResolution(adc_resolution_bits);
   analogReadAveraging(adc_averaging);
+  // Per-board calibration record (F2) from EEPROM; defaults when absent/stale.
+  ainCalLoad();
 
   // Digital IO boot roles (#135). Port 1 ("Digital IO 1 (5V)", J3): a driven-
   // LOW programmable output, as this firmware has always booted. Port 2
@@ -812,9 +815,9 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       int16_t mv[2];
       const uint8_t pins[2] = { mode4_ain_pin, ain2_pin };
       for (int i = 0; i < 2; ++i) {
-        mv[i] = (int16_t)lroundf(ainVoltsFromRaw(analogRead(pins[i])) * 1000.0f);
+        mv[i] = (int16_t)lroundf(ainMv((uint8_t)(i + 1), analogRead(pins[i])));
       }
-      uint8_t flags = (adc_resolution_bits == 12) ? ain_flag_12bit : 0;
+      uint8_t flags = ainFlags();
       uint8_t payload[5] = {
           (uint8_t)((uint16_t)mv[0]), (uint8_t)((uint16_t)mv[0] >> 8),
           (uint8_t)((uint16_t)mv[1]), (uint8_t)((uint16_t)mv[1] >> 8),
@@ -823,6 +826,85 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
       DBG_PRINTF("[cmd] get-analog-in ain1=%d mV ain2=%d mV flags=0x%02x\n",
                  (int)mv[0], (int)mv[1], (unsigned)flags);
+      break;
+    }
+
+    case GET_ANALOG_IN_RAW_CMD: {
+      // [01 A7] → [raw1 u16 LE][raw2 u16 LE] — one averaged conversion each, the
+      // counts the calibration UI shows next to the mV so a user can see the
+      // points being sampled.
+      uint16_t r1 = (uint16_t)analogRead(mode4_ain_pin);
+      uint16_t r2 = (uint16_t)analogRead(ain2_pin);
+      uint8_t payload[4] = { (uint8_t)r1, (uint8_t)(r1 >> 8), (uint8_t)r2, (uint8_t)(r2 >> 8) };
+      current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
+      break;
+    }
+
+    case GET_ANALOG_CAL_CMD: {
+      // [01 A6] → the 18-byte calibration record (see ainCalReply).
+      ainCalReply(command_byte);
+      break;
+    }
+
+    case SET_ANALOG_CAL_CMD: {
+      // [len A5 ch action (mv_lo mv_hi)] — two-point calibration + deadband,
+      // persisted to EEPROM (+ SD mirror) on every accepted action. The host
+      // orchestrates the two steps ("unplug the BNC → sample +10 V", "ground cap
+      // → sample 0 V"); the controller samples, validates, stores and applies —
+      // it must own the record because Mode 4 runs on the controller.
+      if (claimed_len < 3) {
+        current_source_->sendResponse(command_byte, 1, "Expected [len A5 ch action (mv_lo mv_hi)]");
+        break;
+      }
+      uint8_t ch     = buf[pos++];
+      uint8_t action = buf[pos++];
+      if (ch != 1 && ch != 2) {
+        current_source_->sendResponse(command_byte, 1, "ch must be 1 or 2");
+        break;
+      }
+      AinCalChannel &c = ain_cal_.ch[ch - 1];
+      const uint8_t pin = (ch == 1) ? mode4_ain_pin : ain2_pin;
+      switch (action) {
+        case ai_cal_action_sample_gnd:
+          c.raw_gnd = ainSampleRawAveraged(pin, ai_cal_sample_count);
+          c.valid = ainCalValidate(c) ? 1 : 0;
+          break;
+        case ai_cal_action_sample_open:
+          c.raw_open = ainSampleRawAveraged(pin, ai_cal_sample_count);
+          c.valid = ainCalValidate(c) ? 1 : 0;
+          break;
+        case ai_cal_action_set_deadband: {
+          if (claimed_len < 5) {
+            current_source_->sendResponse(command_byte, 1, "deadband needs [mv_lo mv_hi]");
+            return;
+          }
+          uint16_t mv = (uint16_t)buf[pos] | ((uint16_t)buf[pos + 1] << 8);
+          if (mv > ai_cal_deadband_max_mv) {
+            current_source_->sendResponse(command_byte, 1, "deadband must be 0..2000 mV");
+            return;
+          }
+          c.deadband_mv = mv;
+          break;
+        }
+        case ai_cal_action_clear:
+          c.valid = 0;
+          c.raw_open = 0;
+          c.raw_gnd = 0;
+          break;
+        default:
+          current_source_->sendResponse(
+              command_byte, 1, "action must be 0=sample 0V 1=sample +10V 2=deadband 0xFF=clear");
+          return;
+      }
+      ain_cal_.adc_bits = adc_resolution_bits;
+      if (!ainCalSave()) {
+        current_source_->sendResponse(command_byte, 1, "EEPROM write failed");
+        return;
+      }
+      ainCalReply(command_byte);
+      DBG_PRINTF("[cmd] set-analog-cal ch=%u action=%u -> valid=%u open=%u gnd=%u db=%u mV\n",
+                 (unsigned)ch, (unsigned)action, (unsigned)c.valid, (unsigned)c.raw_open,
+                 (unsigned)c.raw_gnd, (unsigned)c.deadband_mv);
       break;
     }
 
@@ -1520,6 +1602,136 @@ void CommandProcessor::servicePsramPlay() {
   buildPsramFrame((uint16_t)(psram_start_index_ + psram_play_offset_));
 }
 
+// ── per-board analog-input calibration (F2) ───────────────────────────────────
+
+void CommandProcessor::ainCalDefaults() {
+  memcpy(ain_cal_.magic, "AIC1", 4);
+  ain_cal_.version  = ai_cal_record_version;
+  ain_cal_.adc_bits = adc_resolution_bits;
+  for (int i = 0; i < 2; ++i) {
+    ain_cal_.ch[i].valid = 0;
+    ain_cal_.ch[i].raw_open = 0;
+    ain_cal_.ch[i].raw_gnd = 0;
+    ain_cal_.ch[i].deadband_mv = ai_cal_deadband_default_mv;
+  }
+  ain_cal_.crc = 0;
+  ain_cal_source_ = ai_cal_source_none;
+  ain_cal_mirror_ok_ = false;
+}
+
+static uint16_t ainCalCrc(const void *rec, size_t len_without_crc) {
+  return G6::crc16_ccitt_false((const uint8_t *)rec, len_without_crc);
+}
+
+void CommandProcessor::ainCalLoad() {
+  AinCalRecord r;
+  EEPROM.get(ai_cal_eeprom_addr, r);
+  const size_t body = sizeof(AinCalRecord) - sizeof(uint16_t);
+  bool ok = memcmp(r.magic, "AIC1", 4) == 0 && r.version == ai_cal_record_version &&
+            r.crc == ainCalCrc(&r, body);
+  if (ok && r.adc_bits != adc_resolution_bits) {
+    // Points were taken at another raw scale (F1 moved 10 → 12 bit): the mV
+    // math would be wrong, so drop the points but keep the deadbands.
+    DBG_PRINTF("[ain] cal record is %u-bit, firmware is %u-bit — points discarded\n",
+               (unsigned)r.adc_bits, (unsigned)adc_resolution_bits);
+    for (int i = 0; i < 2; ++i) r.ch[i].valid = 0;
+    r.adc_bits = adc_resolution_bits;
+  }
+  if (ok) {
+    ain_cal_ = r;
+    ain_cal_source_ = ai_cal_source_eeprom;
+    ain_cal_mirror_ok_ = false;  // unknown until the next save
+    DBG_PRINTF("[ain] cal loaded: ch1 valid=%u open=%u gnd=%u db=%u | ch2 valid=%u open=%u gnd=%u db=%u\n",
+               (unsigned)r.ch[0].valid, (unsigned)r.ch[0].raw_open, (unsigned)r.ch[0].raw_gnd,
+               (unsigned)r.ch[0].deadband_mv, (unsigned)r.ch[1].valid, (unsigned)r.ch[1].raw_open,
+               (unsigned)r.ch[1].raw_gnd, (unsigned)r.ch[1].deadband_mv);
+  } else {
+    ainCalDefaults();
+    DBG_PRINTF("[ain] no calibration record in EEPROM — nominal ±10 V scale\n");
+  }
+}
+
+bool CommandProcessor::ainCalSave() {
+  memcpy(ain_cal_.magic, "AIC1", 4);
+  ain_cal_.version = ai_cal_record_version;
+  ain_cal_.crc = ainCalCrc(&ain_cal_, sizeof(AinCalRecord) - sizeof(uint16_t));
+  EEPROM.put(ai_cal_eeprom_addr, ain_cal_);  // put() writes only changed bytes
+  AinCalRecord back;
+  EEPROM.get(ai_cal_eeprom_addr, back);
+  if (memcmp(&back, &ain_cal_, sizeof(AinCalRecord)) != 0) return false;
+  ain_cal_source_ = ai_cal_source_eeprom;
+  ain_cal_mirror_ok_ = ainCalMirrorSd();
+  return true;
+}
+
+bool CommandProcessor::ainCalMirrorSd() {
+  // Write-only JSON mirror for humans and the data record; never read back.
+  if (!sd_.available()) return false;
+  SD.mkdir(ai_cal_sd_dir);
+  SD.remove(ai_cal_sd_path);
+  File f = SD.open(ai_cal_sd_path, FILE_WRITE);
+  if (!f) return false;
+  f.printf("{\"version\":%u,\"adc_bits\":%u,\"ref_mv\":%u,\"channels\":[",
+           (unsigned)ain_cal_.version, (unsigned)ain_cal_.adc_bits, (unsigned)ai_cal_ref_mv);
+  for (int i = 0; i < 2; ++i) {
+    const AinCalChannel &c = ain_cal_.ch[i];
+    f.printf("%s{\"ch\":%d,\"valid\":%u,\"raw_open\":%u,\"raw_gnd\":%u,\"deadband_mv\":%u}",
+             i ? "," : "", i + 1, (unsigned)c.valid, (unsigned)c.raw_open, (unsigned)c.raw_gnd,
+             (unsigned)c.deadband_mv);
+  }
+  f.printf("]}\n");
+  f.close();
+  return true;
+}
+
+bool CommandProcessor::ainCalValidate(AinCalChannel &c) const {
+  // Both points sampled (raw_open is never 0 on a live board: the pull-up sits
+  // at +10 V) and the span is real. An un-reworked board (LAB-209) saturates
+  // near full scale for BOTH points → span ≈ 0 → stays invalid, by design.
+  return c.raw_open > c.raw_gnd &&
+         (uint16_t)(c.raw_open - c.raw_gnd) >= ai_cal_min_span_counts;
+}
+
+uint16_t CommandProcessor::ainSampleRawAveraged(uint8_t pin, uint16_t n) const {
+  uint32_t acc = 0;
+  for (uint16_t i = 0; i < n; ++i) acc += (uint32_t)analogRead(pin);
+  return (uint16_t)((acc + n / 2) / n);
+}
+
+float CommandProcessor::ainMv(uint8_t ch, int raw) const {
+  const AinCalChannel &c = ain_cal_.ch[(ch == 2) ? 1 : 0];
+  if (c.valid) {
+    // Two-point line through (raw_gnd, 0 mV) and (raw_open, +10 000 mV).
+    float a = (float)ai_cal_ref_mv / (float)(c.raw_open - c.raw_gnd);
+    return a * ((float)raw - (float)c.raw_gnd);
+  }
+  return ainVoltsFromRaw(raw) * 1000.0f;  // nominal ±10 V scale
+}
+
+uint8_t CommandProcessor::ainFlags() const {
+  uint8_t f = (adc_resolution_bits == 12) ? ain_flag_12bit : 0;
+  if (ain_cal_.ch[0].valid) f |= ain_flag_ch1_calibrated;
+  if (ain_cal_.ch[1].valid) f |= ain_flag_ch2_calibrated;
+  return f;
+}
+
+void CommandProcessor::ainCalReply(uint8_t command_byte) {
+  uint8_t p[18];
+  p[0] = ain_cal_.version;
+  p[1] = ain_cal_.adc_bits;
+  p[2] = ain_cal_source_;
+  p[3] = ain_cal_mirror_ok_ ? ai_cal_flag_sd_mirror_ok : 0;
+  for (int i = 0; i < 2; ++i) {
+    const AinCalChannel &c = ain_cal_.ch[i];
+    uint8_t *q = p + 4 + i * 7;
+    q[0] = c.valid;
+    q[1] = (uint8_t)c.raw_open;    q[2] = (uint8_t)(c.raw_open >> 8);
+    q[3] = (uint8_t)c.raw_gnd;     q[4] = (uint8_t)(c.raw_gnd >> 8);
+    q[5] = (uint8_t)c.deadband_mv; q[6] = (uint8_t)(c.deadband_mv >> 8);
+  }
+  current_source_->sendResponse(command_byte, 0, p, sizeof(p));
+}
+
 void CommandProcessor::serviceClosedLoop() {
   if (frame_count_ == 0) return;
   uint32_t sample_period_us = microseconds_per_second / mode4_sample_rate_hz;
@@ -1532,16 +1744,21 @@ void CommandProcessor::serviceClosedLoop() {
   // Bipolar BNC input volts (ainVoltsFromRaw; per-board calibration is F2),
   // smoothed with the G3-style EWMA so one noisy conversion cannot step a
   // frame. The first sample after trial start seeds the filter.
-  float v_raw = ainVoltsFromRaw(analogRead(mode4_ain_pin));
+  float v_raw = ainMv(1, analogRead(mode4_ain_pin)) / 1000.0f;  // calibrated when a record exists
   if (!ain_filter_primed_) {
     ain_filtered_v_ = v_raw;
     ain_filter_primed_ = true;
   } else {
     ain_filtered_v_ += mode4_ain_filter_alpha * (v_raw - ain_filtered_v_);
   }
+  // Deadband (F2): a static input a few mV off the calibrated zero must not
+  // creep the pattern — |v| below the channel's deadband counts as 0 fps.
+  float v_eff = (fabsf(ain_filtered_v_) * 1000.0f < (float)ain_cal_.ch[0].deadband_mv)
+                    ? 0.0f
+                    : ain_filtered_v_;
   // G3-faithful coupling: fps = V * 100 fps/V * (gain / 10); gain 10 = unity,
   // gain 2..5 = the everyday 20..50 fps/V (constants.h § Mode 4).
-  float fps = ain_filtered_v_ * mode4_unity_fps_per_volt * ((float)gain_ / 10.0f);
+  float fps = v_eff * mode4_unity_fps_per_volt * ((float)gain_ / 10.0f);
   frame_accum_ += fps * ((float)dt_us / (float)microseconds_per_second);
 
   bool changed = false;

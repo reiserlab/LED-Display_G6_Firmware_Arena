@@ -85,6 +85,34 @@ class CommandProcessor {
   float    frame_accum_     = 0.0f;// Mode 4 fractional-frame accumulator
   float    ain_filtered_v_  = 0.0f;// Mode 4 EWMA of the AIN0 input (volts)
   bool     ain_filter_primed_ = false; // first sample seeds the EWMA (no ramp from 0 V)
+
+  // Per-board analog-input calibration (F2; constants.h § ai_cal). EEPROM is
+  // the authoritative store; the SD JSON is a write-only mirror.
+  struct __attribute__((packed)) AinCalChannel {
+    uint8_t  valid;        // 1 = both points sampled and consistent
+    uint16_t raw_open;     // ADC counts with nothing on the BNC (≙ +10 000 mV)
+    uint16_t raw_gnd;      // ADC counts with the BNC ground cap (≙ 0 mV)
+    uint16_t deadband_mv;  // Mode 4 zero band
+  };
+  struct __attribute__((packed)) AinCalRecord {
+    char     magic[4];     // "AIC1"
+    uint8_t  version;
+    uint8_t  adc_bits;     // raw scale the points were taken at
+    AinCalChannel ch[2];
+    uint16_t crc;          // crc16_ccitt_false over the bytes before this field
+  };
+  AinCalRecord ain_cal_{};
+  uint8_t  ain_cal_source_ = 0;       // ai_cal_source_none | ai_cal_source_eeprom
+  bool     ain_cal_mirror_ok_ = false; // last save reached /config/analog_cal.json
+  void     ainCalDefaults();
+  void     ainCalLoad();
+  bool     ainCalSave();
+  bool     ainCalMirrorSd();
+  bool     ainCalValidate(AinCalChannel &c) const;
+  uint16_t ainSampleRawAveraged(uint8_t pin, uint16_t n) const;
+  float    ainMv(uint8_t ch, int raw) const;   // calibrated mV when valid, nominal otherwise
+  uint8_t  ainFlags() const;                    // the 0xA4 flags byte
+  void     ainCalReply(uint8_t command_byte);   // send the 18-byte record
   uint32_t trial_end_ms_    = 0;   // trial_params (0x08) Duration auto-stop deadline; 0 = not armed
 
   // Digital IO roles (#135, SET_DIO_ROLE 0xAC). Ports are 1-based on the wire

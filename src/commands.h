@@ -39,7 +39,10 @@ enum ArenaCommands : uint8_t {
   GET_AO_VOLTAGE_CMD          = 0xA1,  // [01 A1] returns hardware DAC readback as uint16 LE mV
   SET_AO_LUT_CMD              = 0xA2,  // [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
   SET_AO_MODE_CMD             = 0xA3,  // [02 A3 mode] 0=programmable (0xA0/0xA2) | 1=frame_number (DAC tracks frame index, 0-5V normalized)
-  GET_ANALOG_IN_CMD           = 0xA4,  // [01 A4] returns Analog In 1 + Analog In 2 as two int16 LE mV (±10V front-end, calibration TBD)
+  GET_ANALOG_IN_CMD           = 0xA4,  // [01 A4] returns Analog In 1 + 2 as two int16 LE mV (calibrated when a per-board record exists) + flags byte (bit0/1 ch cal applied, bit2 12-bit)
+  SET_ANALOG_CAL_CMD          = 0xA5,  // [len A5 ch action (mv_lo mv_hi)] ch 1|2; action 0 = sample 0 V point (ground cap), 1 = sample +10 V point (open input), 2 = set deadband mV, 0xFF = clear; replies with the record (as 0xA6)
+  GET_ANALOG_CAL_CMD          = 0xA6,  // [01 A6] → [version adc_bits source flags] + 2×[valid raw_open(u16) raw_gnd(u16) deadband_mv(u16)] (18 B)
+  GET_ANALOG_IN_RAW_CMD       = 0xA7,  // [01 A7] → raw ADC counts of Analog In 1 + 2 as two uint16 LE (one averaged read each)
   SET_DIGITAL_OUT_CMD         = 0xAA,  // [03 AA channel state] drive "Digital IO 1/2 (5V)" BNC HIGH/LOW (requires role out_programmable; off auto-promotes)
   GET_DIGITAL_OUT_CMD         = 0xAB,  // [01 AB] returns current state of Digital IO 1 and 2 data pins as two bytes
   SET_DIO_ROLE_CMD            = 0xAC,  // [03 AC port role] port 1|2; role 0=off 1=in_trigger 2=out_programmable 3=out_debug_framescan

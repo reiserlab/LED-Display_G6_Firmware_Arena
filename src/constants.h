@@ -157,9 +157,11 @@ constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // bit1 v2_local_storage, bit2 mode_1_tsi, bit3 v3_triggered, bit4 v3_gated,
 // bit5 io_ext (extended I/O command set: SET_DIO_ROLE 0xAC / GET_DIO_ROLE
 // 0xAD / SET_AO_MODE 0xA3 / GET_ANALOG_IN 0xA4 — lets hosts detect the
-// #135 rig-I/O roles by capability instead of firmware-version guessing).
-// Advertises g6_mode + v2_local_storage + io_ext.
-constexpr uint8_t controller_capability_bitmap = 0x23;
+// #135 rig-I/O roles by capability instead of firmware-version guessing),
+// bit6 ai_cal (per-board analog-input calibration: SET_ANALOG_CAL 0xA5 /
+// GET_ANALOG_CAL 0xA6 / GET_ANALOG_IN_RAW 0xA7, stored in EEPROM).
+// Advertises g6_mode + v2_local_storage + io_ext + ai_cal.
+constexpr uint8_t controller_capability_bitmap = 0x63;
 
 // -----------------------------------------------------------------------------
 // SD pattern backend — Modes 2/3/4 load .pat files from the built-in SD slot.
@@ -247,6 +249,36 @@ constexpr float    mode4_ain_filter_alpha   = 0.4f;
 constexpr uint8_t  ain_flag_ch1_calibrated = 0x01;  // F2: per-board cal applied to ch 1
 constexpr uint8_t  ain_flag_ch2_calibrated = 0x02;  // F2: per-board cal applied to ch 2
 constexpr uint8_t  ain_flag_12bit          = 0x04;  // raw scale is 12-bit (adc_resolution_bits)
+
+// -----------------------------------------------------------------------------
+// Per-board analog-input calibration (F2, analog-input-plan § 3). Two points per
+// channel, Will's recipe: with nothing on the BNC the input reads the REF102's
+// +10 V through a 10k pull-up (raw_open ≙ +10 000 mV); with a BNC ground cap it
+// reads 0 V (raw_gnd ≙ 0 mV). mV = 10000 × (raw − raw_gnd) / (raw_open − raw_gnd).
+// The record lives in Teensy EEPROM (authoritative — it is a property of THIS
+// board's resistors and reference) and is mirrored as JSON to the SD card for
+// inspection / provenance; the mirror is never read back. Recorded against the
+// 12-bit raw scale (adc_bits is stored and checked on load).
+// -----------------------------------------------------------------------------
+constexpr int      ai_cal_eeprom_addr         = 0;      // record at the start of the 4 KB EEPROM
+constexpr uint8_t  ai_cal_record_version      = 1;
+constexpr uint16_t ai_cal_sample_count        = 256;    // averaged reads per calibration point
+constexpr uint16_t ai_cal_ref_mv              = 10000;  // the open-input reference point
+constexpr uint16_t ai_cal_min_span_counts     = 100;    // raw_open − raw_gnd must exceed this
+constexpr uint16_t ai_cal_deadband_default_mv = 20;     // Mode 4: |v| below this → 0 fps
+constexpr uint16_t ai_cal_deadband_max_mv     = 2000;
+constexpr char     ai_cal_sd_dir[]  = "/config";
+constexpr char     ai_cal_sd_path[] = "/config/analog_cal.json";
+// SET_ANALOG_CAL (0xA5) actions.
+constexpr uint8_t  ai_cal_action_sample_gnd   = 0;      // sample now as the 0 V (ground cap) point
+constexpr uint8_t  ai_cal_action_sample_open  = 1;      // sample now as the +10 V (open input) point
+constexpr uint8_t  ai_cal_action_set_deadband = 2;      // [mv_lo mv_hi]
+constexpr uint8_t  ai_cal_action_clear        = 0xFF;   // forget this channel's points
+// GET/SET_ANALOG_CAL reply: [version][adc_bits][source][flags] then per channel
+// [valid][raw_open u16 LE][raw_gnd u16 LE][deadband_mv u16 LE] × 2 = 18 bytes.
+constexpr uint8_t  ai_cal_source_none   = 0;            // defaults (nothing stored / stale scale)
+constexpr uint8_t  ai_cal_source_eeprom = 1;
+constexpr uint8_t  ai_cal_flag_sd_mirror_ok = 0x01;     // the last EEPROM save also reached the SD
 
 // -----------------------------------------------------------------------------
 // Controller error display (g6_03 § 6) — "CE / NN" glyph held >= this long.
