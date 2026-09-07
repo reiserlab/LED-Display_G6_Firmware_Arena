@@ -53,6 +53,7 @@ def test_get_controller_info(transport):
     assert version == 1
     assert capability & 0x01, "g6_mode bit must be set"
     assert capability & 0x20, "io_ext bit must be set (SET_DIO_ROLE et al.)"
+    assert capability & 0x40, "ai_cal bit must be set (SET_ANALOG_CAL 0xA5 / GET_ANALOG_CAL 0xA6 / 0xA7)"
     mac = payload[2:8]
     assert any(b != 0 for b in mac), "MAC must be non-zero (Teensy fuses)"
     assert any(b != 0xFF for b in mac), "MAC must not be all-FF"
