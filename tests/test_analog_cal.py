@@ -86,6 +86,23 @@ def test_deadband_round_trip(transport):
     assert read_record(transport)["ch"][1]["deadband_mv"] == before
 
 
+def test_set_analog_cal_refused_while_displaying(transport):
+    """Calibration is an inactive-state operation (it samples the Mode 4 input and
+    writes EEPROM + SD): with the display running the firmware answers
+    CE_DISPLAY_ACTIVE and leaves the record untouched."""
+    from .commands import ALL_ON_CMD, ALL_OFF_CMD
+    before = read_record(transport)
+    st, _, _, _ = transport.command(ALL_ON_CMD)
+    assert st == 0
+    try:
+        st, _, payload, _ = transport.command(SET_ANALOG_CAL_CMD, bytes([2, ACTION_SET_DEADBAND]) + struct.pack("<H", 321))
+        assert st != 0, "SET_ANALOG_CAL must be refused while the display is active"
+        assert b"Stop display" in bytes(payload)
+    finally:
+        transport.command(ALL_OFF_CMD)
+    assert read_record(transport) == before
+
+
 def test_set_analog_cal_rejects_bad_args(transport):
     st, _, _, _ = transport.command(SET_ANALOG_CAL_CMD, bytes([3, ACTION_SET_DEADBAND, 0, 0]))
     assert st != 0, "ch 3 must be refused"

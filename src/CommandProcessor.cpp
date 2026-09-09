@@ -815,7 +815,12 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       int16_t mv[2];
       const uint8_t pins[2] = { mode4_ain_pin, ain2_pin };
       for (int i = 0; i < 2; ++i) {
-        mv[i] = (int16_t)lroundf(ainMv((uint8_t)(i + 1), analogRead(pins[i])));
+        // Clamp into the int16 wire field: a mis-sampled calibration (small span)
+        // can imply hundreds of volts, which must saturate, not wrap.
+        float v = ainMv((uint8_t)(i + 1), analogRead(pins[i]));
+        if (v > 32767.0f) v = 32767.0f;
+        if (v < -32768.0f) v = -32768.0f;
+        mv[i] = (int16_t)lroundf(v);
       }
       uint8_t flags = ainFlags();
       uint8_t payload[5] = {
@@ -854,6 +859,14 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       // it must own the record because Mode 4 runs on the controller.
       if (claimed_len < 3) {
         current_source_->sendResponse(command_byte, 1, "Expected [len A6 ch action (mv_lo mv_hi)]");
+        break;
+      }
+      // Inactive-state operation, like every other SD-writing command: it samples
+      // the very input Mode 4 is following, mutates the record the control loop
+      // reads on every sample, and writes EEPROM + the SD mirror.
+      if (state_ != ArenaState::ALL_OFF) {
+        current_source_->sendResponse(command_byte, CE_DISPLAY_ACTIVE,
+                                      "Stop display before analog calibration");
         break;
       }
       uint8_t ch     = buf[pos++];

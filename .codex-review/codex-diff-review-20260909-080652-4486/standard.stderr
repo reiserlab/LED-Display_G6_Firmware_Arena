@@ -1,0 +1,10 @@
+Reading additional input from stdin...
+2026-09-09T12:06:52.904528Z ERROR codex_rmcp_client::oauth::refresh_transaction: error=failed to refresh OAuth tokens for server linear: OAuth token refresh failed: Server returned error response: invalid_grant: Grant not found
+2026-09-09T12:06:52.975605Z ERROR codex_rmcp_client::oauth::refresh_transaction: error=failed to refresh OAuth tokens for server linear-personal: OAuth token refresh failed: Server returned error response: invalid_grant: Grant not found
+2026-09-09T12:08:51.383345Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
+2026-09-09T12:09:03.428325Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
+2026-09-09T12:09:09.192005Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
+2026-09-09T12:09:13.515610Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
+2026-09-09T12:09:18.009094Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
+2026-09-09T12:09:23.495444Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
+2026-09-09T12:10:55.275224Z ERROR rmcp::transport::streamable_http_client: fail to delete session: unexpected server response: DELETE returned HTTP 404 session_id="OTHE6Q2KBZK4EBWGQEUZSAG3LT"
