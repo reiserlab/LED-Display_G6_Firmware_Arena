@@ -1,10 +1,10 @@
 """Per-board analog-input calibration (F2): GET_ANALOG_IN_RAW 0xA5, SET_ANALOG_CAL 0xA6,
 GET_ANALOG_CAL 0xA7 and the 0xA4 flags byte (analog-input-plan § 3 / § 5.2).
 
-Non-destructive by default: the record shape, the raw read, and a deadband
-round trip that restores the previous value. Sampling the two points or clearing
-a channel would overwrite a real calibration, so those run only with
-AI_CAL_DESTRUCTIVE=1 in the environment (do that on a bench board: leave the
+Read-only by default: the record shape, the raw read, the flags, the argument
+rejections and the display-active refusal. Anything that WRITES the record —
+the deadband round trip (restored afterwards), sampling the two points, clearing
+a channel — runs only with AI_CAL_DESTRUCTIVE=1 in the environment (do that on a bench board: leave the
 BNC open for the +10 V point; the 0 V point needs a ground cap — see the plan).
 Persistence across a power cycle is a manual check (C2).
 """
@@ -73,6 +73,7 @@ def test_analog_in_flags_match_record(transport):
     assert bool(flags & FLAG_CH2_CAL) == bool(rec["ch"][1]["valid"])
 
 
+@pytest.mark.skipif(not DESTRUCTIVE, reason="writes EEPROM + the SD mirror (restored afterwards); set AI_CAL_DESTRUCTIVE=1")
 def test_deadband_round_trip(transport):
     before = read_record(transport)["ch"][1]["deadband_mv"]
     try:
