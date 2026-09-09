@@ -27,7 +27,7 @@ the strings parsed below:
   * Teensy/arena: the `[spi] CIPO` rows are gated on -DDEBUG_SERIAL (the
     DBG_PRINTF macro in src/constants.h, emitted from src/SpiManager.cpp). Build
     with env teensy41-printf and flash via `pixi run deploy-printf`. The default
-    `pixi run deploy` (env teensy41) compiles them out, so summarize_teensy()
+    `pixi run deploy-10-10` (env teensy41-10-10) compiles them out, so summarize_teensy()
     finds no rows.
 """
 

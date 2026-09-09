@@ -28,7 +28,7 @@ Web Serial control panel) in step 4.
 1. **Connect the controller.** Plug the Teensy 4.1 on the G6 arena into your computer via USB.
 2. **Flash the controller firmware:**
    ```
-   pixi run deploy
+   pixi run deploy-10-10
    ```
 3. **Install the panels.** Add G6 panels running the most recent panel firmware from
    [`reiserlab/LED-Display_G6_Firmware_Panel`](https://github.com/reiserlab/LED-Display_G6_Firmware_Panel).
@@ -37,7 +37,7 @@ Web Serial control panel) in step 4.
    or Safari).
 5. **Connect to the arena.** Click **Connect to G6 Arena** and pick the correct serial port from
    the chooser (typically `/dev/ttyACM*` on Linux, `COM*` on Windows, `/dev/cu.usbmodem*` on
-   macOS). Close any other program holding the port (e.g. `pixi run monitor`) first.
+   macOS). Close any other program holding the port (e.g. `pixi run monitor-10-10`) first.
 6. **Light it up.** Click any command — **All On** is a good first test. From there try the
    other buttons, the **Stream** presets, or upload a `.bin`/`.pat`.
 
@@ -47,11 +47,17 @@ The toolchain (PlatformIO, the Teensy compiler, Python, …) is installed automa
 first time you run a task — you don't install any of it yourself.
 
 ```
-pixi run build           # compile
-pixi run deploy          # compile and upload
-pixi run deploy-printf   # compile with DEBUG_SERIAL, and upload
-pixi run monitor         # USB serial monitor (logs to log/)
+pixi run build-10-10     # compile (arena_10-10)
+pixi run deploy-10-10    # compile and upload (arena_10-10)
+pixi run monitor-10-10   # USB serial monitor (logs to log/)
+
+pixi run build-12-18     # compile (arena_12-18)
+pixi run deploy-12-18    # compile and upload (arena_12-18)
+pixi run monitor-12-18   # USB serial monitor (logs to log/)
 ```
+
+Each hardware target also has a `-performance` variant (`deploy-10-10-performance`,
+`deploy-12-18-performance`) that builds without `DEBUG_SERIAL`.
 
 ## Source files
 
