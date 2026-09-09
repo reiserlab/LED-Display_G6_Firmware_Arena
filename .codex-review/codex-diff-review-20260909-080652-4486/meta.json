@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-09-09T12:10:55Z",
+  "mode": "diff",
+  "base_ref": "origin/main",
+  "diff_desc": "origin/main...HEAD",
+  "diff_path": ".codex-review/codex-diff-review-20260909-080652-4486/diff.patch",
+  "files_path": ".codex-review/codex-diff-review-20260909-080652-4486/files.txt",
+  "diff_lines": 705,
+  "file_count": 9,
+  "run_dir": ".codex-review/codex-diff-review-20260909-080652-4486",
+  "standard_md": ".codex-review/codex-diff-review-20260909-080652-4486/standard.md",
+  "adversarial_md": ".codex-review/codex-diff-review-20260909-080652-4486/adversarial.md",
+  "standard_jsonl": ".codex-review/codex-diff-review-20260909-080652-4486/standard.jsonl",
+  "adversarial_jsonl": ".codex-review/codex-diff-review-20260909-080652-4486/adversarial.jsonl",
+  "model": "gpt-5.5",
+  "timeout_secs": 600,
+  "std_rc": 0,
+  "adv_rc": 0
+}

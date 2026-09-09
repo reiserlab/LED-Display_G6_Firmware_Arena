@@ -1,0 +1,8 @@
+Reading additional input from stdin...
+2026-09-09T12:06:53.254866Z ERROR codex_rmcp_client::oauth::refresh_transaction: error=failed to refresh OAuth tokens for server linear: OAuth token refresh failed: Server returned error response: invalid_grant: Grant not found
+2026-09-09T12:06:53.286379Z ERROR codex_rmcp_client::oauth::refresh_transaction: error=failed to refresh OAuth tokens for server linear-personal: OAuth token refresh failed: Server returned error response: invalid_grant: Grant not found
+2026-09-09T12:08:54.810828Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
+2026-09-09T12:08:59.314597Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
+2026-09-09T12:09:03.453730Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
+2026-09-09T12:09:08.682760Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
+2026-09-09T12:09:13.774614Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 133 column 5
