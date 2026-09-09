@@ -878,14 +878,33 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       AinCalChannel &c = ain_cal_.ch[ch - 1];
       const uint8_t pin = (ch == 1) ? mode4_ain_pin : ain2_pin;
       switch (action) {
-        case ai_cal_action_sample_gnd:
-          c.raw_gnd = ainSampleRawAveraged(pin, ai_cal_sample_count);
+        case ai_cal_action_sample_gnd: {
+          // 0 V sits at midscale nominally (±10 V → 0..3.3 V); a point far from
+          // it means the ground cap is not fitted, a source is connected, or the
+          // board lacks the LAB-209 rework (0 V then reads near full scale).
+          uint16_t r = ainSampleRawAveraged(pin, ai_cal_sample_count);
+          if (r < ai_cal_gnd_min_counts || r > ai_cal_gnd_max_counts) {
+            current_source_->sendResponse(command_byte, 1,
+                "0 V point implausible (expect mid-range counts): ground cap fitted? un-reworked board (LAB-209)?");
+            return;
+          }
+          c.raw_gnd = r;
           c.valid = ainCalValidate(c) ? 1 : 0;
           break;
-        case ai_cal_action_sample_open:
-          c.raw_open = ainSampleRawAveraged(pin, ai_cal_sample_count);
+        }
+        case ai_cal_action_sample_open: {
+          // The open input reads the +10 V reference through the pull-up → near
+          // full scale; anything lower means something is still connected.
+          uint16_t r = ainSampleRawAveraged(pin, ai_cal_sample_count);
+          if (r < ai_cal_open_min_counts) {
+            current_source_->sendResponse(command_byte, 1,
+                "+10 V point implausible (expect near full scale): is the BNC really open?");
+            return;
+          }
+          c.raw_open = r;
           c.valid = ainCalValidate(c) ? 1 : 0;
           break;
+        }
         case ai_cal_action_set_deadband: {
           if (claimed_len < 5) {
             current_source_->sendResponse(command_byte, 1, "deadband needs [mv_lo mv_hi]");
@@ -1775,15 +1794,21 @@ void CommandProcessor::serviceClosedLoop() {
   frame_accum_ += fps * ((float)dt_us / (float)microseconds_per_second);
 
   bool changed = false;
-  while (frame_accum_ >= 1.0f) {
-    frame_accum_ -= 1.0f;
-    cur_frame_index_ = (uint16_t)((cur_frame_index_ + 1) % frame_count_);
-    changed = true;
-  }
-  while (frame_accum_ <= -1.0f) {
-    frame_accum_ += 1.0f;
-    cur_frame_index_ =
-        (uint16_t)((cur_frame_index_ + frame_count_ - 1) % frame_count_);
+  // Frame skipping in O(1): the accumulator holds fractional frames of motion
+  // since the last displayed frame. Take the whole part as ONE modular step and
+  // load the resulting frame once — intermediate indices were never displayed.
+  // (The previous one-per-iteration while loops reached the same index after N
+  // iterations; with unity gain now 100 fps/V a stalled loop could make N large,
+  // and a non-finite accumulator would never have terminated.) Bounded to one
+  // pass around the pattern per tick.
+  if (!isfinite(frame_accum_)) frame_accum_ = 0.0f;
+  float whole = truncf(frame_accum_);
+  if (whole != 0.0f) {
+    frame_accum_ -= whole;
+    const int32_t n = (int32_t)frame_count_;
+    int32_t steps = (whole > 65535.0f) ? 65535 : (whole < -65535.0f) ? -65535 : (int32_t)whole;
+    steps %= n;                                   // -n < steps < n
+    cur_frame_index_ = (uint16_t)(((int32_t)cur_frame_index_ + steps + n) % n);
     changed = true;
   }
   if (changed) loadFrame(cur_frame_index_);

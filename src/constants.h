@@ -266,6 +266,12 @@ constexpr uint8_t  ai_cal_record_version      = 1;
 constexpr uint16_t ai_cal_sample_count        = 256;    // averaged reads per calibration point
 constexpr uint16_t ai_cal_ref_mv              = 10000;  // the open-input reference point
 constexpr uint16_t ai_cal_min_span_counts     = 100;    // raw_open − raw_gnd must exceed this
+// Plausibility of each point at sample time (refused, not stored, otherwise):
+// the open input reads the +10 V reference → top quarter of the 12-bit range;
+// the ground cap reads 0 V → nominally midscale, allow the middle half.
+constexpr uint16_t ai_cal_open_min_counts     = 3072;
+constexpr uint16_t ai_cal_gnd_min_counts      = 1024;
+constexpr uint16_t ai_cal_gnd_max_counts      = 3072;
 constexpr uint16_t ai_cal_deadband_default_mv = 20;     // Mode 4: |v| below this → 0 fps
 constexpr uint16_t ai_cal_deadband_max_mv     = 2000;
 constexpr char     ai_cal_sd_dir[]  = "/config";
