@@ -6,10 +6,18 @@ platforms = ["linux-64", "osx-arm64", "win-64", "osx-64"]
 version = "0.1.0"
 
 [tasks]
-deploy = "pio run -e teensy41 -t upload"
-deploy-performance = "pio run -e teensy41-performance -t upload"
-build = "pio run -e teensy41"
-monitor = "mkdir -p log && bash -c 'pio device monitor -e teensy41 2>&1 | tee \"log/$(date +%Y%m%d_%H%M%S).log\"'"
+# arena_10-10 (current production board).
+deploy-10-10 = "pio run -e teensy41-10-10 -t upload"
+deploy-10-10-performance = "pio run -e teensy41-10-10-performance -t upload"
+build-10-10 = "pio run -e teensy41-10-10"
+monitor-10-10 = "mkdir -p log && bash -c 'pio device monitor -e teensy41-10-10 2>&1 | tee \"log/$(date +%Y%m%d_%H%M%S)_10-10.log\"'"
+# arena_12-18 (12-column arena). Same envs, ARENA_HW_12_18 build flag instead
+# -- see platformio.ini. Keep this task quartet in sync with the 10-10 one
+# above whenever build/upload/monitor flags change.
+deploy-12-18 = "pio run -e teensy41-12-18 -t upload"
+deploy-12-18-performance = "pio run -e teensy41-12-18-performance -t upload"
+build-12-18 = "pio run -e teensy41-12-18"
+monitor-12-18 = "mkdir -p log && bash -c 'pio device monitor -e teensy41-12-18 2>&1 | tee \"log/$(date +%Y%m%d_%H%M%S)_12-18.log\"'"
 # Serve scripts/web-serial on http://localhost:8000 AND open a Chromium-based
 # browser in parallel. The previous one-liner used `;`, which is sequential:
 # http.server blocks, so the browser only launched after the server was killed.

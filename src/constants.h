@@ -34,7 +34,9 @@ namespace AC {
 namespace constants {
 
 // -----------------------------------------------------------------------------
-// G6 panel geometry — 20x20 pixels per panel; G6_4x10 arena = 4 rows x 10 cols.
+// G6 panel geometry — 20x20 pixels per panel. Row/col counts are per-board
+// (selected by the same -DARENA_HW_* build flag as ArenaConfig.h) since the
+// panel grid size is a hardware property, not a protocol one.
 // -----------------------------------------------------------------------------
 
 constexpr uint8_t panel_pixel_count_per_row = 20;
@@ -42,10 +44,18 @@ constexpr uint8_t panel_pixel_count_per_col = 20;
 constexpr uint16_t panel_pixel_count
     = (uint16_t)panel_pixel_count_per_row * panel_pixel_count_per_col;  // 400
 
-constexpr uint8_t panel_count_per_frame_row = 4;
+#if defined(ARENA_HW_10_10)
+constexpr uint8_t panel_count_per_frame_row = 4;   // G6_4x10 arena (arena_10-10)
 constexpr uint8_t panel_count_per_frame_col = 10;
+#elif defined(ARENA_HW_12_18)
+constexpr uint8_t panel_count_per_frame_row = 4;   // G6_4x12 arena (arena_12-18)
+constexpr uint8_t panel_count_per_frame_col = 12;
+#else
+#error "Define ARENA_HW_10_10 or ARENA_HW_12_18 in build_flags (see platformio.ini)"
+#endif
+
 constexpr uint8_t panel_count_per_frame
-    = panel_count_per_frame_row * panel_count_per_frame_col;            // 40
+    = panel_count_per_frame_row * panel_count_per_frame_col;
 
 // G6 v1 panel-block sizes (header + cmd + pixel data + duty_cycle).
 constexpr uint16_t panel_block_byte_count_gs2  = 53;
