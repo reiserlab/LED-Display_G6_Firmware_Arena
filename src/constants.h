@@ -200,8 +200,17 @@ constexpr uint8_t display_mode_streaming   = 5;
 
 // -----------------------------------------------------------------------------
 // Mode 4 closed-loop velocity — samples AIN0 (Teensy D14, BNC J28) at 500 Hz.
-// fps = V_ain * 100 * gain / 10, where gain is the signed trial-params byte
-// carrying 10x the actual fps/V scaling factor (g6_03 § 6 Mode 4).
+//
+//   fps = V_ain * mode4_unity_fps_per_volt * gain / 10
+//
+// G3-faithful (decided 2026-09-07, webDisplayTools docs/development/
+// analog-input-plan.md § 0/§ 6): the trial-params `gain` (int16) is 10x the
+// gain, exactly as the G3 controller's set_gain_bias byte was, and unity gain
+// (gain = 10) is 100 fps per volt — the G3 XmegaController's HzFromAdc()
+// mapped 1 V to 100 Hz. The everyday G3 gains of 0.2–0.5 (gain 2–5) are thus
+// 20–50 fps/V. Negative gain reverses the coupling. A ±10 V input at unity
+// gain would ask for ±1000 fps, which the SD frame path cannot deliver — pick
+// the gain for the pattern's frame count and the expected signal amplitude.
 // -----------------------------------------------------------------------------
 
 // Digital outputs — bidirectional 5 V via SN74LVC1T45 level translators.
@@ -215,11 +224,29 @@ constexpr uint8_t do2_dir_pin  = 34;  // DO2 U3 direction (D34, Teensy pad 26)
 constexpr uint8_t  mode4_ain_pin        = 14;     // AIN0 / Teensy D14 — BNC "Analog In 1 (±10V)" (J28)
 constexpr uint8_t  ain2_pin             = 15;     // AIN1 / Teensy D15 — BNC "Analog In 2 (±10V)" (J29, g6_03: experimenter-available)
 constexpr uint32_t mode4_sample_rate_hz = 500;
-constexpr uint16_t adc_full_scale_counts = 1023;  // 10-bit analogRead default
-constexpr float    adc_ref_volts        = 3.3f;
+// ADC configuration (CommandProcessor::begin). The Teensy 4.1 ADC does 8/10/12
+// bits with hardware averaging of 4/8/16/32 samples; 12-bit + 16x averaging
+// gives ~4.9 mV/LSB of BNC input (was 19.6 mV at the 10-bit default) at ~40 µs
+// per read — fine for two channels at 500 Hz. Calibration numbers (F2) are
+// recorded against THIS raw scale; changing it invalidates them.
+constexpr uint8_t  adc_resolution_bits   = 12;
+constexpr uint8_t  adc_averaging         = 16;
+constexpr uint16_t adc_full_scale_counts = (1u << adc_resolution_bits) - 1;  // 4095
+constexpr float    adc_ref_volts         = 3.3f;
 // Bipolar BNC input range that the OPA2277 front-end maps onto the ADC span
-// (midscale = 0 V). Hardware calibration value — flagged TBD in g6_03 § Mode 4.
+// (midscale = 0 V). Nominal; per-board offset/scale calibration is F2 (0xA5–0xA7).
+// NOTE: boards without the stage-2 resistor rework (LAB-209) saturate above 0 V.
 constexpr float    mode4_ain_input_range_volts = 10.0f;
+// Unity-gain coupling (G3 heritage, see above) and the Mode 4 input smoother:
+// an EWMA with this weight on the new sample (G3 used 0.6 prev + 0.4 new at a
+// 400 Hz update) so a single noisy read cannot step a frame.
+constexpr float    mode4_unity_fps_per_volt = 100.0f;
+constexpr float    mode4_ain_filter_alpha   = 0.4f;
+// GET_ANALOG_IN (0xA4) reply: [ain1 int16 LE mV][ain2 int16 LE mV][flags u8].
+// The flags byte was appended in F1; pre-F1 hosts read only the first 4 bytes.
+constexpr uint8_t  ain_flag_ch1_calibrated = 0x01;  // F2: per-board cal applied to ch 1
+constexpr uint8_t  ain_flag_ch2_calibrated = 0x02;  // F2: per-board cal applied to ch 2
+constexpr uint8_t  ain_flag_12bit          = 0x04;  // raw scale is 12-bit (adc_resolution_bits)
 
 // -----------------------------------------------------------------------------
 // Controller error display (g6_03 § 6) — "CE / NN" glyph held >= this long.

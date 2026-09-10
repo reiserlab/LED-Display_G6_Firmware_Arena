@@ -6,9 +6,23 @@
 using namespace AC;
 using namespace AC::constants;
 
+// Bipolar BNC volts from an ADC reading: the OPA2277 front-end maps ±10 V at
+// the BNC to 0..3.3 V at the ADC with midscale = 0 V (nominal; per-board
+// calibration is F2). Shared by GET_ANALOG_IN and the Mode 4 loop so both
+// report the same volts for the same counts.
+static inline float ainVoltsFromRaw(int raw) {
+  float frac = (float)raw / (float)adc_full_scale_counts;  // 0..1
+  return (frac - 0.5f) * 2.0f * mode4_ain_input_range_volts;
+}
+
 void CommandProcessor::begin() {
   Wire.begin();
   Wire.setClock(400000);
+
+  // Analog inputs (F1, analog-input-plan § 3): 12-bit conversions with 16x
+  // hardware averaging on both ADCs. Must precede any analogRead().
+  analogReadResolution(adc_resolution_bits);
+  analogReadAveraging(adc_averaging);
 
   // Digital IO boot roles (#135). Port 1 ("Digital IO 1 (5V)", J3): a driven-
   // LOW programmable output, as this firmware has always booted. Port 2
@@ -787,25 +801,28 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case GET_ANALOG_IN_CMD: {
-      // [01 A4] → [ain1 int16 LE mV, ain2 int16 LE mV]. Both BNCs ("Analog In
-      // 1 (±10V)" J28/D14, "Analog In 2 (±10V)" J29/D15) share the OPA2277
-      // front-end mapping ±10 V → 0..3.3 V at the ADC, midscale = 0 V — the
-      // same math Mode 4 uses. Front-end offset/scale calibration is TBD
-      // (g6_03 § Mode 4); this is a bench diagnostic, not a precision read.
+      // [01 A4] → [ain1 int16 LE mV, ain2 int16 LE mV, flags u8]. Both BNCs
+      // ("Analog In 1 (±10V)" J28/D14, "Analog In 2 (±10V)" J29/D15) share the
+      // OPA2277 front-end mapping ±10 V → 0..3.3 V at the ADC, midscale = 0 V —
+      // the same math Mode 4 uses (ainVoltsFromRaw). The trailing flags byte
+      // (F1) tells the host the raw scale and, once F2 lands, whether a
+      // per-board calibration is applied; pre-F1 hosts read 4 bytes and ignore
+      // it. A single averaged read (adc_averaging) — a bench readout, not a
+      // precision measurement until calibrated.
       int16_t mv[2];
       const uint8_t pins[2] = { mode4_ain_pin, ain2_pin };
       for (int i = 0; i < 2; ++i) {
-        int raw = analogRead(pins[i]);
-        float frac = (float)raw / (float)adc_full_scale_counts;  // 0..1
-        float v = (frac - 0.5f) * 2.0f * mode4_ain_input_range_volts;
-        mv[i] = (int16_t)lroundf(v * 1000.0f);
+        mv[i] = (int16_t)lroundf(ainVoltsFromRaw(analogRead(pins[i])) * 1000.0f);
       }
-      uint8_t payload[4] = {
+      uint8_t flags = (adc_resolution_bits == 12) ? ain_flag_12bit : 0;
+      uint8_t payload[5] = {
           (uint8_t)((uint16_t)mv[0]), (uint8_t)((uint16_t)mv[0] >> 8),
           (uint8_t)((uint16_t)mv[1]), (uint8_t)((uint16_t)mv[1] >> 8),
+          flags,
       };
       current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
-      DBG_PRINTF("[cmd] get-analog-in ain1=%d mV ain2=%d mV\n", (int)mv[0], (int)mv[1]);
+      DBG_PRINTF("[cmd] get-analog-in ain1=%d mV ain2=%d mV flags=0x%02x\n",
+                 (int)mv[0], (int)mv[1], (unsigned)flags);
       break;
     }
 
@@ -1512,15 +1529,19 @@ void CommandProcessor::serviceClosedLoop() {
   uint32_t dt_us = now - last_sample_us_;
   last_sample_us_ = now;
 
-  // Reconstruct the bipolar BNC input voltage from the ADC reading. The
-  // OPA2277 front-end maps +/-10 V at J28 to 0..3.3 V at the ADC, midscale =
-  // 0 V (g6_06). Front-end offset/scale is hardware calibration — flagged as
-  // lowest priority / TBD in g6_03 § Mode 4.
-  int raw = analogRead(mode4_ain_pin);
-  float adc_frac = (float)raw / (float)adc_full_scale_counts;       // 0..1
-  float v_in = (adc_frac - 0.5f) * 2.0f * mode4_ain_input_range_volts;
-  // fps = v_in * (gain/10) fps/V (e.g. gain=-20 -> -2.0 fps/V; g6_03 § Mode 4).
-  float fps = v_in * ((float)gain_ / 10.0f);
+  // Bipolar BNC input volts (ainVoltsFromRaw; per-board calibration is F2),
+  // smoothed with the G3-style EWMA so one noisy conversion cannot step a
+  // frame. The first sample after trial start seeds the filter.
+  float v_raw = ainVoltsFromRaw(analogRead(mode4_ain_pin));
+  if (!ain_filter_primed_) {
+    ain_filtered_v_ = v_raw;
+    ain_filter_primed_ = true;
+  } else {
+    ain_filtered_v_ += mode4_ain_filter_alpha * (v_raw - ain_filtered_v_);
+  }
+  // G3-faithful coupling: fps = V * 100 fps/V * (gain / 10); gain 10 = unity,
+  // gain 2..5 = the everyday 20..50 fps/V (constants.h § Mode 4).
+  float fps = ain_filtered_v_ * mode4_unity_fps_per_volt * ((float)gain_ / 10.0f);
   frame_accum_ += fps * ((float)dt_us / (float)microseconds_per_second);
 
   bool changed = false;
@@ -1630,6 +1651,7 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
   gain_            = gain;
   cur_frame_index_ = (frame_count_ > 0) ? (uint16_t)(init_frame % frame_count_) : 0;
   frame_accum_     = 0.0f;
+  ain_filter_primed_ = false;  // Mode 4: re-seed the input smoother per trial
 
   if (!loadFrame(cur_frame_index_)) return false;  // showError already raised
 

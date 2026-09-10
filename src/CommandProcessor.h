@@ -70,7 +70,7 @@ class CommandProcessor {
   uint16_t frame_count_     = 0;   // frames in the open pattern
   uint16_t cur_frame_index_ = 0;   // 0-based
   int16_t  frame_rate_hz_   = 0;   // frame-advance rate (Mode 2); negative = reverse
-  int16_t  gain_            = 0;   // Mode 4 velocity scaling (10x fps/V)
+  int16_t  gain_            = 0;   // Mode 4 gain x10 (10 = unity = 100 fps/V, G3-faithful)
   // Per-trial duty (issue #33, stateless redesign): declared in trial_params
   // param[11] at trial start. 0 = the pattern's stored duty_cycle flows
   // through (default, and what messages that omit the byte already mean);
@@ -83,6 +83,8 @@ class CommandProcessor {
   uint32_t last_advance_us_ = 0;   // Mode 2 frame-advance clock
   uint32_t last_sample_us_  = 0;   // Mode 4 AIN sample clock
   float    frame_accum_     = 0.0f;// Mode 4 fractional-frame accumulator
+  float    ain_filtered_v_  = 0.0f;// Mode 4 EWMA of the AIN0 input (volts)
+  bool     ain_filter_primed_ = false; // first sample seeds the EWMA (no ramp from 0 V)
   uint32_t trial_end_ms_    = 0;   // trial_params (0x08) Duration auto-stop deadline; 0 = not armed
 
   // Digital IO roles (#135, SET_DIO_ROLE 0xAC). Ports are 1-based on the wire
