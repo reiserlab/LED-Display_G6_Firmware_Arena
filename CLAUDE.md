@@ -130,3 +130,19 @@ mismatch shows up as a failed `status == 0` assertion on the first
   code bug. Reporting the variant in `GET_CONTROLLER_INFO_CMD`'s
   capability bitmap would close this gap and is worth doing before this
   bites someone.
+- **Flashing from Windows takes two attempts — expect the first to fail.**
+  Observed on every upload during the 2026-09-10 bench day (Windows 11,
+  PlatformIO 6.1, `teensy_loader_cli` 2.2): the first `pixi run
+  deploy-<variant>` reboots the board into HalfKay and then dies with
+  `error writing to Teensy`; running the identical command again finds the
+  bootloader already up and programs in ~4 s. Just re-run it. Three more
+  Windows facts: (1) `scripts/find_teensy.py` only globs
+  `/dev/serial/by-id/...`, so pass the port explicitly --
+  `pixi run deploy-12-18-performance -- --upload-port COM5` (find it with
+  `Get-PnpDevice | ? InstanceId -match VID_16C0` and take the `Status OK`
+  entry; stale `Unknown` COM entries from previously plugged controllers
+  linger); (2) `teensy_loader_cli` prints `Soft reboot is not implemented
+  for Win32` and simply waits -- the board only entered the bootloader once
+  the **arena was powered**, so an unpowered arena looks like a hang;
+  (3) nothing else may hold the COM port (Web Serial in the Studio, a
+  `monitor-*` task) or the reboot never happens.
