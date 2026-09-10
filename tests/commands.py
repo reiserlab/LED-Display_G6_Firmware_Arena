@@ -30,7 +30,10 @@ SET_AO_VOLTAGE_CMD          = 0xA0   # [03 A0 mv_lo mv_hi] set BNC J27 (MCP4725)
 GET_AO_VOLTAGE_CMD          = 0xA1   # [01 A1] returns hardware DAC readback as uint16 LE mV
 SET_AO_LUT_CMD              = 0xA2   # [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
 SET_AO_MODE_CMD             = 0xA3   # [02 A3 mode] 0=programmable | 1=frame_number (DAC tracks frame index, 0-5V)
-GET_ANALOG_IN_CMD           = 0xA4   # [01 A4] returns Analog In 1+2 as two int16 LE mV (±10V front-end)
+GET_ANALOG_IN_CMD           = 0xA4   # [01 A4] returns Analog In 1+2 as two int16 LE mV + flags byte
+GET_ANALOG_IN_RAW_CMD       = 0xA5   # [01 A5] → raw ADC counts, two uint16 LE
+SET_ANALOG_CAL_CMD          = 0xA6   # [len A6 ch action (mv_lo mv_hi)] two-point cal / deadband / clear
+GET_ANALOG_CAL_CMD          = 0xA7   # [01 A7] → 18-byte calibration record
 SET_DIGITAL_OUT_CMD         = 0xAA   # [03 AA ch state] drive "Digital IO 1/2 (5V)" BNC (role-gated, #135)
 GET_DIGITAL_OUT_CMD         = 0xAB   # [01 AB] returns Digital IO 1 and 2 data-pin state as two bytes
 SET_DIO_ROLE_CMD            = 0xAC   # [03 AC port role] 0=off 1=in_trigger 2=out_programmable 3=out_debug_framescan
