@@ -33,9 +33,9 @@ from .commands import (
 )
 
 # Payload layout — mirrors CommandProcessor::handleGetHealth() (all LE).
-HEALTH_FMT = "<BBIIIIIIBIIIIBHIBIBBIBI" + "BIIIBBII" + "II" + "IIB"  # v1 66 + v2 23 + v3 8 + v4 9 B
-HEALTH_LEN = struct.calcsize(HEALTH_FMT)  # 106
-HEALTH_VER = 4
+HEALTH_FMT = "<BBIIIIIIBIIIIBHIBIBBIBI" + "BIIIBBII" + "II" + "IIB" + "HHHH"  # v1 66 + v2 23 + v3 8 + v4 9 + v5 8 B
+HEALTH_LEN = struct.calcsize(HEALTH_FMT)  # 114
+HEALTH_VER = 5
 
 Health = namedtuple(
     "Health",
@@ -48,6 +48,7 @@ Health = namedtuple(
         "prev_isr_last", "prev_isr_count", "prev_wdog_pc", "prev_wdog_lr",
         "wdog_flags", "breadcrumb_isr_last", "breadcrumb_isr_count", "wdog_kicks",
         "wdog_cs_boot", "wdog_cs_now", "wdog_tick_hz", "wdog_toval_now", "wdog_verify",
+        "wdog_cnt_before_max", "wdog_cnt_after_min", "wdog_cnt_after_max", "wdog_cnt_now",
     ],
 )
 
@@ -199,15 +200,20 @@ def test_watchdog_armed_and_kicked(transport):
     assert (cs >> 8) & 0x3 == 1, f"CLK must be LPO: {cs:#06x}"
     assert not (cs & 0x4000), f"FLG set (timeout pending?): {cs:#06x}"
     assert a.wdog_cs_boot & 0x0020, f"reset default must have UPDATE=1 or we could never reconfigure: {a.wdog_cs_boot:#06x}"
-    # Timing uses the EMPIRICAL expiry rate (Health::watchdog_tick_hz = 500 on this
-    # silicon): TOVAL 1000 = 2.0 s normally, 15000 inside a long-op window. The
-    # measured CNT read rate is a diagnostic only (~127 Hz here, 4x slower than
-    # the expiry — see README) and must merely have been measurable.
+    # Timing: TOVAL = tick_hz * s + 190 offset ticks (two-point bench calibration,
+    # Health.h). With the measured ~127 Hz: 444 = 2.0 s normally, 4000 in a long-op window.
     assert not (a.wdog_verify & 0x06), f"EN/TOVAL readback mismatch: verify={a.wdog_verify:#04x}"
-    assert not (a.wdog_verify & 0x08) and 50 <= a.wdog_tick_hz <= 200_000, \
-        f"CNT tick-rate measurement failed/implausible: {a.wdog_tick_hz} Hz"
-    expected = 1000 if not (a.wdog_flags & WDOG_SUSPENDED) else 15000
-    assert a.wdog_toval_now == expected, f"TOVAL {a.wdog_toval_now}, expected {expected} (500 Hz empirical)"
+    assert not (a.wdog_verify & 0x08) and 100 <= a.wdog_tick_hz <= 160, \
+        f"CNT tick-rate measurement failed/implausible: {a.wdog_tick_hz} Hz (expect ~127)"
+    secs = 2 if not (a.wdog_flags & WDOG_SUSPENDED) else 30
+    expected = a.wdog_tick_hz * secs + 190
+    assert abs(a.wdog_toval_now - expected) <= 2, f"TOVAL {a.wdog_toval_now}, expected {expected}"
+    # Kick-path CNT diagnostics: the loop kicks every few us, so CNT just before a
+    # refresh should stay small; report (not assert) the after-refresh readings —
+    # they are the data that explains the ~190-tick anomaly.
+    assert a.wdog_cnt_before_max < expected, "a kick gap longer than the timeout would have reset us"
+    print(f"wdog CNT: before_max={a.wdog_cnt_before_max} after_min={a.wdog_cnt_after_min} "
+          f"after_max={a.wdog_cnt_after_max} now={a.wdog_cnt_now} tick_hz={a.wdog_tick_hz}")
     assert not (a.wdog_flags & (WDOG_SUSPENDED | WDOG_STARVING))
     time.sleep(0.2)
     b = read_health(transport)

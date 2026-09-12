@@ -67,8 +67,10 @@ inline void sealIsr() {
 // by the Teensy core) is enabled before any access; and success is judged by
 // the EN / TOVAL readback after a settle, not by RCS (already 1 at reset).
 constexpr uint16_t kTovalProvisional = 0xFFFF;  // while measuring / during boot: >= 2 min at 500 Hz
-// (The CNT measurement is diagnostic only since 54b57d0's bench round: it read
-// 127 Hz while TOVAL 254 expired in 0.52 s. TOVAL comes from watchdog_tick_hz.)
+// Kick-path diagnostics (see Health.h): CNT sampled around every refresh.
+uint16_t wd_cnt_before_max_ = 0;
+uint16_t wd_cnt_after_min_  = 0xFFFF;
+uint16_t wd_cnt_after_max_  = 0;
 constexpr uint32_t kSpinMax          = 100000;  // bounded: a mis-programmed RTWDOG must never brick boot
 constexpr uint32_t kSettleUs         = 300;     // > 2 LPO clocks at 32 kHz; reconfiguration latency
 
@@ -200,8 +202,9 @@ uint32_t rtwdogMeasureTickHz() {
 }
 
 void computeTovals(uint32_t tick_hz) {
-  uint64_t n = ((uint64_t)tick_hz * watchdog_timeout_ms + 500) / 1000;
-  uint64_t l = ((uint64_t)tick_hz * watchdog_longop_ms  + 500) / 1000;
+  // Calibrated against the bench: expiry = (TOVAL - offset) / tick_hz after the last kick.
+  uint64_t n = ((uint64_t)tick_hz * watchdog_timeout_ms + 500) / 1000 + watchdog_offset_ticks;
+  uint64_t l = ((uint64_t)tick_hz * watchdog_longop_ms  + 500) / 1000 + watchdog_offset_ticks;
   wd_toval_normal_ = (uint16_t)(n > 0xFFFF ? 0xFFFF : (n < 2 ? 2 : n));
   wd_toval_longop_ = (uint16_t)(l > 0xFFFF ? 0xFFFF : l);
 }
@@ -389,17 +392,23 @@ uint32_t isrCount() { return isr->isr_count; }
 void watchdogBegin() {
   if (!wd_compiled_ || !wd_wanted_) return;
   if (!wd_armed_) rtwdogEarlyArm();          // begin() was skipped or failed: try again
-  // Diagnostic: the readable counter's rate (expected ~127 Hz here). NOT used
-  // for timing — see watchdog_tick_hz in Health.h for why.
+  // The readable counter's rate (~127 Hz here) IS the comparator's rate (two-
+  // point bench calibration, Health.h); fall back to 127 if unmeasurable.
   wd_tick_hz_ = rtwdogMeasureTickHz();
-  if (wd_tick_hz_ == 0) wd_verify_ |= 0x08; else wd_verify_ &= (uint8_t)~0x08;
-  computeTovals(watchdog_tick_hz);   // empirical expiry rate: 1000 ticks = 2.0 s, 15000 = 30 s
+  if (wd_tick_hz_ == 0) { wd_tick_hz_ = watchdog_tick_hz_fallback; wd_verify_ |= 0x08; }
+  else wd_verify_ &= (uint8_t)~0x08;
+  computeTovals(wd_tick_hz_);   // 127 Hz: 444 ticks = 2.0 s, 4000 = 30 s (incl. the 190-tick offset)
   rtwdogApply(true, wd_toval_normal_);
 }
 
 void watchdogKick() {
   if (!wd_armed_ || wd_starve_) return;  // starve test lives HERE so every kick path honours it
+  uint16_t before = (uint16_t)(WDOG3_CNT & 0xFFFF);   // ticks since the previous effective refresh
   rtwdogRefresh();
+  uint16_t after  = (uint16_t)(WDOG3_CNT & 0xFFFF);   // 0..1 if the refresh zeroed the counter
+  if (before > wd_cnt_before_max_) wd_cnt_before_max_ = before;
+  if (after  < wd_cnt_after_min_)  wd_cnt_after_min_  = after;
+  if (after  > wd_cnt_after_max_)  wd_cnt_after_max_  = after;
   ++stats.wdog_kicks;
 }
 
@@ -443,6 +452,10 @@ bool watchdogArmed() { return wd_armed_; }
 uint32_t watchdogCsAtBoot() { return wd_cs_boot_; }
 uint32_t watchdogCsNow()    { return WDOG3_CS; }
 uint32_t watchdogTickHz()   { return wd_tick_hz_; }
+uint16_t watchdogCntBeforeMax() { return wd_cnt_before_max_; }
+uint16_t watchdogCntAfterMin()  { return wd_cnt_after_min_ == 0xFFFF ? 0 : wd_cnt_after_min_; }
+uint16_t watchdogCntAfterMax()  { return wd_cnt_after_max_; }
+uint16_t watchdogCntNow()       { return (uint16_t)(WDOG3_CNT & 0xFFFF); }
 uint32_t watchdogTovalNow() { return WDOG3_TOVAL & 0xFFFF; }
 uint8_t  watchdogVerify()   { return wd_verify_; }
 

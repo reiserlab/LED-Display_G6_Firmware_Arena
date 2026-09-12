@@ -106,12 +106,16 @@ HEALTH_FMT_V3 = HEALTH_FMT_V2 + "II"  # + raw WDOG3_CS at boot / now
 HEALTH_LEN_V3 = struct.calcsize(HEALTH_FMT_V3)  # 97
 HEALTH_FMT_V4 = HEALTH_FMT_V3 + "IIB"  # + measured tick Hz, live TOVAL, verify bits
 HEALTH_LEN_V4 = struct.calcsize(HEALTH_FMT_V4)  # 106
+HEALTH_FMT_V5 = HEALTH_FMT_V4 + "HHHH"  # + kick-path CNT before-max / after-min / after-max / now
+HEALTH_LEN_V5 = struct.calcsize(HEALTH_FMT_V5)  # 114
+WDOG_OFFSET_TICKS = 190  # two-point bench calibration (Health.h)
 HEALTH_FIELDS_V2 = HEALTH_FIELDS + (
     "prev_isr_last", "prev_isr_count", "prev_wdog_pc", "prev_wdog_lr",
     "wdog_flags", "breadcrumb_isr_last", "breadcrumb_isr_count", "wdog_kicks",
 )
 HEALTH_FIELDS_V3 = HEALTH_FIELDS_V2 + ("wdog_cs_boot", "wdog_cs_now")
 HEALTH_FIELDS_V4 = HEALTH_FIELDS_V3 + ("wdog_tick_hz", "wdog_toval_now", "wdog_verify")
+HEALTH_FIELDS_V5 = HEALTH_FIELDS_V4 + ("wdog_cnt_before_max", "wdog_cnt_after_min", "wdog_cnt_after_max", "wdog_cnt_now")
 HEALTH_ISRS = ("none", "refresh", "dma", "wdog")
 HEALTH_FMT_55 = "<BBIIIIIIBIIIIBHIBI"  # the 55-byte prefix (fields up to prev_breadcrumb_us)
 HEALTH_LEN_55 = struct.calcsize(HEALTH_FMT_55)
@@ -188,12 +192,15 @@ def decode_health(payload: bytes) -> Optional[dict]:
     """GET_HEALTH (0xCA) -> dict. 97-byte ver-3, 89-byte ver-2, 66-byte ver-1, or the 55-byte prefix."""
     if len(payload) >= HEALTH_LEN_V2:
         if len(payload) >= HEALTH_LEN_V4:
-            vals = struct.unpack_from(HEALTH_FMT_V4, payload)
-            h = dict(zip(HEALTH_FIELDS_V4, vals))
-            # TOVAL is programmed against the EMPIRICAL 500 Hz expiry rate; the
-            # measured CNT rate (wdog_tick_hz, ~127) is a diagnostic only.
-            h["wdog_timeout_s"] = round(h["wdog_toval_now"] / 500.0, 3)
-            h["wdog_cnt_hz_measured"] = h["wdog_tick_hz"]
+            if len(payload) >= HEALTH_LEN_V5:
+                vals = struct.unpack_from(HEALTH_FMT_V5, payload)
+                h = dict(zip(HEALTH_FIELDS_V5, vals))
+            else:
+                vals = struct.unpack_from(HEALTH_FMT_V4, payload)
+                h = dict(zip(HEALTH_FIELDS_V4, vals))
+            # expiry = (TOVAL - 190) / tick_hz after the last kick (two-point bench fit)
+            if h["wdog_tick_hz"]:
+                h["wdog_timeout_s"] = round(max(0, h["wdog_toval_now"] - WDOG_OFFSET_TICKS) / h["wdog_tick_hz"], 3)
         elif len(payload) >= HEALTH_LEN_V3:
             vals = struct.unpack_from(HEALTH_FMT_V3, payload)
             h = dict(zip(HEALTH_FIELDS_V3, vals))

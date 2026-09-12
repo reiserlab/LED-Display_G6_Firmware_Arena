@@ -198,6 +198,22 @@ before declaring success; the refresh key width follows the `CMD32EN` bit actual
 CMD32EN | CLK(LPO 32 kHz) | PRES(/256) | UPDATE | INT | EN`, `TOVAL = 250` (125 Hz ticks → 2.000 s),
 unlock `0xD928C520` (or the 16-bit pair `0xC520`, `0xD928` when CMD32EN is clear);
 
+**Fourth bench round (320e26d) — two points fit a line; the 500 Hz conclusion was wrong.** `TOVAL`
+1000 expired **6.37 s** after the last kick; `TOVAL` 254 had expired in 0.52 s. Slope
+(1000 − 254)/(6.37 − 0.52) = **127.5 Hz** — the comparator runs at exactly the rate `WDOG3_CNT` reads
+(32.768 kHz ÷ 256; the CNT measurement was right) — and intercept **≈ 190 ticks (~1.5 s)**: expiry ≈
+(`TOVAL` − 190)/127.5 s, as if the counter already held ~190 ticks at the moment kicks stop. The
+mechanism is not identified yet (does the refresh not zero the counter? are refreshes only honoured
+intermittently — e.g. one per N counter ticks?), so this build (a) **calibrates**
+`TOVAL = tick_hz × seconds + 190` with the tick rate measured at boot (`444` ≈ 2.0 s, `4000` ≈ 30 s;
+fallback 127 Hz), and (b) **instruments the kick path**: `WDOG3_CNT` is read immediately before and
+after every refresh and the min/max since boot are in the ver 5 tail. Expected readings if refreshes
+zero the counter: `cnt_after_min/max` = 0..1 and `cnt_before_max` = the longest loop gap in ticks
+(a 129 ms SD read ≈ 16). `cnt_after_max` ≈ 190 would mean the refresh does *not* zero the counter
+(it resets to some base); `cnt_before_max` ≈ 190 with small `after` values would mean refreshes are
+being ignored for ~1.5 s at a time. Bench check: a starve must now drop the port ≈ 2.0 s after the
+reply. The paragraph below records the (wrong) intermediate conclusion for the audit trail.
+
 **Third bench round (54b57d0) — the counter you can read is not the counter that expires.** With
 the CNT-measured rate (127 Hz = 32.768 kHz ÷ 256) `TOVAL` was set to 254 for "2.0 s", yet the starve
 reset still came 0.52 s after the reply — `TOVAL` 254 expiring in ≤ 0.5 s means the comparator runs at
@@ -257,7 +273,7 @@ from interrupt context (under a brief IRQ mask so nested ISRs cannot leave a sta
 harvested at boot independently of the breadcrumb: a main loop caught mid-`mark()` (checksummed
 fields dirty) can no longer invalidate the PC capture, and vice versa. SdFat/USB ISRs live in the
 core and are not hooked.
-`GET_HEALTH` is now **ver 4, 106 B** — offsets never move; tails appended (ver 2: 66–88, ver 3: 89–96, ver 4: 97–105):
+`GET_HEALTH` is now **ver 5, 114 B** — offsets never move; tails appended (ver 2: 66–88, ver 3: 89–96, ver 4: 97–105, ver 5: 106–113):
 
 | Off | Type | Field | Meaning |
 |---|---|---|---|
@@ -271,9 +287,13 @@ core and are not hooked.
 | 85 | u32 | `wdog_kicks` | this boot: watchdog refreshes |
 | 89 | u32 | `wdog_cs_boot` | (ver 3) raw `WDOG3_CS` as found before the first programming — this silicon's reset default, expected `0x2520` (UPDATE, CLK=LPO, RCS, CMD32EN) |
 | 93 | u32 | `wdog_cs_now` | (ver 3) live `WDOG3_CS` readback: EN bit7, UPDATE bit5, INT bit6, CLK bits 8–9, RCS bit10, ULK bit11, PRES bit12, CMD32EN bit13, FLG bit14 |
-| 97 | u32 | `wdog_tick_hz` | (ver 4) **diagnostic only**: measured `WDOG3_CNT` read rate — ~127 Hz on this silicon, 4× slower than the expiry rate; 0 = measurement failed. NOT used for timing |
-| 101 | u32 | `wdog_toval_now` | (ver 4) live `WDOG3_TOVAL` (ticks) programmed against the **empirical 500 Hz** expiry rate: `1000` = 2.0 s normally, `15000` = 30 s inside a long-op window |
-| 105 | u8 | `wdog_verify` | (ver 4) last programming: bit0 RCS timeout (advisory), bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick-rate measurement fell back to 500 Hz, bit4 retried with the other unlock key width |
+| 97 | u32 | `wdog_tick_hz` | (ver 4) measured `WDOG3_CNT` tick rate — ~127 Hz on this silicon, and per the two-point bench fit also the comparator's rate (fallback 127 if unmeasurable, `wdog_verify` bit3) |
+| 101 | u32 | `wdog_toval_now` | (ver 4) live `WDOG3_TOVAL` = `tick_hz × s + 190` offset ticks: `444` = 2.0 s normally, `4000` = 30 s inside a long-op window |
+| 105 | u8 | `wdog_verify` | (ver 4) last programming: bit0 RCS timeout (advisory), bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick-rate measurement fell back to 127 Hz, bit4 retried with the other unlock key width |
+| 106 | u16 | `wdog_cnt_before_max` | (ver 5) `WDOG3_CNT` read just **before** a refresh, max since boot — the longest gap between kicks, in ticks |
+| 108 | u16 | `wdog_cnt_after_min` | (ver 5) `WDOG3_CNT` read just **after** a refresh, min since boot — 0..1 if the refresh zeroes the counter |
+| 110 | u16 | `wdog_cnt_after_max` | (ver 5) … max since boot — anything large means refreshes are not zeroing / not being honoured; this is the field that should explain the ~190-tick anomaly |
+| 112 | u16 | `wdog_cnt_now` | (ver 5) live `WDOG3_CNT` |
 
 The telemetry `STATE(boot).arg` low byte gains **bit1 = previous boot ended in the watchdog ISR**
 (bit0 stays `prev_valid`; high byte = previous breadcrumb op).

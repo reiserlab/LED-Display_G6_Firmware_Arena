@@ -177,14 +177,19 @@ uint32_t isrCount();
 
 // ---- Hardware watchdog (RTWDOG = WDOG3, LPO 32 kHz / 256 -> 125 Hz ticks) ----
 constexpr uint32_t watchdog_timeout_ms = 2000;   // normal: every loop() must kick within this
-// EMPIRICAL expiry tick rate of the RTWDOG counter with CLK=LPO, PRES=/256 on
-// this silicon: TOVAL 250 expired in ~0.5 s and TOVAL 254 in ~0.52 s on the
-// bench (2026-09-12, builds 86eeb4a / 54b57d0) => ~500 Hz (a 128 kHz LPO).
-// The READABLE counter (WDOG3_CNT) advances at only ~127 Hz (= 32.768 kHz/256)
-// on the same hardware, so a CNT-based measurement under-reads the expiry
-// rate 4x — TOVAL is therefore derived from THIS constant; the CNT rate is
-// still measured and reported (wdog_tick_hz) as a diagnostic only.
-constexpr uint32_t watchdog_tick_hz    = 500;
+// EMPIRICAL RTWDOG timing on this silicon (CLK=LPO, PRES=/256), from the
+// bench starve tests of 2026-09-12: TOVAL 254 expired 0.52 s after the last
+// kick, TOVAL 1000 after 6.37 s. Two points => the comparator runs at the
+// 127.5 Hz the readable counter (WDOG3_CNT) also shows (32.768 kHz / 256), AND
+// there is a constant deficit of ~190 ticks (~1.5 s): expiry = (TOVAL - 190)
+// ticks after the last kick, as if the counter already held ~190 at kick-stop.
+// The mechanism is not yet identified (refresh not zeroing CNT? refreshes only
+// honoured intermittently?) — the kick path now records CNT before/after each
+// refresh (GET_HEALTH ver 5 tail) to name it. Until then TOVAL is calibrated:
+//   TOVAL = tick_hz * seconds + watchdog_offset_ticks
+// with tick_hz MEASURED at boot from WDOG3_CNT (fallback 127).
+constexpr uint32_t watchdog_offset_ticks  = 190;
+constexpr uint32_t watchdog_tick_hz_fallback = 127;
 constexpr uint32_t watchdog_longop_ms  = 30000;  // finite window for SD format / ISP / image upload
 
 // begin() arms the RTWDOG early with a long provisional timeout (boot is
@@ -219,14 +224,21 @@ bool    watchdogArmed();
 // default — expected 0x2520: UPDATE, CLK=LPO, RCS, CMD32EN) and a live read.
 uint32_t watchdogCsAtBoot();
 uint32_t watchdogCsNow();
-// Measured WDOG3_CNT tick rate (Hz; DIAGNOSTIC ONLY — ~127 on this silicon,
-// 0 until watchdogBegin ran; TOVAL uses watchdog_tick_hz), the live TOVAL
-// readback, and the last verification bits: bit0 RCS timeout (advisory),
+// Measured WDOG3_CNT tick rate (Hz; ~127 on this silicon; 0 = measurement
+// failed, fallback used), the live TOVAL readback, and the last verification bits: bit0 RCS timeout (advisory),
 // bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick rate fell back to the
 // default, bit4 the other unlock key width had to be retried.
 uint32_t watchdogTickHz();
 uint32_t watchdogTovalNow();
 uint8_t  watchdogVerify();
+// Kick-path diagnostics (ver 5 tail): WDOG3_CNT read immediately BEFORE the
+// refresh (max since boot = longest gap between kicks, in ticks) and
+// immediately AFTER it (min/max since boot — a refresh that zeroes the counter
+// reads 0..1 here; anything else names the ~190-tick anomaly), plus live CNT.
+uint16_t watchdogCntBeforeMax();
+uint16_t watchdogCntAfterMin();
+uint16_t watchdogCntAfterMax();
+uint16_t watchdogCntNow();
 
 // PJRC CrashReport region: the top 128 B of OCRAM (arm_fault_info_struct at
 // 0x2027FF80, 44 B, len field = 11 words; PJRC's own breadcrumbs at

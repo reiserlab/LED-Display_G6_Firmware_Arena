@@ -1092,10 +1092,14 @@ void CommandProcessor::handleGetControllerInfo() {
 //   off 89  u32 wdog_cs_boot        WDOG3_CS as found before the first programming (reset default; expect 0x2520)
 //   off 93  u32 wdog_cs_now         WDOG3_CS live readback (EN bit7, CMD32EN bit13, RCS bit10, ULK bit11, FLG bit14)
 //   ---- ver 4 tail (measured timing) ----
-//   off 97  u32 wdog_tick_hz        DIAGNOSTIC: measured WDOG3_CNT read rate (~127 on this silicon; 0 = measurement failed).
-//                                   NOT the expiry rate — TOVAL uses Health::watchdog_tick_hz (500, empirical)
-//   off 101 u32 wdog_toval_now      WDOG3_TOVAL live readback (ticks; 1000 = 2.0 s normally, 15000 = 30 s in a long-op window)
+//   off 97  u32 wdog_tick_hz        measured WDOG3_CNT tick rate (~127 on this silicon; == comparator rate per the two-point bench fit)
+//   off 101 u32 wdog_toval_now      WDOG3_TOVAL live readback = tick_hz * s + 190 offset ticks (444 = 2.0 s normally, 4000 = 30 s long-op)
 //   off 105 u8  wdog_verify         bit0 RCS timeout, bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick-rate fallback, bit4 key-width retry
+//   ---- ver 5 tail (kick-path CNT diagnostics for the ~190-tick anomaly) ----
+//   off 106 u16 wdog_cnt_before_max WDOG3_CNT read just BEFORE a refresh, max since boot (= longest kick gap in ticks)
+//   off 108 u16 wdog_cnt_after_min  WDOG3_CNT read just AFTER a refresh, min since boot (0..1 if the refresh zeroes it)
+//   off 110 u16 wdog_cnt_after_max  ... max since boot (anything large = refreshes not zeroing / being ignored)
+//   off 112 u16 wdog_cnt_now        WDOG3_CNT live
 //
 // Bytes 0..54 are the layout agreed in issue #50; 55..65 are an additive
 // tail (a SYSTEM_RESET sent by the host is itself a dispatched command, so
@@ -1116,8 +1120,8 @@ inline uint8_t *put32(uint8_t *p, uint32_t v) {
 }  // namespace
 
 void CommandProcessor::handleGetHealth() {
-  constexpr uint8_t kHealthVersion    = 4;   // v2 +23 B watchdog/ISR; v3 +8 B raw CS; v4 +9 B measured timing (offsets never move)
-  constexpr size_t  kHealthPayloadLen = 106;
+  constexpr uint8_t kHealthVersion    = 5;   // v2 +23 B watchdog/ISR; v3 +8 B raw CS; v4 +9 B timing; v5 +8 B kick CNT (offsets never move)
+  constexpr size_t  kHealthPayloadLen = 114;
   const Health::Stats &hs = Health::stats;
 
   uint8_t flags = 0;
@@ -1164,6 +1168,10 @@ void CommandProcessor::handleGetHealth() {
   p = put32(p, Health::watchdogTickHz());
   p = put32(p, Health::watchdogTovalNow());
   p = put8 (p, Health::watchdogVerify());
+  p = put16(p, Health::watchdogCntBeforeMax());
+  p = put16(p, Health::watchdogCntAfterMin());
+  p = put16(p, Health::watchdogCntAfterMax());
+  p = put16(p, Health::watchdogCntNow());
   static_assert(kHealthPayloadLen <= byte_count_per_response_max - 3,
                 "GET_HEALTH payload must fit one framed reply");
   current_source_->sendResponse(GET_HEALTH_CMD, 0, payload, (size_t)(p - payload));
