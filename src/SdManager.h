@@ -49,6 +49,18 @@ class SdManager {
   bool begin();
   bool available() const { return mounted_; }
 
+  // SdFat's cached last card error (GET_HEALTH 0xCA, issue #50). Reads the
+  // driver's stored code — no SD I/O. 0 = no error. card() is null only if
+  // SD.begin() never got as far as creating the SDIO driver.
+  uint8_t cardErrorCode() const {
+    SdCard *c = SD.sdfs.card();
+    return c ? c->errorCode() : 0;
+  }
+  uint32_t cardErrorData() const {
+    SdCard *c = SD.sdfs.card();
+    return c ? c->errorData() : 0;
+  }
+
   // Number of *.pat files discovered in /patterns (after begin()).
   uint16_t patternCount() const { return pattern_count_; }
 
