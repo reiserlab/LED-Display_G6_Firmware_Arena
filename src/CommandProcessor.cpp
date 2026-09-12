@@ -1127,7 +1127,8 @@ void CommandProcessor::handleGetHealth() {
 //   off  0  u8   ver         = 1 (schema version of this payload)
 //   off  1  u8   rows        panel_count_per_frame_row (this build's arena)
 //   off  2  u8   cols        panel_count_per_frame_col
-//   off  3  u8   flags       bit0 dirty working tree at build, bit1 DEBUG_SERIAL build
+//   off  3  u8   flags       bit0 dirty working tree at build, bit1 DEBUG_SERIAL build,
+//                            bit2 telemetry ring compiled in (0xA8/0xA9 present)
 //   off  4  char sha[8]      short git SHA, lowercase hex; "unknown " without git
 //   off 12  char date[10]    build date UTC "YYYY-MM-DD"
 //   off 22  char branch[24]  git branch; "detached" for detached HEAD; "unknown"
@@ -1149,8 +1150,9 @@ inline uint8_t *putField(uint8_t *p, const char *src, size_t len) {
 void CommandProcessor::handleGetFirmwareVersion() {
   using namespace AC::version;
   uint8_t flags = 0;
-  if (fw_git_dirty)   flags |= fw_flag_dirty;
-  if (fw_debug_build) flags |= fw_flag_debug;
+  if (fw_git_dirty)     flags |= fw_flag_dirty;
+  if (fw_debug_build)   flags |= fw_flag_debug;
+  if (fw_has_telemetry) flags |= fw_flag_telemetry;  // hosts gate SET_TELEMETRY on this, not on 0xC2 bit 7
 
   uint8_t payload[fw_version_payload_len];
   uint8_t *p = payload;

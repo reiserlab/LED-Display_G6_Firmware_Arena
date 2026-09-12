@@ -41,6 +41,7 @@ import pytest
 
 from .commands import (
     GET_CONTROLLER_INFO_CMD,
+    GET_FIRMWARE_VERSION_CMD,
     GET_FRAME_POSITION_CMD,
     GET_PANEL_DISPLAY_MODE_CMD,
     GET_PATTERN_INFO_CMD,
@@ -153,10 +154,14 @@ def _telemetry_on(transport):
 
 # ── capability + request forms ────────────────────────────────────────────────
 
-def test_controller_info_advertises_health_bit(transport):
+def test_firmware_version_advertises_telemetry_flag(transport):
+    # The 0xC2 capability byte is full; hosts gate SET_TELEMETRY on 0xCB flags bit2.
     st, echo, payload, _ = transport.command(GET_CONTROLLER_INFO_CMD)
     assert st == 0 and echo == GET_CONTROLLER_INFO_CMD
-    assert payload[1] & CAP_HEALTH, "telemetry ring ships under capability bit 7 (health)"
+    assert payload[1] & CAP_HEALTH, "0xCB itself is gated by capability bit 7 (health)"
+    st, echo, payload, _ = transport.command(GET_FIRMWARE_VERSION_CMD)
+    assert st == 0 and echo == GET_FIRMWARE_VERSION_CMD
+    assert payload[3] & 0x04, "0xCB flags bit2 (telemetry ring compiled in) must be set"
 
 
 def test_set_telemetry_accepts_both_forms_and_rejects_bad_length(transport):

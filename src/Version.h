@@ -54,7 +54,12 @@ constexpr bool fw_debug_build  = false;
 //   off  0  u8   ver    = fw_version_payload_version
 //   off  1  u8   rows   = constants::panel_count_per_frame_row
 //   off  2  u8   cols   = constants::panel_count_per_frame_col
-//   off  3  u8   flags  bit0 dirty working tree at build, bit1 DEBUG_SERIAL build
+//   off  3  u8   flags  bit0 dirty working tree at build, bit1 DEBUG_SERIAL build,
+//                       bit2 telemetry ring compiled in (SET_TELEMETRY 0xA8 /
+//                       GET_TELEMETRY_BLOCK 0xA9 answer). Hosts gate 0xA8 on THIS
+//                       bit, not on 0xC2 bit 7 (health): the 0xC2 capability byte is
+//                       full, and health-only firmware (22b756d) flashes a CE 01
+//                       glyph on an unknown 0xA8.
 //   off  4  char sha[8]      short git SHA, lowercase hex, right-padded with spaces
 //   off 12  char date[10]    build date UTC "YYYY-MM-DD"
 //   off 22  char branch[24]  git branch, right-padded with spaces, truncated to 24
@@ -64,8 +69,10 @@ constexpr uint8_t fw_date_field_len          = 10;
 constexpr uint8_t fw_branch_field_len        = 24;
 constexpr uint8_t fw_version_payload_len
     = 4 + fw_sha_field_len + fw_date_field_len + fw_branch_field_len;  // 46
-constexpr uint8_t fw_flag_dirty = 0x01;
-constexpr uint8_t fw_flag_debug = 0x02;
+constexpr uint8_t fw_flag_dirty     = 0x01;
+constexpr uint8_t fw_flag_debug     = 0x02;
+constexpr uint8_t fw_flag_telemetry = 0x04;  // src/Telemetry.h is always compiled into this build
+constexpr bool    fw_has_telemetry  = true;  // the build condition for the ring (unconditional here)
 
 }  // namespace version
 }  // namespace AC

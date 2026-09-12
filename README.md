@@ -176,7 +176,7 @@ the *panel* image on the SD card, not the controller). Request `[01 CB]`; framed
 | 0 | u8 | `ver` | payload schema version, `1` |
 | 1 | u8 | `rows` | `panel_count_per_frame_row` this build was compiled for |
 | 2 | u8 | `cols` | `panel_count_per_frame_col` |
-| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build) |
+| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build), bit2 `telemetry` (telemetry ring compiled in — `SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9 answer; **hosts gate 0xA8 on this bit**, not on 0xC2 bit 7) |
 | 4 | char[8] | `sha` | short git SHA, lowercase hex (`git rev-parse --short=8`); `unknown ` when git was unavailable |
 | 12 | char[10] | `date` | build date, UTC, `YYYY-MM-DD` |
 | 22 | char[24] | `branch` | git branch, truncated to 24; `detached` for a detached HEAD; `unknown` when unavailable |
@@ -207,8 +207,10 @@ every command and every displayed frame (the data the
 transition appends a small binary record to a **64 KiB byte ring in OCRAM**; a host drains it live
 over the single USB-CDC link with **framed, chunked replies ("framing A")** and an **ack cursor**,
 so the drain is lossless regardless of link hiccups. Nothing here touches the SD card. Both
-opcodes were reserved by fw PR #47 for exactly this stream and are gated by the same
-**capability bit 7 (`health`)** in 0xC2 as 0xCA/0xCB (no new bit; bit 6 is `ai_cal`).
+opcodes were reserved by fw PR #47 for exactly this stream. There is no 0xC2 capability bit for
+them (the byte is full; bit 6 is `ai_cal`, bit 7 `health` is the last) — a host must gate
+`SET_TELEMETRY` on **`GET_FIRMWARE_VERSION` (0xCB) `flags` bit2 `telemetry`**: health-only firmware
+(22b756d) answers an unknown 0xA8 with a `CE 01` error glyph on the arena.
 Source: `src/Telemetry.h` (layout, all constants), `src/Telemetry.cpp`,
 `CommandProcessor::handleSetTelemetry` / `handleGetTelemetryBlock`; Python codec in
 `tests/telemetry_codec.py`; HIL tests in `tests/test_telemetry.py`; bench drainer
