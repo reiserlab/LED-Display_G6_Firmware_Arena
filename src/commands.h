@@ -40,6 +40,8 @@ enum ArenaCommands : uint8_t {
   SET_AO_LUT_CMD              = 0xA2,  // [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
   SET_AO_MODE_CMD             = 0xA3,  // [02 A3 mode] 0=programmable (0xA0/0xA2) | 1=frame_number (DAC tracks frame index, 0-5V normalized)
   GET_ANALOG_IN_CMD           = 0xA4,  // [01 A4] returns Analog In 1 + Analog In 2 as two int16 LE mV (±10V front-end, calibration TBD)
+  SET_TELEMETRY_CMD           = 0xA8,  // [04 A8 flags rate_lo rate_hi] (or [02 A8 flags]) telemetry ring: flags bit0 = record events (default ON at boot), bit7 = synthetic producer (cmd 0xFE records at `rate`/s, T1 bench); bits 1-6 reserved
+  GET_TELEMETRY_BLOCK_CMD     = 0xA9,  // [08 A9 ack_seq(u32) max_bytes(u16) flags] free records with seq <= ack_seq, then reply 18-byte header + whole records from the read cursor (not freed until acked); layout in src/Telemetry.h + README § Telemetry ring
   SET_DIGITAL_OUT_CMD         = 0xAA,  // [03 AA channel state] drive "Digital IO 1/2 (5V)" BNC HIGH/LOW (requires role out_programmable; off auto-promotes)
   GET_DIGITAL_OUT_CMD         = 0xAB,  // [01 AB] returns current state of Digital IO 1 and 2 data pins as two bytes
   SET_DIO_ROLE_CMD            = 0xAC,  // [03 AC port role] port 1|2; role 0=off 1=in_trigger 2=out_programmable 3=out_debug_framescan

@@ -67,6 +67,7 @@ struct Stats {
   uint32_t loop_max_1s_us  = 0;  // same, over the most recent COMPLETED 1 s window
   uint32_t sd_reads        = 0;  // readFrame() calls (loadFrame) since boot
   uint32_t sd_read_max_us  = 0;  // longest readFrame() since boot
+  uint32_t last_sd_read_us = 0;  // most recent readFrame() duration (telemetry FRAME.sd_load_us)
   uint32_t cmd70_count     = 0;  // SET_FRAME_POSITION (0x70) commands received
   uint32_t reset_cause     = 0;  // SRC_SRSR captured once at boot, then cleared
 

@@ -11,6 +11,7 @@ Current capabilities:
 - **`get-controller-info` (0xC2)** capability handshake and a **controller error display** ("CE / NN" glyph) for SD/CRC/parameter faults.
 - **`get-health` (0xCA)** read-only telemetry (loop/SD/SPI/USB counters, reset cause) plus a **reset-surviving breadcrumb** for soak-testing the Mode-3 streaming wedge (issue #50) — see [Health + breadcrumb](#health--breadcrumb-get-health-0xca).
 - **`get-firmware-version` (0xCB)** compiled-in **build identity** (git SHA, branch, dirty flag, UTC build date, arena rows×cols) so any controller can be pinned to the exact build it runs — see [Build identity](#build-identity-get-firmware-version-0xcb).
+- **Telemetry ring (`SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9)** — a 64 KiB reset-surviving OCRAM event log (every command with its receive time + reply status, every displayed frame change with SD-load and SPI times, every state change / error glyph / slow SD read; overwrite-oldest, heap-guarded) drained live over USB-CDC with framed chunks and an ack cursor — the last seconds before a hang, without touching the SD card — see [Telemetry ring](#telemetry-ring-set_telemetry-0xa8--get_telemetry_block-0xa9).
 - **Arena hardcoded to G6_2x10** — the panel-set table and CS pin map are baked in. Multi-arena lookup via [`g6_arena_configs.h`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_arena_configs.h) is deferred.
 - **10 MHz SPI**, MSB-first, **CPOL=1 / CPHA=1 (Mode 3)** per [`g6_01-panel-protocol.md`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_01-panel-protocol.md) § SPI framing. (Panels accept up to 30 MHz; the clock is held at 10 MHz during bring-up — see `spi_clock_speed` in `constants.h`.)
 - **G6 v2 `.pat` format** ([`g6_04-pattern-file-format.md`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_04-pattern-file-format.md)) is the on-disk file format the SD reader consumes.
@@ -75,6 +76,7 @@ All source files live in `src/`.
 | `constants.h` | Hardware constants, panel geometry, timing, SD/Mode-4/error constants |
 | `commands.h` | `ArenaCommands` enum (G4-compatible, G6-dropped commands marked) |
 | `Version.h` | Build identity constants (git SHA / branch / dirty / date) injected by `scripts/build_version.py`; reported by `GET_FIRMWARE_VERSION` (0xCB) |
+| `Telemetry.h/.cpp` | 64 KiB OCRAM telemetry ring (CMD / FRAME / STATE records), crash-dump keep-or-init at boot, ack-cursor drain for `SET_TELEMETRY` (0xA8) / `GET_TELEMETRY_BLOCK` (0xA9) |
 
 ## Host command protocol
 
@@ -195,6 +197,180 @@ Hosts: Arena Studio reads 0xCB at connect and records it in every run log as
 `GET_HEALTH` — both shipped in the same build, and older firmware flashes a `CE 01` error glyph
 on any unknown opcode, so a host must check the bit before asking.
 
+### Telemetry ring (`SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9)
+
+The breadcrumb above says what the controller was doing at the instant it wedged; the telemetry
+ring says what led up to it — and, in normal runs, gives the exact controller-side timing of
+every command and every displayed frame (the data the
+[ring-buffer proposal](https://github.com/reiserlab/webDisplayTools/blob/main/docs/development/controller-telemetry-ring-buffer-proposal.md)
+§ 3.1 asks for). Every dispatched command, every displayed frame *change*, and every state
+transition appends a small binary record to a **64 KiB byte ring in OCRAM**; a host drains it live
+over the single USB-CDC link with **framed, chunked replies ("framing A")** and an **ack cursor**,
+so the drain is lossless regardless of link hiccups. Nothing here touches the SD card. Both
+opcodes were reserved by fw PR #47 for exactly this stream and are gated by the same
+**capability bit 7 (`health`)** in 0xC2 as 0xCA/0xCB (no new bit; bit 6 is `ai_cal`).
+Source: `src/Telemetry.h` (layout, all constants), `src/Telemetry.cpp`,
+`CommandProcessor::handleSetTelemetry` / `handleGetTelemetryBlock`; Python codec in
+`tests/telemetry_codec.py`; HIL tests in `tests/test_telemetry.py`; bench drainer
+`scripts/telemetry_drain.py`.
+
+**Memory (crash-dump semantics).** Fixed OCRAM region, in no linker section (like the breadcrumb):
+ring base `0x2026F000`, size `0x10000`, end `0x2027F000` — below the breadcrumb (`0x2027FF40`)
+and PJRC's `CrashReport` (`0x2027FF80`). At boot: if the header's magic + checksum validate and the
+cursors are in range, the contents are **KEPT** (`boot_count++`), the record chain from `read_off`
+is walked and **truncated at the first inconsistent record** (a partially written trailing record
+is ignored — a valid header is never a reason to wipe), and a `STATE(boot)` record is appended.
+That is the crash dump after a `SYSTEM_RESET`, a lockup reset, or the bootloader's program-button
+reboot (RAM is preserved). A power-on leaves garbage → the ring is initialised.
+
+**Heap guard (the address-range assumption, and how it is enforced).** OCRAM ("RAM2") is
+`0x20200000..0x20280000`; `.bss.dma` (`DMAMEM`) occupies its bottom 55.7 KB in this build and the
+heap grows up from there (`_heap_start` = end of `.bss.dma`) — but the Teensy linker script puts
+`_heap_end` at the **top** of OCRAM, so `malloc` can in principle grow into the fixed region. This
+firmware's heap use is small and static (SdFat, Wire); the heap would need ~390 KiB to reach the
+ring. Nothing enforces that, so `Telemetry::begin()` **and every append** (and `loop()`'s
+`Telemetry::service()`) compare the live heap break (`__brkval`, the core's `_sbrk` cursor) against
+`ring base − 4096`. If the heap gets that close the ring is **disabled for the rest of the boot**
+(events off, no ring access at all — the header at the ring base is the first thing the heap would
+clobber), a `STATE(ring_overrun, code 0xFF)` is appended first if the ring is still intact, and the
+0xA9 reply reports **`flags` bit2 = disabled: heap collision** (header only, counters 0). At boot,
+a heap already inside the guard band leaves the region untouched (a valid ring stays in RAM for the
+next boot).
+
+**Overflow = overwrite oldest.** The ring is first a crash recorder: the lead-up to a hang matters
+more than unread old history. When a record does not fit, `read_off` is advanced past the oldest
+record(s) until it does and `dropped` counts every evicted record; the host sees the **seq gap**
+plus the counter, and one `STATE(ring_overrun, code 0, arg = evicted since the last marker)` marks
+each eviction *episode* (evictions ≥ 1 s apart start a new episode). A host that polls at ~10 Hz
+and loops on `more` never lets it fill.
+
+**Commit ordering (reset safety).** An append (1) publishes any eviction first — the header with the
+advanced `read_off` is flushed *before* a byte of the old records is overwritten; (2) writes the
+PAD (if any) and the record bytes beyond `write_off` and flushes them — invisible until (3) the
+header (`write_off`, `next_seq`, `checksum`) is flushed. A reset at any point leaves the header
+pointing at the last complete record.
+
+**`telemetry_flags` / cache note.** OCRAM is mapped write-back (`MEM_CACHE_WBWA` in the Teensy
+core's `startup.c`), so an unflushed append could sit in a dirty D-cache line and be lost when a
+reset invalidates the cache — exactly the most recent records a crash dump wants. Every append
+therefore `arm_dcache_flush`es the record bytes just written (1–2 lines) **and the 32-byte header
+line** (`write_off` / `next_seq` / `flags` / `dropped`, sealed by the checksum); `ack` flushes the
+header again when `read_off` moves. Same reasoning and cost class as the breadcrumb: ~0.2 µs per
+record, < 0.02 % CPU at 286 Hz Mode-3 streaming. Making the region uncached via an MPU region was
+rejected (the base is not 64 KiB-aligned, and the drain reads faster cached).
+
+**Layout** (all little-endian). Header, 32 B at the ring base:
+
+```
+RingHeader (at base, 32 B): magic u32 = 0x47365452 ('G6TR'), ver u8 = 1, flags u8 (bit0 events_enabled), reserved u16,
+  write_off u32, read_off u32 (host ack cursor), next_seq u32, dropped u32, boot_count u32, checksum u32 (sum of the other fields)
+Records (from base+32 to base+0x10000, byte ring, wrap-around; a record never splits: if the tail can't fit
+  the next record a PAD record `len=remaining, type=0` fills it and writing wraps to 0)
+Record: len u8 (total incl. this byte), type u8, seq u32, t_us u32 (micros()), payload
+  type 1 CMD   : cmd u8, status u8, plen u8, payload[plen ≤ 8]      (recorded after dispatch; t_us = receipt time before dispatch)
+  type 2 FRAME : idx u16, pattern u16, sd_load_us u32, spi_us u16   (recorded in transmitOnRefresh when cur_frame_index_ or pattern changed since the last FRAME record)
+  type 3 STATE : kind u8, code u8, arg u16
+      kinds: 1 boot (code = reset_cause & 0xFF, arg = prev breadcrumb op<<8 | prev_valid), 2 state_change (code = new ArenaState, arg = pattern_id),
+             3 error_glyph (code = CE code, arg = 0), 4 sd_slow (code=0, arg = read µs/100; when a readFrame > 20 ms),
+             5 ring_overrun (code 0: arg = records evicted since the last marker; code 0xFF: ring disabled, heap collision, arg 0),
+             6 telemetry (code = SET_TELEMETRY flags, arg = synthetic rate), 7 sd_open (code = CE result, arg = pattern_id)
+```
+
+| Off | Type | Header field | Meaning |
+|---|---|---|---|
+| 0 | u32 | `magic` | `0x47365452` (`'G6TR'`) |
+| 4 | u8 | `ver` | `1` |
+| 5 | u8 | `flags` | bit0 `events_enabled` (forced on at every boot) |
+| 6 | u16 | `reserved` | 0 |
+| 8 | u32 | `write_off` | next byte to write, offset into the 65,504-byte record area |
+| 12 | u32 | `read_off` | host ack cursor — oldest unacked byte |
+| 16 | u32 | `next_seq` | seq of the next record (starts at 1; `first_seq = 0` in a block means "none") |
+| 20 | u32 | `dropped` | records evicted (overwrite-oldest) since init |
+| 24 | u32 | `boot_count` | boots that kept this ring (0 = initialised this boot) |
+| 28 | u32 | `checksum` | sum of the seven u32 words above |
+
+Record offsets: `len` @0, `type` @1, `seq` @2 (u32), `t_us` @6 (u32), payload @10.
+CMD payload: `cmd` @10, `status` @11, `plen` @12, request bytes @13.. (the first ≤ 8 bytes after
+`[len, cmd]`); CMD records are 13–21 B. FRAME payload: `idx` @10 (u16), `pattern` @12 (u16),
+`sd_load_us` @14 (**u32** — 129 ms SD reads have been observed; u16 would clip at 65 ms),
+`spi_us` @18 (u16); **20 B total**. STATE payload: `kind` @10, `code` @11, `arg` @12 (u16); 14 B
+total. `t_us` is raw `micros()` (wraps every 71.6 min; the host unwraps using `seq` and the block's
+`t_now_us`).
+
+**What gets recorded** (producer hooks, all in `CommandProcessor.cpp`):
+
+- `CMD` — in `handleBinaryCommand`: `t_us` = `micros()` at receipt (before dispatch); after the
+  dispatch switch the record carries the opcode, the reply's status byte
+  (`MessageSource::lastResponseStatus()`, 0xFF if none was queued) and the first ≤ 8 request bytes.
+  `GET_TELEMETRY_BLOCK` (0xA9) itself is **not** recorded (a poller looping on `more` would fill the
+  ring with records of reading the ring); 0xC2/0xCA/0xCB/0xA8 are. Not recorded: 0x32 stream frames
+  and the 0x85/0xE0 bulk-upload headers (different dispatch paths), and `SYSTEM_RESET` 0x01 (it
+  resets before the record would be appended — the next boot's `STATE(boot)` marks it).
+- `FRAME` — in `transmitOnRefresh`, when `cur_frame_index_` or `pattern_id_` differs from the last
+  FRAME recorded (reset at every `enterPatternMode`, so the first frame of a trial is always
+  recorded). `t_us` = start of `SpiManager::transferFrame` (what the panels latch), `spi_us` = its
+  duration, `sd_load_us` = the most recent `readFrame` duration (`Health::stats.last_sd_read_us`).
+  A held frame re-sent every refresh tick costs nothing.
+- `STATE` — `boot` in `Telemetry::begin()`; `sd_open` (+ `state_change` on success) in
+  `enterPatternMode`; `state_change` in `enterAllOff` (STOP / ALL_OFF / trial timer / glyph
+  timeout), `enterAllOn`, `enterStreamingFrame`, and on an actual change in `handleSetFramePosition`
+  / the PSRAM handlers; `error_glyph` in `showError`; `sd_slow` in `loadFrame` when a `readFrame`
+  exceeds 20 ms; `telemetry` in `SET_TELEMETRY`; `ring_overrun` from the ring itself.
+- **Synthetic producer** (bench test T1, drain throughput): `SET_TELEMETRY` flags **bit7** turns on
+  a dummy CMD-type record — `cmd 0xFE, status 0, plen 4, payload = counter u32` (restarts at 0 on
+  each enable) — generated from `loop()` (`Telemetry::service()`) at `rate` records/s, paced by
+  `micros()` accumulation (no timer; catch-up after a loop stall is capped at 256 records per
+  call). Not gated by events bit0, so a pure synthetic stream is a valid setup. **Off at boot.**
+
+**Opcodes.**
+
+- `SET_TELEMETRY` **0xA8** — `[04 A8 flags rate_lo rate_hi]`, or the 2-byte form `[02 A8 flags]`.
+  `flags` bit0 = record events (default **ON** at every boot — recording costs nothing until
+  drained), bit7 = synthetic producer on at `rate` records/s (u16; `rate` 0 = off), bits 1..6
+  reserved (analog ticks come later). The 2-byte form leaves `rate` unchanged. Reply: status 0, no
+  payload. Records `STATE(telemetry, flags, rate)` — before the gate closes on a disable, after it
+  opens on an enable — so the transition is always in the log. Ignored (stays disabled) once the
+  heap guard has tripped.
+- `GET_TELEMETRY_BLOCK` **0xA9** — `[08 A9 ack_seq u32 LE, max_bytes u16 LE, flags u8]` (`flags`
+  reserved; the byte may be omitted). The controller **first advances `read_off` past every record
+  with `seq ≤ ack_seq`** (`ack_seq = 0xFFFFFFFF` means "no ack"), **then replies** with the header
+  plus as many *whole* records from `read_off` as fit in `min(max_bytes, 178)` bytes **without
+  advancing `read_off`** — they are freed only by a later ack. PAD records are skipped, never
+  returned. Reply payload = 18-byte header + records verbatim:
+
+| Off | Type | Field | Meaning |
+|---|---|---|---|
+| 0 | u32 | `t_now_us` | controller `micros()` at reply time (pair with the host receive time to fit a clock) |
+| 4 | u32 | `first_seq` | seq of the first returned record; 0 if none |
+| 8 | u16 | `n_records` | records in this block |
+| 10 | u32 | `dropped` | records evicted since the ring was initialised |
+| 14 | u8 | `more` | 1 if unread records remain after this block — ask again immediately |
+| 15 | u8 | `flags` | bit0 `events_enabled`, bit1 contents survived a reboot (`boot_count > 0`), bit2 ring disabled: heap collision, bit3 synthetic producer on |
+| 16 | u16 | `boot_count` | boots that kept this ring (saturates at 65535) |
+
+  Why 178 and not 180: `sendResponse` accepts a payload only while `3 + payload_len < 200`
+  (`RESP_BUF_SIZE`), i.e. ≤ 196 B, and the header takes 18. A maximal CMD record is 21 B, so a
+  block always carries at least one record when any is pending.
+
+**Ack semantics / lossless drain.** The host keeps the last seq it has *stored* and sends it as
+`ack_seq` on the **next** request: a reply that is lost or times out is re-served unchanged on the
+re-ask (same `first_seq`, same bytes), because nothing is freed until the host says so (or the ring
+overflows — then the seq gap and `dropped` say exactly what was lost). A lower or repeated ack is a
+no-op; acking frees exactly the records with `seq ≤ ack_seq`. Drain loop:
+`ack = 0xFFFFFFFF; loop { reply = 0xA9(ack, 178); store records; ack = last seq; if !more: break }`,
+then one final `0xA9(ack, 0)` frees the last block. At 286 Hz Mode-3 streaming the ring fills at
+~10 KB/s, so a poller must loop on `more` (~56 chunks/s), not take one chunk per poll.
+
+**Cost.** Recording is a few dozen byte stores + two one-to-three-line dcache flushes per record
+(see the cache note above) and one heap-break compare, gated by one DTCM boolean; nothing runs when
+events are disabled. Ring capacity: 65,504 B ≈ 3,000–4,000 records ≈ 6 s at the worst case above,
+≥ 50 s of a typical Mode-2 run, indefinitely for an idle controller.
+
+**Host tooling.** `scripts/telemetry_drain.py --port …` is a pyserial drainer that prints every
+record as a JSON line, tracks seq gaps, and summarises on Ctrl-C (`--raw-out` also writes the raw
+blocks with a host receive stamp — the proposal's § 7 sidecar); `tests/telemetry_codec.py` is the
+decoder both it and the HIL tests use.
+
 ## SD pattern playback (Modes 2/3/4)
 
 Patterns are `/patterns/*.pat` files on the built-in SD card, in the v2 `G6PT` format
@@ -242,6 +418,9 @@ not shape, is the pass/fail discriminator).
   CIPO diagnostic (`DEBUG_SERIAL` builds): drive all-on over serial and capture/parse the
   `[spi] CIPO` stream on the same pipe. `multi_port_capture.py` additionally taps both panels'
   `SPI_DIAG` heartbeats on their own ports to confirm per-panel frame reception.
+- `scripts/telemetry_drain.py` — USB-CDC drainer for the telemetry ring (0xA9 with ack cursor):
+  JSON-lines records, seq-gap tracking, Ctrl-C summary; `scripts/soak_mode3.py` — browser-free
+  Mode-3 soak driver for issue #50.
 
 ## TCP transport — known throughput limitation
 

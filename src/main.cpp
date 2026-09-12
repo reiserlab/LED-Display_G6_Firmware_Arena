@@ -6,6 +6,7 @@
 #include "CommandProcessor.h"
 #include "Health.h"
 #include "Version.h"
+#include "Telemetry.h"
 
 NetworkManager   net;
 SerialManager    serial;
@@ -60,6 +61,10 @@ void setup() {
   // FIRST: capture + clear the reset cause and harvest the previous boot's
   // breadcrumb before anything else runs (GET_HEALTH 0xCA, issue #50).
   Health::begin();
+  // Telemetry ring (0xA8/0xA9): keep a valid OCRAM ring from the previous boot
+  // (the crash dump) or initialise it, then append STATE(boot). After
+  // Health::begin() — the boot record carries the reset cause + breadcrumb.
+  Telemetry::begin();
 
 #ifdef DEBUG_SERIAL
   Serial.begin(115200);
@@ -91,6 +96,10 @@ void setup() {
     if (srsr & SRC_SRSR_JTAG_SW_RST)          diag.println("  JTAG_SW_RST");
     if (srsr & SRC_SRSR_IPP_RESET_B)          diag.println("  IPP_RESET_B (power-on reset)");
     if (srsr & SRC_SRSR_TEMPSENSE_RST_B)      diag.println("  TEMPSENSE_RST_B");
+    diag.printf("=== telemetry ring: %s, boot_count=%lu next_seq=%lu pending=%lu B dropped=%lu ===\n",
+                Telemetry::keptAcrossReset() ? "KEPT across reset" : "initialised",
+                (unsigned long)Telemetry::bootCount(), (unsigned long)Telemetry::nextSeq(),
+                (unsigned long)Telemetry::pendingBytes(), (unsigned long)Telemetry::dropped());
     if (CrashReport) {
       diag.println("=== CrashReport (previous reset) ===");
       diag.print(CrashReport);
@@ -138,6 +147,7 @@ void loop() {
   serial.serviceUsb();        // 1b. Read and parse commands from USB CDC
   cmdProc.processCommand();   // 2.  Handle one parsed command per source
   cmdProc.serviceDisplay();   // 3.  Re-transmit current frame at refresh rate
+  Telemetry::service();       // 3a. Telemetry ring: heap guard + synthetic producer (T1); one compare when idle
   cmdProc.serviceDownload();  // 3b. Stream one 0x84 download chunk, if one is in flight
   cmdProc.serviceUpload();    // 3c. Stream one 0x85 upload chunk, if one is in flight
   cmdProc.serviceArchive();   // 3d. Stream one 0x8A archive step, if one is in flight

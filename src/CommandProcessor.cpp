@@ -3,6 +3,7 @@
 #include "ErrorGlyph.h"
 #include "Health.h"
 #include "Version.h"
+#include "Telemetry.h"
 #include <Wire.h>
 
 using namespace AC;
@@ -132,6 +133,7 @@ void CommandProcessor::processCommand() {
 }
 
 void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
+  const uint32_t t_rx_us = micros();  // telemetry CMD.t_us: receipt time, before dispatch
   const uint8_t *buf = cmd.data;
   uint8_t claimed_len = buf[0];
   if (cmd.data_len - 1 != claimed_len) {
@@ -669,6 +671,14 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
     }
 
+    case SET_TELEMETRY_CMD:
+      handleSetTelemetry(cmd);
+      break;
+
+    case GET_TELEMETRY_BLOCK_CMD:
+      handleGetTelemetryBlock(cmd);
+      break;
+
     case SET_DIGITAL_OUT_CMD: {
       if (claimed_len != 3) {
         current_source_->sendResponse(command_byte, 1, "Expected [03 AA channel state]");
@@ -929,6 +939,16 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
   }
   Health::clear();
+
+  // Telemetry CMD record (Telemetry.h): receipt time, opcode, the reply's
+  // status byte, and the first <= 8 request bytes after [len, cmd]. The
+  // drain opcode itself is skipped — a 10 Hz poller looping on `more` would
+  // otherwise fill the ring with records of reading the ring. 0xCA/0xCB/0xC2
+  // and 0xA8 ARE recorded (they mark host connects / probes in the timeline).
+  if (command_byte != GET_TELEMETRY_BLOCK_CMD) {
+    uint8_t plen = (claimed_len >= 1) ? (uint8_t)(claimed_len - 1) : 0;
+    Telemetry::cmd(t_rx_us, command_byte, current_source_->lastResponseStatus(), buf + 2, plen);
+  }
 }
 
 void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
@@ -1152,6 +1172,107 @@ void CommandProcessor::handleGetFirmwareVersion() {
 }
 
 // ---------------------------------------------------------------------------
+// Telemetry ring (issue #50 follow-on; layout + semantics in src/Telemetry.h,
+// README § Telemetry ring). Both opcodes were reserved by fw PR #47 for this
+// stream and are gated by the same capability bit 7 (`health`) as 0xCA/0xCB.
+//
+// set-telemetry (0xA8): [04 A8 flags rate_lo rate_hi] or [02 A8 flags].
+//   flags bit0 = record events (default ON at boot); bit7 = synthetic producer
+//   (bench test T1: a dummy CMD record, cmd 0xFE, at `rate` records/s, paced
+//   from loop(); off at boot); bits 1..6 reserved (analog ticks come later).
+//   The 2-byte form leaves `rate` unchanged. Reply: status 0, no payload.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::handleSetTelemetry(const ParsedCommand &cmd) {
+  const uint8_t *buf = cmd.data;
+  uint8_t claimed_len = buf[0];
+  if (claimed_len != 2 && claimed_len != 4) {
+    current_source_->sendResponse(SET_TELEMETRY_CMD, 1,
+                                  "Expected [04 A8 flags rate_lo rate_hi] or [02 A8 flags]");
+    return;
+  }
+  uint8_t flags = buf[2];
+  int32_t rate  = -1;  // -1 = unchanged (2-byte form)
+  if (claimed_len == 4) {
+    uint16_t r;
+    memcpy(&r, buf + 3, sizeof(r));
+    rate = r;
+  }
+  Telemetry::configure(flags, rate);  // records STATE(telemetry, flags, rate) itself
+  current_source_->sendResponse(SET_TELEMETRY_CMD, 0, "");
+  DBG_PRINTF("[cmd] set-telemetry flags=0x%02X rate=%ld\n", (unsigned)flags, (long)rate);
+}
+
+// ---------------------------------------------------------------------------
+// get-telemetry-block (0xA9): [08 A9 ack_seq(u32 LE) max_bytes(u16 LE) flags].
+//   1. Free (advance read_off past) every record with seq <= ack_seq.
+//      ack_seq = 0xFFFFFFFF means "no ack".
+//   2. Reply with the 18-byte block header + as many WHOLE records from
+//      read_off as fit in min(max_bytes, 178) bytes, WITHOUT advancing
+//      read_off — they are freed only by a later ack, so a lost reply is
+//      recovered by re-asking with the same ack_seq. `flags` is reserved.
+//
+// Reply payload (little-endian), 18-byte header then records verbatim:
+//   off  0  u32 t_now_us    micros() at reply time (host clock pairing)
+//   off  4  u32 first_seq   seq of the first returned record; 0 if none
+//   off  8  u16 n_records   records in this block
+//   off 10  u32 dropped     records dropped since the ring was initialised
+//   off 14  u8  more        1 if unread records remain after this block
+//   off 15  u8  flags       bit0 events_enabled, bit1 ring contents survived
+//                           a reboot (boot_count > 0 since init), bit2 ring
+//                           disabled: heap collision (Telemetry.h heap guard),
+//                           bit3 synthetic producer on
+//   off 16  u16 boot_count  boots that kept this ring (saturates at 65535)
+//
+// 178, not 180: SerialManager::sendResponse accepts a payload only while
+// 3 + payload_len < RESP_BUF_SIZE (200), i.e. payload <= 196 B, and the
+// header takes 18 of those.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::handleGetTelemetryBlock(const ParsedCommand &cmd) {
+  const uint8_t *buf = cmd.data;
+  uint8_t claimed_len = buf[0];
+  if (claimed_len < 7) {  // flags byte optional; ack_seq + max_bytes required
+    current_source_->sendResponse(GET_TELEMETRY_BLOCK_CMD, 1,
+                                  "Expected [08 A9 ack_seq(4) max_bytes(2) flags]");
+    return;
+  }
+  // A ring disabled by the heap guard still answers: header only, flags bit2
+  // set, counters 0 (the ring memory is not touched again this boot).
+  uint32_t ack_seq;
+  uint16_t max_bytes;
+  memcpy(&ack_seq,   buf + 2, sizeof(ack_seq));
+  memcpy(&max_bytes, buf + 6, sizeof(max_bytes));
+
+  constexpr size_t kBlockHeaderLen = 18;
+  constexpr size_t kPayloadMax     = byte_count_per_response_max - 4;  // 196: 3 framing bytes + payload < 200
+  constexpr size_t kRecordBytesMax = kPayloadMax - kBlockHeaderLen;    // 178
+  static_assert(kRecordBytesMax == 178, "GET_TELEMETRY_BLOCK record budget is 178 B");
+  static_assert(kRecordBytesMax >= Telemetry::kRecordLenMax,
+                "a block must be able to carry at least one maximal record");
+
+  Telemetry::ack(ack_seq);
+
+  uint8_t payload[kPayloadMax];
+  Telemetry::BlockInfo info;
+  size_t budget = (max_bytes < kRecordBytesMax) ? max_bytes : kRecordBytesMax;
+  size_t n = Telemetry::peek(payload + kBlockHeaderLen, budget, info);
+
+  uint8_t  flags = Telemetry::blockFlags();
+  uint32_t boots = Telemetry::bootCount();
+
+  uint8_t *p = payload;
+  p = put32(p, micros());
+  p = put32(p, info.first_seq);
+  p = put16(p, info.n_records);
+  p = put32(p, Telemetry::dropped());
+  p = put8 (p, info.more ? 1 : 0);
+  p = put8 (p, flags);
+  p = put16(p, boots > 0xFFFF ? 0xFFFF : (uint16_t)boots);
+  current_source_->sendResponse(GET_TELEMETRY_BLOCK_CMD, 0, payload, kBlockHeaderLen + n);
+}
+
+// ---------------------------------------------------------------------------
 // trial-params (0x08) — selects display mode 2/3/4 and the SD pattern.
 //
 // Payload layout (after the [len, 0x08] framing):
@@ -1264,6 +1385,9 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
                       "SET_FRAME_POSITION: frame read failed");
     return;
   }
+  if (state_ != ArenaState::SHOW_FRAME) {
+    Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::SHOW_FRAME, pattern_id_);
+  }
   state_ = ArenaState::SHOW_FRAME;
   if (!refresh_rate_explicit_) refresh_rate_hz_ = defaultRefreshFor(block_byte_count_);
   spi_.armRefreshTimer(refresh_rate_hz_);
@@ -1318,6 +1442,9 @@ void CommandProcessor::handleDisplayPsramIndex(const ParsedCommand &cmd) {
   psram_play_count_  = 1;          // static single index
   psram_play_offset_ = 0;
   buildPsramFrame(index);
+  if (state_ != ArenaState::PSRAM_PLAY) {
+    Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::PSRAM_PLAY, 0);
+  }
   state_ = ArenaState::PSRAM_PLAY;
   if (!refresh_rate_explicit_) refresh_rate_hz_ = defaultRefreshFor(block_byte_count_);
   spi_.armRefreshTimer(refresh_rate_hz_);
@@ -1344,6 +1471,9 @@ void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
   psram_play_offset_ = 0;
   frame_rate_hz_     = fps;          // animation advance rate (separate from refresh)
   buildPsramFrame(start);
+  if (state_ != ArenaState::PSRAM_PLAY) {
+    Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::PSRAM_PLAY, 0);
+  }
   state_ = ArenaState::PSRAM_PLAY;
   last_advance_us_ = micros();
   // Retransmit (refresh) faster than the animation advances so each index is
@@ -1383,7 +1513,19 @@ void CommandProcessor::serviceDisconnects() {
 void CommandProcessor::transmitOnRefresh() {
   if (spi_.refreshFlag) {
     spi_.refreshFlag = false;
+    uint32_t t0 = micros();
     spi_.transferFrame(frame_buf_, block_byte_count_);
+    // Telemetry FRAME (Telemetry.h): one record per displayed frame CHANGE —
+    // t_us = start of the SPI push (what the panels latch), spi_us = its
+    // duration, sd_load_us = the readFrame that produced this frame. Held
+    // frames (same index + pattern re-sent every refresh tick) are not
+    // recorded, so a 300 Hz refresh of a static frame costs nothing.
+    if (cur_frame_index_ != tel_last_frame_ || pattern_id_ != tel_last_pattern_) {
+      tel_last_frame_   = cur_frame_index_;
+      tel_last_pattern_ = pattern_id_;
+      Telemetry::frame(t0, cur_frame_index_, pattern_id_,
+                       Health::stats.last_sd_read_us, micros() - t0);
+    }
   }
 }
 
@@ -1711,6 +1853,11 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   Health::clear();
   ++Health::stats.sd_reads;
   if (t_sd > Health::stats.sd_read_max_us) Health::stats.sd_read_max_us = t_sd;
+  Health::stats.last_sd_read_us = t_sd;  // -> telemetry FRAME.sd_load_us
+  if (t_sd > Telemetry::kSdSlowThresholdUs) {
+    uint32_t hundreds = t_sd / 100;
+    Telemetry::state(Telemetry::ST_SD_SLOW, 0, hundreds > 0xFFFF ? 0xFFFF : (uint16_t)hundreds);
+  }
   if (err != CE_NONE) {
     DBG_PRINTF("[cmd] loadFrame %u failed err=%u\n",
                (unsigned)frame_index, (unsigned)err);
@@ -1751,6 +1898,7 @@ void CommandProcessor::enterAllOff() {
   }
   state_ = ArenaState::ALL_OFF;
   frame_byte_count_ = 0;
+  Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::ALL_OFF, pattern_id_);
   trial_duty_ = 0;  // trial over — per-trial duty does not outlive it (#33)
 }
 
@@ -1763,6 +1911,7 @@ void CommandProcessor::enterAllOn() {
   fillFrameBufferAllOn(block_byte_count_);
   state_ = ArenaState::ALL_ON;
   spi_.armRefreshTimer(refresh_rate_hz_);
+  Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::ALL_ON, 0);
 #ifdef DEBUG_SERIAL
   DBG_PRINTF("[cmd] enterAllOn block=%u refresh=%lu Hz frame_bytes=%u\n",
              (unsigned)block_byte_count_,
@@ -1779,6 +1928,7 @@ void CommandProcessor::enterStreamingFrame(uint16_t block_byte_count) {
   block_byte_count_ = block_byte_count;
   state_ = ArenaState::STREAMING_FRAME;
   spi_.armRefreshTimer(refresh_rate_hz_);
+  Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::STREAMING_FRAME, 0);
 }
 
 bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
@@ -1789,6 +1939,7 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
   Health::mark(Health::OP_SD_OPEN);  // #50 breadcrumb: SD open + header validate
   uint8_t err = sd_.openPattern(pattern_id);
   Health::clear();
+  Telemetry::state(Telemetry::ST_SD_OPEN, err, pattern_id);  // success and failure alike
   if (err != CE_NONE) {
     DBG_PRINTF("[cmd] openPattern %u failed err=%u\n",
                (unsigned)pattern_id, (unsigned)err);
@@ -1816,6 +1967,8 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
       : 0;
   state_ = mode;
   spi_.armRefreshTimer(refresh_rate_hz_);
+  Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)mode, pattern_id_);
+  tel_last_frame_ = tel_last_pattern_ = 0xFFFF;  // first refresh of the trial records a FRAME
   DBG_PRINTF("[cmd] enterPatternMode state=%u id=%u frames=%u rate=%u gain=%d\n",
              (unsigned)mode, (unsigned)pattern_id_, (unsigned)frame_count_,
              (unsigned)frame_rate_hz_, (int)gain_);
@@ -1828,6 +1981,7 @@ void CommandProcessor::showError(uint8_t code) {
   frame_byte_count_ = G6Error::buildErrorFrame(frame_buf_, code, panel_count_per_frame);
   state_ = ArenaState::ERROR_DISPLAY;
   error_until_ms_ = millis() + error_display_hold_ms;
+  Telemetry::state(Telemetry::ST_ERROR_GLYPH, code, 0);  // implies state_change -> ERROR_DISPLAY
   uint32_t r = refresh_rate_explicit_ ? refresh_rate_hz_
                                       : defaultRefreshFor(block_byte_count_);
   spi_.armRefreshTimer(r);

@@ -84,6 +84,12 @@ class CommandProcessor {
   uint32_t last_sample_us_  = 0;   // Mode 4 AIN sample clock
   float    frame_accum_     = 0.0f;// Mode 4 fractional-frame accumulator
   uint32_t trial_end_ms_    = 0;   // trial_params (0x08) Duration auto-stop deadline; 0 = not armed
+  // Telemetry FRAME de-dup (Telemetry.h): transmitOnRefresh records a FRAME
+  // only when the displayed index/pattern differs from the last one recorded.
+  // 0xFFFF = "nothing recorded yet" (reset in enterPatternMode so the first
+  // refresh of every trial is recorded even if it repeats the previous one).
+  uint16_t tel_last_frame_   = 0xFFFF;
+  uint16_t tel_last_pattern_ = 0xFFFF;
 
   // Digital IO roles (#135, SET_DIO_ROLE 0xAC). Ports are 1-based on the wire
   // (== the board's "Digital IO 1/2 (5V)" BNC silkscreen == 0xAA channel);
@@ -267,6 +273,8 @@ class CommandProcessor {
   void handleGetControllerInfo();
   void handleGetHealth();                                // get-health (0xCA) — O(1), no SD I/O (issue #50)
   void handleGetFirmwareVersion();                       // get-firmware-version (0xCB) — compiled-in git identity (src/Version.h)
+  void handleSetTelemetry(const ParsedCommand &cmd);     // set-telemetry (0xA8) — events on/off (src/Telemetry.h)
+  void handleGetTelemetryBlock(const ParsedCommand &cmd);// get-telemetry-block (0xA9) — ack cursor + framed chunk of ring records
   void handleDisplayPsramIndex(const ParsedCommand &cmd);
   void handlePsramPlay(const ParsedCommand &cmd);
   bool handleBulkWriteCommand(const ParsedCommand &cmd);  // true = handed off to serviceUpload; caller must not consume yet

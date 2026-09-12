@@ -31,6 +31,8 @@ GET_AO_VOLTAGE_CMD          = 0xA1   # [01 A1] returns hardware DAC readback as 
 SET_AO_LUT_CMD              = 0xA2   # [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
 SET_AO_MODE_CMD             = 0xA3   # [02 A3 mode] 0=programmable | 1=frame_number (DAC tracks frame index, 0-5V)
 GET_ANALOG_IN_CMD           = 0xA4   # [01 A4] returns Analog In 1+2 as two int16 LE mV (±10V front-end)
+SET_TELEMETRY_CMD           = 0xA8   # [04 A8 flags rate_lo rate_hi] or [02 A8 flags]; bit0 = record events (default ON), bit7 = synthetic producer at rate/s
+GET_TELEMETRY_BLOCK_CMD     = 0xA9   # [08 A9 ack_seq(u32) max_bytes(u16) flags] ack cursor + framed chunk of ring records; see telemetry_codec.py
 SET_DIGITAL_OUT_CMD         = 0xAA   # [03 AA ch state] drive "Digital IO 1/2 (5V)" BNC (role-gated, #135)
 GET_DIGITAL_OUT_CMD         = 0xAB   # [01 AB] returns Digital IO 1 and 2 data-pin state as two bytes
 SET_DIO_ROLE_CMD            = 0xAC   # [03 AC port role] 0=off 1=in_trigger 2=out_programmable 3=out_debug_framescan
