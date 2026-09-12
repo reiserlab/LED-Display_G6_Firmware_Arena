@@ -102,10 +102,13 @@ HEALTH_FIELDS = (
 # ver 2 (fw feat/telemetry-ring-2x10 fb11681+): 23-byte watchdog / ISR tail appended at offset 66.
 HEALTH_FMT_V2 = HEALTH_FMT + "BIIIBBII"
 HEALTH_LEN_V2 = struct.calcsize(HEALTH_FMT_V2)  # 89
+HEALTH_FMT_V3 = HEALTH_FMT_V2 + "II"  # + raw WDOG3_CS at boot / now
+HEALTH_LEN_V3 = struct.calcsize(HEALTH_FMT_V3)  # 97
 HEALTH_FIELDS_V2 = HEALTH_FIELDS + (
     "prev_isr_last", "prev_isr_count", "prev_wdog_pc", "prev_wdog_lr",
     "wdog_flags", "breadcrumb_isr_last", "breadcrumb_isr_count", "wdog_kicks",
 )
+HEALTH_FIELDS_V3 = HEALTH_FIELDS_V2 + ("wdog_cs_boot", "wdog_cs_now")
 HEALTH_ISRS = ("none", "refresh", "dma", "wdog")
 HEALTH_FMT_55 = "<BBIIIIIIBIIIIBHIBI"  # the 55-byte prefix (fields up to prev_breadcrumb_us)
 HEALTH_LEN_55 = struct.calcsize(HEALTH_FMT_55)
@@ -179,10 +182,17 @@ def decode_frames_sent(payload: bytes) -> Optional[int]:
 
 
 def decode_health(payload: bytes) -> Optional[dict]:
-    """GET_HEALTH (0xCA) -> dict. 89-byte ver-2, 66-byte ver-1, or the 55-byte prefix."""
+    """GET_HEALTH (0xCA) -> dict. 97-byte ver-3, 89-byte ver-2, 66-byte ver-1, or the 55-byte prefix."""
     if len(payload) >= HEALTH_LEN_V2:
-        vals = struct.unpack_from(HEALTH_FMT_V2, payload)
-        h = dict(zip(HEALTH_FIELDS_V2, vals))
+        if len(payload) >= HEALTH_LEN_V3:
+            vals = struct.unpack_from(HEALTH_FMT_V3, payload)
+            h = dict(zip(HEALTH_FIELDS_V3, vals))
+            h["wdog_cs_boot_hex"] = f"0x{h['wdog_cs_boot']:04X}"
+            h["wdog_cs_now_hex"] = f"0x{h['wdog_cs_now']:04X}"
+            h["wdog_cs_en"] = bool(h["wdog_cs_now"] & 0x80)
+        else:
+            vals = struct.unpack_from(HEALTH_FMT_V2, payload)
+            h = dict(zip(HEALTH_FIELDS_V2, vals))
         wf = h["wdog_flags"]
         h["wdog_armed"] = bool(wf & 0x01)
         h["prev_reset_was_wdog"] = bool(wf & 0x02)

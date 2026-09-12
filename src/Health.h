@@ -206,6 +206,10 @@ void watchdogStarve(bool on);
 // bit6 the last RTWDOG reprogramming FAILED (state unknown).
 uint8_t watchdogFlags();
 bool    watchdogArmed();
+// Raw WDOG3_CS: as found before the first programming (this silicon's reset
+// default — expected 0x2520: UPDATE, CLK=LPO, RCS, CMD32EN) and a live read.
+uint32_t watchdogCsAtBoot();
+uint32_t watchdogCsNow();
 
 // PJRC CrashReport region: the top 128 B of OCRAM (arm_fault_info_struct at
 // 0x2027FF80, 44 B, len field = 11 words; PJRC's own breadcrumbs at

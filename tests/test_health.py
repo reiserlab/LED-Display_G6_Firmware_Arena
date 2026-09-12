@@ -33,9 +33,9 @@ from .commands import (
 )
 
 # Payload layout — mirrors CommandProcessor::handleGetHealth() (all LE).
-HEALTH_FMT = "<BBIIIIIIBIIIIBHIBIBBIBI" + "BIIIBBII"  # v1 66 B + v2 tail 23 B (watchdog / ISR breadcrumb)
-HEALTH_LEN = struct.calcsize(HEALTH_FMT)  # 89
-HEALTH_VER = 2
+HEALTH_FMT = "<BBIIIIIIBIIIIBHIBIBBIBI" + "BIIIBBII" + "II"  # v1 66 B + v2 tail 23 B + v3 tail 8 B (raw WDOG3_CS)
+HEALTH_LEN = struct.calcsize(HEALTH_FMT)  # 97
+HEALTH_VER = 3
 
 Health = namedtuple(
     "Health",
@@ -47,6 +47,7 @@ Health = namedtuple(
         "prev_slow_op", "prev_slow_us", "slow_op", "slow_us",
         "prev_isr_last", "prev_isr_count", "prev_wdog_pc", "prev_wdog_lr",
         "wdog_flags", "breadcrumb_isr_last", "breadcrumb_isr_count", "wdog_kicks",
+        "wdog_cs_boot", "wdog_cs_now",
     ],
 )
 
@@ -188,7 +189,16 @@ def test_watchdog_armed_and_kicked(transport):
     a = read_health(transport)
     assert a.wdog_flags & WDOG_COMPILED, "this branch compiles the RTWDOG in"
     assert a.wdog_flags & WDOG_ARMED, "watchdog is armed by default at the end of setup()"
-    assert not (a.wdog_flags & WDOG_CONFIG_FAILED), "RTWDOG unlock/reconfigure must succeed"
+    assert not (a.wdog_flags & WDOG_CONFIG_FAILED), \
+        f"RTWDOG reconfigure failed: cs_boot={a.wdog_cs_boot:#06x} cs_now={a.wdog_cs_now:#06x}"
+    # Live CS must show what we programmed: EN (bit7), CMD32EN (bit13), PRES (bit12),
+    # UPDATE (bit5), INT (bit6), CLK=LPO (bits 8-9 = 01); FLG (bit14) clear.
+    cs = a.wdog_cs_now
+    assert cs & 0x0080, f"EN not set: {cs:#06x}"
+    assert cs & 0x2000 and cs & 0x1000 and cs & 0x0020 and cs & 0x0040, f"CS mode bits: {cs:#06x}"
+    assert (cs >> 8) & 0x3 == 1, f"CLK must be LPO: {cs:#06x}"
+    assert not (cs & 0x4000), f"FLG set (timeout pending?): {cs:#06x}"
+    assert a.wdog_cs_boot & 0x0020, f"reset default must have UPDATE=1 or we could never reconfigure: {a.wdog_cs_boot:#06x}"
     assert not (a.wdog_flags & (WDOG_SUSPENDED | WDOG_STARVING))
     time.sleep(0.2)
     b = read_health(transport)

@@ -187,9 +187,16 @@ breadcrumb survive exactly as they do for `SYSTEM_RESET`** (PJRC's CrashReport r
 property). Bench verification: `SET_TELEMETRY` flags **bit4 + bit5 = starve** stops the kicks (the check lives inside
 `watchdogKick()`, so every kick path honours it) → reset in 2 s → `GET_HEALTH` must show
 `wdog_flags` bit1 (previous reset was the watchdog), bit2 (PC captured), `breadcrumb_valid`, and the
-ring's `boot_count` incremented with the pre-reset records intact. Programming: `CS =
+ring's `boot_count` incremented with the pre-reset records intact. **Clock gate — the bench finding on the first flash (`wdog_flags = 0x49`, config failed):** the RTWDOG's
+bus clock is gated at boot (`imxrt.h`: *WDOG3 requires `CCM_CCGR5_WDOG3`*) and the Teensy core's
+`startup.c` never opens it, so every unlock/CS write was silently ignored. `rtwdogProgram()` now sets
+`CCM_CCGR5 |= CCM_CCGR5_WDOG3(ON)` first, records the CS reset default once (`wdog_cs_boot`), then
+follows the NXP order — unlock key(s) → `TOVAL`, `WIN`, `CS` **immediately** (no polling inside the
+128-bus-clock window) → wait `RCS` (≤ 2 LPO clocks) — and verifies the readback (`EN`, `TOVAL`)
+before declaring success; the refresh key width follows the `CMD32EN` bit actually in effect
+(32-bit `0xB480A602`, or `0xA602`/`0xB480`). Programming: `CS =
 CMD32EN | CLK(LPO 32 kHz) | PRES(/256) | UPDATE | INT | EN`, `TOVAL = 250` (125 Hz ticks → 2.000 s),
-unlock `0xD928C520`, refresh `0xB480A602`; `UPDATE=1` keeps it reconfigurable: **runtime disable** (flags bit4 + bit6) and the
+unlock `0xD928C520` (or the 16-bit pair `0xC520`, `0xD928` when CMD32EN is clear); `UPDATE=1` keeps it reconfigurable: **runtime disable** (flags bit4 + bit6) and the
 nesting-safe **long-operation window** `watchdogSuspend()/Resume()`, which re-programs `TOVAL` live
 to **30 s** (3750 ticks) for the operation and back to 2 s afterwards — the watchdog is **never
 fully off** during SD format / ISP / image upload, only slower. Every reprogramming (unlock →
@@ -222,7 +229,7 @@ from interrupt context (under a brief IRQ mask so nested ISRs cannot leave a sta
 harvested at boot independently of the breadcrumb: a main loop caught mid-`mark()` (checksummed
 fields dirty) can no longer invalidate the PC capture, and vice versa. SdFat/USB ISRs live in the
 core and are not hooked.
-`GET_HEALTH` is now **ver 2, 89 B** — offsets 0..65 unchanged, tail appended:
+`GET_HEALTH` is now **ver 3, 97 B** — offsets 0..65 unchanged, tail appended (ver 2 added 66–88, ver 3 added 89–96):
 
 | Off | Type | Field | Meaning |
 |---|---|---|---|
@@ -234,6 +241,8 @@ core and are not hooked.
 | 80 | u8 | `isr_last` | this boot: ISR currently inside (live) |
 | 81 | u32 | `isr_count` | this boot: ISR entries |
 | 85 | u32 | `wdog_kicks` | this boot: watchdog refreshes |
+| 89 | u32 | `wdog_cs_boot` | (ver 3) raw `WDOG3_CS` as found before the first programming — this silicon's reset default, expected `0x2520` (UPDATE, CLK=LPO, RCS, CMD32EN) |
+| 93 | u32 | `wdog_cs_now` | (ver 3) live `WDOG3_CS` readback: EN bit7, UPDATE bit5, INT bit6, CLK bits 8–9, RCS bit10, ULK bit11, PRES bit12, CMD32EN bit13, FLG bit14 |
 
 The telemetry `STATE(boot).arg` low byte gains **bit1 = previous boot ended in the watchdog ISR**
 (bit0 stays `prev_valid`; high byte = previous breadcrumb op).

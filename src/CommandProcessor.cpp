@@ -1088,6 +1088,9 @@ void CommandProcessor::handleGetControllerInfo() {
 //   off 80  u8  isr_last            THIS boot: ISR currently inside (live)
 //   off 81  u32 isr_count           THIS boot: ISR entries
 //   off 85  u32 wdog_kicks          THIS boot: watchdog refreshes
+//   ---- ver 3 tail (RTWDOG raw state for the bench) ----
+//   off 89  u32 wdog_cs_boot        WDOG3_CS as found before the first programming (reset default; expect 0x2520)
+//   off 93  u32 wdog_cs_now         WDOG3_CS live readback (EN bit7, CMD32EN bit13, RCS bit10, ULK bit11, FLG bit14)
 //
 // Bytes 0..54 are the layout agreed in issue #50; 55..65 are an additive
 // tail (a SYSTEM_RESET sent by the host is itself a dispatched command, so
@@ -1108,8 +1111,8 @@ inline uint8_t *put32(uint8_t *p, uint32_t v) {
 }  // namespace
 
 void CommandProcessor::handleGetHealth() {
-  constexpr uint8_t kHealthVersion    = 2;   // v2: +23 B watchdog / ISR tail (offsets 0..65 unchanged)
-  constexpr size_t  kHealthPayloadLen = 89;
+  constexpr uint8_t kHealthVersion    = 3;   // v2: +23 B watchdog / ISR tail; v3: +8 B raw WDOG3_CS (offsets 0..88 unchanged)
+  constexpr size_t  kHealthPayloadLen = 97;
   const Health::Stats &hs = Health::stats;
 
   uint8_t flags = 0;
@@ -1151,6 +1154,8 @@ void CommandProcessor::handleGetHealth() {
   p = put8 (p, Health::isrLast());
   p = put32(p, Health::isrCount());
   p = put32(p, hs.wdog_kicks);
+  p = put32(p, Health::watchdogCsAtBoot());
+  p = put32(p, Health::watchdogCsNow());
   static_assert(kHealthPayloadLen <= byte_count_per_response_max - 3,
                 "GET_HEALTH payload must fit one framed reply");
   current_source_->sendResponse(GET_HEALTH_CMD, 0, payload, (size_t)(p - payload));
@@ -1189,7 +1194,7 @@ void CommandProcessor::handleGetCrashReport() {
 //   off  2  u8   cols        panel_count_per_frame_col
 //   off  3  u8   flags       bit0 dirty working tree at build, bit1 DEBUG_SERIAL build,
 //                            bit2 telemetry ring compiled in (0xA8/0xA9 present),
-//                            bit3 GET_CRASHREPORT 0xCC + GET_HEALTH ver 2 present
+//                            bit3 GET_CRASHREPORT 0xCC + GET_HEALTH ver >= 2 present
 //   off  4  char sha[8]      short git SHA, lowercase hex; "unknown " without git
 //   off 12  char date[10]    build date UTC "YYYY-MM-DD"
 //   off 22  char branch[24]  git branch; "detached" for detached HEAD; "unknown"

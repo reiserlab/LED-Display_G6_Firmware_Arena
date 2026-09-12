@@ -74,6 +74,10 @@ bool     wd_starve_   = false;
 bool     wd_failed_   = false;                   // the LAST reprogramming failed (state unknown)
 bool     wd_irq_installed_ = false;
 uint8_t  wd_suspend_  = 0;
+bool     wd_cmd32_    = true;   // refresh-key width in effect (from the CS readback)
+uint32_t wd_cs_boot_  = 0;      // WDOG3_CS as found before the first programming (reset default on this silicon)
+uint32_t wd_cs_last_  = 0;      // WDOG3_CS read back after the last programming attempt
+bool     wd_cs_boot_captured_ = false;
 
 inline bool rtwdogSpin(uint32_t bit) {
   for (uint32_t i = 0; i < kSpinMax; ++i) {
@@ -84,24 +88,51 @@ inline bool rtwdogSpin(uint32_t bit) {
 
 // Program the RTWDOG (enable/disable, timeout) inside the unlock window, IRQs
 // off. The counter is refreshed right after, so the new period starts now.
+// Refresh key width must match the CMD32EN mode in effect.
+inline void rtwdogRefresh() {
+  if (wd_cmd32_) {
+    WDOG3_CNT = 0xB480A602UL;
+  } else {
+    WDOG3_CNT = 0xA602; WDOG3_CNT = 0xB480;
+  }
+}
+
 bool rtwdogProgram(bool enable, uint16_t toval) {
+  // The RTWDOG's bus clock is GATED at boot: imxrt.h notes "WDOG3 requires
+  // CCM_CCGR5_WDOG3" and the Teensy core's startup never enables it. With the
+  // gate closed every register write is ignored — the unlock never takes, ULK
+  // never sets, and the first build (fb11681) reported wdog_flags 0x49 (config
+  // failed) on the bench. Enable the gate first, then read the reset default
+  // once so the bench can see what this silicon says.
+  CCM_CCGR5 |= CCM_CCGR5_WDOG3(CCM_CCGR_ON);
+  asm volatile("dsb");
+  if (!wd_cs_boot_captured_) {
+    wd_cs_boot_ = WDOG3_CS;
+    wd_cs_boot_captured_ = true;
+  }
   uint32_t primask = readPrimask();
   __disable_irq();
+  // NXP sequence: unlock key(s) -> TOVAL, WIN, CS IMMEDIATELY (the 128-bus-clock
+  // reconfiguration window starts at the unlock; no polling in between) ->
+  // wait RCS (up to 2 LPO clocks, ~64 us). Key width follows the CMD32EN bit
+  // currently in effect; the new CS sets CMD32EN so refreshes are 32-bit.
   if (WDOG3_CS & WDOG_CS_CMD32EN) {
     WDOG3_CNT = 0xD928C520UL;                 // 32-bit unlock
   } else {
-    WDOG3_CNT = 0xC520; WDOG3_CNT = 0xD928;   // 16-bit unlock sequence
+    WDOG3_CNT = 0xC520; WDOG3_CNT = 0xD928;   // 16-bit unlock sequence (within 16 bus clocks)
   }
-  bool ok = rtwdogSpin(WDOG_CS_ULK);
-  if (ok) {
-    WDOG3_TOVAL = toval;
-    WDOG3_WIN   = 0;
-    WDOG3_CS    = WDOG_CS_CMD32EN | WDOG_CS_CLK(1) | WDOG_CS_PRES | WDOG_CS_UPDATE
-                | WDOG_CS_INT | (enable ? WDOG_CS_EN : 0);
-    ok = rtwdogSpin(WDOG_CS_RCS);   // reconfiguration success
-  }
+  WDOG3_TOVAL = toval;
+  WDOG3_WIN   = 0;
+  WDOG3_CS    = WDOG_CS_CMD32EN | WDOG_CS_CLK(1) | WDOG_CS_PRES | WDOG_CS_UPDATE
+              | WDOG_CS_INT | (enable ? WDOG_CS_EN : 0);
+  bool ok = rtwdogSpin(WDOG_CS_RCS);   // reconfiguration success (bounded, ~ms)
+  wd_cs_last_ = WDOG3_CS;
+  wd_cmd32_   = (wd_cs_last_ & WDOG_CS_CMD32EN) != 0;
   if (!primask) __enable_irq();
-  if (ok) WDOG3_CNT = 0xB480A602UL;  // refresh
+  // Trust the hardware readback, not just RCS: EN and TOVAL must read as programmed.
+  if (ok && ((wd_cs_last_ & WDOG_CS_EN) != 0) != enable) ok = false;
+  if (ok && WDOG3_TOVAL != toval) ok = false;
+  if (ok) rtwdogRefresh();  // the new period starts now
   return ok;
 }
 
@@ -292,7 +323,7 @@ void watchdogBegin() {
 
 void watchdogKick() {
   if (!wd_armed_ || wd_starve_) return;  // starve test lives HERE so every kick path honours it
-  WDOG3_CNT = 0xB480A602UL;
+  rtwdogRefresh();
   ++stats.wdog_kicks;
 }
 
@@ -333,5 +364,7 @@ uint8_t watchdogFlags() {
 }
 
 bool watchdogArmed() { return wd_armed_; }
+uint32_t watchdogCsAtBoot() { return wd_cs_boot_; }
+uint32_t watchdogCsNow()    { return WDOG3_CS; }
 
 }  // namespace Health

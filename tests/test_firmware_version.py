@@ -33,7 +33,7 @@ FirmwareVersion = namedtuple(
 FLAG_DIRTY = 0x01
 FLAG_DEBUG = 0x02
 FLAG_TELEMETRY = 0x04  # telemetry ring compiled in (0xA8/0xA9 present) — hosts gate SET_TELEMETRY on this
-FLAG_CRASHREPORT = 0x08  # GET_CRASHREPORT 0xCC + GET_HEALTH ver 2 present — hosts gate 0xCC on this
+FLAG_CRASHREPORT = 0x08  # GET_CRASHREPORT 0xCC + GET_HEALTH ver >= 2 present — hosts gate 0xCC on this
 
 # Arena geometry compiled into this branch (constants.h
 # panel_count_per_frame_row / _col): G6_2x10.
