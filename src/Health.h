@@ -176,7 +176,15 @@ uint8_t  isrLast();
 uint32_t isrCount();
 
 // ---- Hardware watchdog (RTWDOG = WDOG3, LPO 32 kHz / 256 -> 125 Hz ticks) ----
-constexpr uint32_t watchdog_timeout_ms = 2000;   // normal: every loop() must kick within this (TOVAL from the measured tick rate)
+constexpr uint32_t watchdog_timeout_ms = 2000;   // normal: every loop() must kick within this
+// EMPIRICAL expiry tick rate of the RTWDOG counter with CLK=LPO, PRES=/256 on
+// this silicon: TOVAL 250 expired in ~0.5 s and TOVAL 254 in ~0.52 s on the
+// bench (2026-09-12, builds 86eeb4a / 54b57d0) => ~500 Hz (a 128 kHz LPO).
+// The READABLE counter (WDOG3_CNT) advances at only ~127 Hz (= 32.768 kHz/256)
+// on the same hardware, so a CNT-based measurement under-reads the expiry
+// rate 4x — TOVAL is therefore derived from THIS constant; the CNT rate is
+// still measured and reported (wdog_tick_hz) as a diagnostic only.
+constexpr uint32_t watchdog_tick_hz    = 500;
 constexpr uint32_t watchdog_longop_ms  = 30000;  // finite window for SD format / ISP / image upload
 
 // begin() arms the RTWDOG early with a long provisional timeout (boot is
@@ -211,7 +219,8 @@ bool    watchdogArmed();
 // default — expected 0x2520: UPDATE, CLK=LPO, RCS, CMD32EN) and a live read.
 uint32_t watchdogCsAtBoot();
 uint32_t watchdogCsNow();
-// Measured counter tick rate (Hz; 0 until watchdogBegin ran), the live TOVAL
+// Measured WDOG3_CNT tick rate (Hz; DIAGNOSTIC ONLY — ~127 on this silicon,
+// 0 until watchdogBegin ran; TOVAL uses watchdog_tick_hz), the live TOVAL
 // readback, and the last verification bits: bit0 RCS timeout (advisory),
 // bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick rate fell back to the
 // default, bit4 the other unlock key width had to be retried.

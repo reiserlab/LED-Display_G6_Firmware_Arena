@@ -67,7 +67,8 @@ inline void sealIsr() {
 // by the Teensy core) is enabled before any access; and success is judged by
 // the EN / TOVAL readback after a settle, not by RCS (already 1 at reset).
 constexpr uint16_t kTovalProvisional = 0xFFFF;  // while measuring / during boot: >= 2 min at 500 Hz
-constexpr uint32_t kTickHzFallback   = 500;     // bench-measured; used only if the measurement fails
+// (The CNT measurement is diagnostic only since 54b57d0's bench round: it read
+// 127 Hz while TOVAL 254 expired in 0.52 s. TOVAL comes from watchdog_tick_hz.)
 constexpr uint32_t kSpinMax          = 100000;  // bounded: a mis-programmed RTWDOG must never brick boot
 constexpr uint32_t kSettleUs         = 300;     // > 2 LPO clocks at 32 kHz; reconfiguration latency
 
@@ -388,15 +389,11 @@ uint32_t isrCount() { return isr->isr_count; }
 void watchdogBegin() {
   if (!wd_compiled_ || !wd_wanted_) return;
   if (!wd_armed_) rtwdogEarlyArm();          // begin() was skipped or failed: try again
-  uint32_t hz = rtwdogMeasureTickHz();
-  if (hz == 0) {
-    hz = kTickHzFallback;
-    wd_verify_ |= 0x08;
-  } else {
-    wd_verify_ &= (uint8_t)~0x08;
-  }
-  wd_tick_hz_ = hz;
-  computeTovals(hz);
+  // Diagnostic: the readable counter's rate (expected ~127 Hz here). NOT used
+  // for timing — see watchdog_tick_hz in Health.h for why.
+  wd_tick_hz_ = rtwdogMeasureTickHz();
+  if (wd_tick_hz_ == 0) wd_verify_ |= 0x08; else wd_verify_ &= (uint8_t)~0x08;
+  computeTovals(watchdog_tick_hz);   // empirical expiry rate: 1000 ticks = 2.0 s, 15000 = 30 s
   rtwdogApply(true, wd_toval_normal_);
 }
 

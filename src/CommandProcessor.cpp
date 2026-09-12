@@ -1092,8 +1092,9 @@ void CommandProcessor::handleGetControllerInfo() {
 //   off 89  u32 wdog_cs_boot        WDOG3_CS as found before the first programming (reset default; expect 0x2520)
 //   off 93  u32 wdog_cs_now         WDOG3_CS live readback (EN bit7, CMD32EN bit13, RCS bit10, ULK bit11, FLG bit14)
 //   ---- ver 4 tail (measured timing) ----
-//   off 97  u32 wdog_tick_hz        measured RTWDOG counter tick rate (0 = not measured; ~500 on this silicon)
-//   off 101 u32 wdog_toval_now      WDOG3_TOVAL live readback (ticks; == tick_hz * 2 s normally, * 30 s in a long-op window)
+//   off 97  u32 wdog_tick_hz        DIAGNOSTIC: measured WDOG3_CNT read rate (~127 on this silicon; 0 = measurement failed).
+//                                   NOT the expiry rate — TOVAL uses Health::watchdog_tick_hz (500, empirical)
+//   off 101 u32 wdog_toval_now      WDOG3_TOVAL live readback (ticks; 1000 = 2.0 s normally, 15000 = 30 s in a long-op window)
 //   off 105 u8  wdog_verify         bit0 RCS timeout, bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick-rate fallback, bit4 key-width retry
 //
 // Bytes 0..54 are the layout agreed in issue #50; 55..65 are an additive

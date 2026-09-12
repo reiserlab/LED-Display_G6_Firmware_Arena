@@ -198,14 +198,26 @@ before declaring success; the refresh key width follows the `CMD32EN` bit actual
 CMD32EN | CLK(LPO 32 kHz) | PRES(/256) | UPDATE | INT | EN`, `TOVAL = 250` (125 Hz ticks → 2.000 s),
 unlock `0xD928C520` (or the 16-bit pair `0xC520`, `0xD928` when CMD32EN is clear);
 
+**Third bench round (54b57d0) — the counter you can read is not the counter that expires.** With
+the CNT-measured rate (127 Hz = 32.768 kHz ÷ 256) `TOVAL` was set to 254 for "2.0 s", yet the starve
+reset still came 0.52 s after the reply — `TOVAL` 254 expiring in ≤ 0.5 s means the comparator runs at
+≥ 500 Hz (= 128 kHz ÷ 256, or 32.768 kHz ÷ 64), **4× the rate `WDOG3_CNT` reads advance at**. The RT1060
+RM calls `CLK = 01` the 32 kHz LPO, which matches what CNT shows but not what the timeout does; whether
+CNT reads are decimated or the comparator is fed differently cannot be told from software. Conclusion
+and what the firmware does: `TOVAL` is derived from the **empirical expiry rate**
+`Health::watchdog_tick_hz = 500` (`1000` ticks = 2.0 s, `15000` = 30 s); the CNT measurement stays
+in the health tail as a diagnostic (`wdog_tick_hz`, expect ~127). Bench check for the constant: a
+starve (`SET_TELEMETRY 0x31`) must now drop the CDC port **~2.0 s** after the reply (+0.3 s to
+re-enumerate); if it is 8 s the two rates are the same after all and the constant should be 127.
+
 **Second bench round (86eeb4a) — two more findings, both fixed here.** (a) **The tick is ~500 Hz, not
 128 Hz:** the "LPO" feeding the RTWDOG on this silicon is 128 kHz, so `TOVAL = 250` expired in
 ~0.5 s (the starve test's CDC port vanished 0.5 s after the reply) — short enough to clip SdFat's
 1 s busy timeouts. `Health::begin()` now arms the RTWDOG early with a long provisional `TOVAL`
 (`0xFFFF`, > 2 min) so the whole boot is protected but never clipped, and `watchdogBegin()` (end of
-`setup()`) **measures** the counter (`WDOG3_CNT` edge-synced, ≥ 64 ticks or 400 ms) and derives
-`TOVAL` for 2.0 s / 30 s from the measured rate (`wdog_tick_hz`; fallback 500 Hz flagged in
-`wdog_verify` bit3). (b) **`wdog_flags` bit6 was a false negative:** `RCS` is already 1 in the reset
+`setup()`) measures the counter (`WDOG3_CNT` edge-synced, ≥ 64 ticks or 400 ms) — reported as
+`wdog_tick_hz` — and programs `TOVAL` for 2.0 s / 30 s (see the third round above for why the
+measured rate is a diagnostic only and the timing uses the empirical 500 Hz). (b) **`wdog_flags` bit6 was a false negative:** `RCS` is already 1 in the reset
 default and after any earlier configuration, so a spin on it returned before the reconfiguration
 latched and the `TOVAL` readback still showed the old value. Success is now judged from the `EN` +
 `TOVAL` readback after a 300 µs settle (RCS is advisory), with one retry using the other unlock key
@@ -259,8 +271,8 @@ core and are not hooked.
 | 85 | u32 | `wdog_kicks` | this boot: watchdog refreshes |
 | 89 | u32 | `wdog_cs_boot` | (ver 3) raw `WDOG3_CS` as found before the first programming — this silicon's reset default, expected `0x2520` (UPDATE, CLK=LPO, RCS, CMD32EN) |
 | 93 | u32 | `wdog_cs_now` | (ver 3) live `WDOG3_CS` readback: EN bit7, UPDATE bit5, INT bit6, CLK bits 8–9, RCS bit10, ULK bit11, PRES bit12, CMD32EN bit13, FLG bit14 |
-| 97 | u32 | `wdog_tick_hz` | (ver 4) **measured** RTWDOG counter tick rate — ~500 Hz on this silicon (128 kHz LPO ÷ 256), 0 until `watchdogBegin` ran |
-| 101 | u32 | `wdog_toval_now` | (ver 4) live `WDOG3_TOVAL` (ticks): `tick_hz × 2 s` normally, `× 30 s` inside a long-op window |
+| 97 | u32 | `wdog_tick_hz` | (ver 4) **diagnostic only**: measured `WDOG3_CNT` read rate — ~127 Hz on this silicon, 4× slower than the expiry rate; 0 = measurement failed. NOT used for timing |
+| 101 | u32 | `wdog_toval_now` | (ver 4) live `WDOG3_TOVAL` (ticks) programmed against the **empirical 500 Hz** expiry rate: `1000` = 2.0 s normally, `15000` = 30 s inside a long-op window |
 | 105 | u8 | `wdog_verify` | (ver 4) last programming: bit0 RCS timeout (advisory), bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick-rate measurement fell back to 500 Hz, bit4 retried with the other unlock key width |
 
 The telemetry `STATE(boot).arg` low byte gains **bit1 = previous boot ended in the watchdog ISR**

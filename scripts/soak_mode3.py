@@ -190,8 +190,10 @@ def decode_health(payload: bytes) -> Optional[dict]:
         if len(payload) >= HEALTH_LEN_V4:
             vals = struct.unpack_from(HEALTH_FMT_V4, payload)
             h = dict(zip(HEALTH_FIELDS_V4, vals))
-            if h["wdog_tick_hz"]:
-                h["wdog_timeout_s"] = round(h["wdog_toval_now"] / h["wdog_tick_hz"], 3)
+            # TOVAL is programmed against the EMPIRICAL 500 Hz expiry rate; the
+            # measured CNT rate (wdog_tick_hz, ~127) is a diagnostic only.
+            h["wdog_timeout_s"] = round(h["wdog_toval_now"] / 500.0, 3)
+            h["wdog_cnt_hz_measured"] = h["wdog_tick_hz"]
         elif len(payload) >= HEALTH_LEN_V3:
             vals = struct.unpack_from(HEALTH_FMT_V3, payload)
             h = dict(zip(HEALTH_FIELDS_V3, vals))
