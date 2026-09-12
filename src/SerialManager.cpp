@@ -1,5 +1,6 @@
 #include "SerialManager.h"
 #include "commands.h"
+#include "Health.h"
 
 void SerialManager::begin() {
   // Teensy 4's USB CDC port. The baud rate is informational on USB CDC
@@ -162,8 +163,10 @@ void SerialManager::flushResponses() {
   // response simply stays buffered. Harmless.)
   if (Serial.availableForWrite() < (int)resp_len_) return;
 
+  Health::mark(Health::OP_USB_WRITE);  // #50 breadcrumb: USB CDC write + flush
   Serial.write(resp_buf_, resp_len_);
   Serial.flush();
+  Health::clear();
   resp_len_ = 0;
 }
 

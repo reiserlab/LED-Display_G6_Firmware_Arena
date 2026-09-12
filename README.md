@@ -9,6 +9,8 @@ Current capabilities:
 - **G4 display Modes 2, 3, 4, and 5.** Mode 5 streams full arena frames over TCP/USB; Modes 2/3/4 play `.pat` files from the SD card (open-loop auto-advance, host-commanded frame, and AIN0 closed-loop velocity).
 - **Two command transports** — TCP (port 62222) and USB-CDC serial — sharing one parser and command set.
 - **`get-controller-info` (0xC2)** capability handshake and a **controller error display** ("CE / NN" glyph) for SD/CRC/parameter faults.
+- **`get-health` (0xCA)** read-only telemetry (loop/SD/SPI/USB counters, reset cause) plus a **reset-surviving breadcrumb** for soak-testing the Mode-3 streaming wedge (issue #50) — see [Health + breadcrumb](#health--breadcrumb-get-health-0xca).
+- **`get-firmware-version` (0xCB)** compiled-in **build identity** (git SHA, branch, dirty flag, UTC build date, arena rows×cols) so any controller can be pinned to the exact build it runs — see [Build identity](#build-identity-get-firmware-version-0xcb).
 - **Arena hardcoded to G6_2x10** — the panel-set table and CS pin map are baked in. Multi-arena lookup via [`g6_arena_configs.h`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_arena_configs.h) is deferred.
 - **10 MHz SPI**, MSB-first, **CPOL=1 / CPHA=1 (Mode 3)** per [`g6_01-panel-protocol.md`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_01-panel-protocol.md) § SPI framing. (Panels accept up to 30 MHz; the clock is held at 10 MHz during bring-up — see `spi_clock_speed` in `constants.h`.)
 - **G6 v2 `.pat` format** ([`g6_04-pattern-file-format.md`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_04-pattern-file-format.md)) is the on-disk file format the SD reader consumes.
@@ -78,6 +80,7 @@ All source files live in `src/`.
 | `ArenaConfig.h` | Hardcoded G6_2x10 panel-set table |
 | `constants.h` | Hardware constants, panel geometry, timing, SD/Mode-4/error constants |
 | `commands.h` | `ArenaCommands` enum (G4-compatible, G6-dropped commands marked) |
+| `Version.h` | Build identity constants (git SHA / branch / dirty / date) injected by `scripts/build_version.py`; reported by `GET_FIRMWARE_VERSION` (0xCB) |
 
 ## Host command protocol
 
@@ -105,6 +108,98 @@ tracks it and is updated alongside firmware changes.
 | 5 | Streaming | Host streams raw arena frames (the `0x32` path); no SD access |
 
 Mode is selected by the `TRIAL_PARAMS` payload (`mode`, `pattern_id`, `frame_rate`, `gain`, `init_pos`; see `commands.h` / `CommandProcessor.cpp` for the byte layout, which is still being reconciled with the host). Mode 1 (TSI Position Function) is **not** implemented — it is a v2 / PSRAM feature.
+
+### Health + breadcrumb (`GET_HEALTH`, 0xCA)
+
+[Issue #50](https://github.com/reiserlab/LED-Display_G6_Firmware_Arena/issues/50): during Mode-3
+host streaming (`SET_FRAME_POSITION` 0x70 at 100–286 Hz over USB-CDC) the controller sometimes
+degrades from ~2 ms to 100–500 ms per command and never recovers without a power cycle.
+`GET_HEALTH` is the read-only, O(1), no-SD-I/O opcode a soak harness polls (~1 Hz, and after a
+fault) to see the controller's side of that. Advertised by **capability bit 7 (`0x80`)** in
+`GET_CONTROLLER_INFO` (0xC2). Request `[01 CA]`; framed reply `status 0` + a 66-byte
+little-endian payload (`src/Health.h`, `CommandProcessor::handleGetHealth`; Python decoder in
+`tests/test_health.py`):
+
+| Off | Type | Field | Meaning |
+|---|---|---|---|
+| 0 | u8 | `ver` | payload schema version, `1` |
+| 1 | u8 | `flags` | bit0 `sd_mounted`, bit1 `pattern_open`, bit2 `display_active` (state ≠ ALL_OFF), bit3 `breadcrumb_valid` |
+| 2 | u32 | `uptime_ms` | `millis()` |
+| 6 | u32 | `loop_count` | `loop()` iterations since boot |
+| 10 | u32 | `loop_max_us` | longest `loop()` iteration since boot |
+| 14 | u32 | `loop_max_1s_us` | longest iteration in the most recent *completed* 1 s window (rolling, firmware-maintained) |
+| 18 | u32 | `sd_reads` | `SdManager::readFrame()` calls since boot |
+| 22 | u32 | `sd_read_max_us` | longest `readFrame()` since boot |
+| 26 | u8 | `sd_err` | SdFat card `errorCode()` (0 = none; the driver's cached last error, not a card query) |
+| 27 | u32 | `sd_err_data` | SdFat card `errorData()` |
+| 31 | u32 | `frames_sent` | frames pushed to panels (same counter as `GET_FRAMES_SENT` 0x33) |
+| 35 | u32 | `isr_count` | refresh-timer ISRs since boot |
+| 39 | u32 | `cmd70_count` | `SET_FRAME_POSITION` commands received since boot (rejected ones included) |
+| 43 | u8 | `state` | `ArenaState` (0 ALL_OFF, 1 ALL_ON, 2 STREAMING_FRAME, 3 OPEN_LOOP, 4 SHOW_FRAME, 5 CLOSED_LOOP, 6 PSRAM_PLAY, 7 ERROR_DISPLAY) |
+| 44 | u16 | `cur_frame` | current frame index |
+| 46 | u32 | `reset_cause` | `SRC_SRSR` captured once at boot, then cleared so the next boot reports only its own cause |
+| 50 | u8 | `prev_breadcrumb` | previous boot's `last_op` (see codes below; 0 = idle / none) |
+| 51 | u32 | `prev_breadcrumb_us` | `micros()` stamp of that op in the previous boot |
+| 55 | u8 | `prev_breadcrumb_arg` | opcode when `prev_breadcrumb` = 4 (command dispatch), else 0 |
+| 56 | u8 | `prev_slow_op` | previous boot's single slowest op |
+| 57 | u32 | `prev_slow_us` | …and its duration |
+| 61 | u8 | `slow_op` | this boot's single slowest op so far |
+| 62 | u32 | `slow_us` | …and its duration |
+
+Breadcrumb op codes (`Health::LastOp`): `0` idle, `1` SD `readFrame`, `2` SPI `transferFrame`,
+`3` USB-CDC response write (`flushResponses`), `4` command dispatch (opcode in the arg byte),
+`5` SD `openPattern`.
+
+Semantics:
+
+- **Nothing is clear-on-read.** Counters and maxima are cumulative since boot; a poller diffs
+  successive samples. `loop_max_1s_us` is the only rolling value.
+- **Breadcrumb.** Each potentially blocking call site stores its op code + `micros()` immediately
+  before the call and resets to idle after (innermost call wins when nested; the dispatch mark
+  brackets every handler). The record lives in uninitialized OCRAM (one cache line just below
+  PJRC's `CrashReport` area, flushed on every write) with a magic word + checksum, so it
+  **survives `SYSTEM_RESET` (0x01, `SCB_AIRCR` SYSRESETREQ) and a CPU lockup reset, but not a
+  power-on** — after a power cycle `breadcrumb_valid` is 0 and every `prev_*` field is 0. Because
+  a host-commanded reset is itself a dispatched command, `prev_breadcrumb` after a 0x01 reads
+  `4` / `0x01`; the `*slow_op` / `*slow_us` fields carry the "what was wedging" answer.
+- Hot-path cost per mark/clear is a few stores, one `micros()`, and a one-line dcache flush;
+  `handleSetFramePosition`'s SD/timer logic is untouched beyond the counter and marks.
+
+### Build identity (`GET_FIRMWARE_VERSION`, 0xCB)
+
+Every build embeds the git identity of the checkout it was compiled from, so a controller in the
+field can be pinned to an exact build (issue #50 could not be: `GET_CONTROLLER_INFO` 0xC2 carries
+only a protocol version byte — always `1` — plus the capability bitmap and MAC, and 0xE3 describes
+the *panel* image on the SD card, not the controller). Request `[01 CB]`; framed reply `status 0`
++ a **46-byte** payload. Read-only, O(1), no SD I/O — every field is a compile-time constant
+(`src/Version.h`, `CommandProcessor::handleGetFirmwareVersion`; Python decoder in
+`tests/test_firmware_version.py`). ASCII fields are right-padded with spaces, never NUL-terminated:
+
+| Off | Type | Field | Meaning |
+|---|---|---|---|
+| 0 | u8 | `ver` | payload schema version, `1` |
+| 1 | u8 | `rows` | `panel_count_per_frame_row` this build was compiled for |
+| 2 | u8 | `cols` | `panel_count_per_frame_col` |
+| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build) |
+| 4 | char[8] | `sha` | short git SHA, lowercase hex (`git rev-parse --short=8`); `unknown ` when git was unavailable |
+| 12 | char[10] | `date` | build date, UTC, `YYYY-MM-DD` |
+| 22 | char[24] | `branch` | git branch, truncated to 24; `detached` for a detached HEAD; `unknown` when unavailable |
+
+How it gets in: `scripts/build_version.py` is a PlatformIO `pre:` extra script (listed in
+`platformio.ini` after the USB-string and port-finder scripts). On every `pio run` it runs
+`git rev-parse --short=8 HEAD`, `git rev-parse --abbrev-ref HEAD`, and
+`git status --porcelain --untracked-files=no` (untracked files do not make a build dirty), stamps
+the UTC date, and appends `FW_GIT_SHA` / `FW_GIT_BRANCH` / `FW_BUILD_DATE` / `FW_GIT_DIRTY` as
+`-D` macros; `src/Version.h` provides `"unknown"` fallbacks so a build without git still compiles.
+Because pre: scripts re-run on every build, **rebuilding after a commit picks up the new SHA** —
+and because the macros are on the compile command line, that rebuild is a full one (SCons
+re-compiles every object when its command changes), not incremental. The `DEBUG_SERIAL` boot
+banner prints the same identity (`=== G6 arena controller fw <sha> (<branch>) built <date> … ===`).
+
+Hosts: Arena Studio reads 0xCB at connect and records it in every run log as
+`run_metadata.firmware`. 0xCB is gated by the same **capability bit 7 (`health`)** in 0xC2 as
+`GET_HEALTH` — both shipped in the same build, and older firmware flashes a `CE 01` error glyph
+on any unknown opcode, so a host must check the bit before asking.
 
 ## SD pattern playback (Modes 2/3/4)
 

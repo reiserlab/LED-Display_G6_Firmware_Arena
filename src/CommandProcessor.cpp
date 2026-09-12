@@ -1,6 +1,8 @@
 #include "CommandProcessor.h"
 #include "Crc.h"
 #include "ErrorGlyph.h"
+#include "Health.h"
+#include "Version.h"
 #include <Wire.h>
 
 using namespace AC;
@@ -142,6 +144,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
   DBG_PRINTF("[cmd] handleBinary cmd=0x%02X len=%u\n",
              command_byte, (unsigned)cmd.data_len);
 
+  // Health breadcrumb (issue #50): "dispatching opcode X". Handlers that hit
+  // SD/SPI re-mark with their own op (innermost wins); cleared after the switch.
+  Health::mark(Health::OP_CMD, command_byte);
+
   switch (command_byte) {
     case ALL_OFF_CMD:
       enterAllOff();
@@ -224,6 +230,14 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
 
     case GET_CONTROLLER_INFO_CMD:
       handleGetControllerInfo();
+      break;
+
+    case GET_HEALTH_CMD:
+      handleGetHealth();
+      break;
+
+    case GET_FIRMWARE_VERSION_CMD:
+      handleGetFirmwareVersion();
       break;
 
     case SET_DIAG_OUTPUT_CMD:
@@ -914,6 +928,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       current_source_->sendResponse(command_byte, 1, "Unknown command");
       break;
   }
+  Health::clear();
 }
 
 void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
@@ -986,6 +1001,154 @@ void CommandProcessor::handleGetControllerInfo() {
   DBG_PRINTF("[cmd] controller-info v=%u cap=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
              (unsigned)payload[0], (unsigned)payload[1], payload[2], payload[3],
              payload[4], payload[5], payload[6], payload[7]);
+}
+
+// ---------------------------------------------------------------------------
+// get-health (0xCA) — issue #50 soak-harness telemetry. Read-only, O(1), no
+// SD I/O (the SD error code is SdFat's cached last-error, not a card query).
+// Nothing here is clear-on-read: counters are cumulative since boot and a
+// poller diffs successive samples. Layout (all little-endian), 66 bytes:
+//
+//   off  0  u8  ver              = 1 (schema version of this payload)
+//   off  1  u8  flags            bit0 sd_mounted, bit1 pattern_open,
+//                                bit2 display_active (state != ALL_OFF — same
+//                                predicate as the CE_DISPLAY_ACTIVE guards),
+//                                bit3 breadcrumb_valid (prev_* fields usable)
+//   off  2  u32 uptime_ms        millis()
+//   off  6  u32 loop_count       loop() iterations since boot
+//   off 10  u32 loop_max_us      max loop() iteration since boot
+//   off 14  u32 loop_max_1s_us   max loop() iteration in the last COMPLETED 1 s window
+//   off 18  u32 sd_reads         readFrame() calls since boot
+//   off 22  u32 sd_read_max_us   max readFrame() duration since boot
+//   off 26  u8  sd_err           SdFat card errorCode() (0 = none)
+//   off 27  u32 sd_err_data      SdFat card errorData()
+//   off 31  u32 frames_sent      == GET_FRAMES_SENT (0x33)
+//   off 35  u32 isr_count        refresh-timer ISRs since boot
+//   off 39  u32 cmd70_count      SET_FRAME_POSITION commands RECEIVED (incl. rejected)
+//   off 43  u8  state            ArenaState (0 ALL_OFF .. 7 ERROR_DISPLAY)
+//   off 44  u16 cur_frame        cur_frame_index_
+//   off 46  u32 reset_cause      SRC_SRSR captured at boot (then cleared)
+//   off 50  u8  prev_breadcrumb     previous boot's last_op (Health::LastOp; 0 = idle/none)
+//   off 51  u32 prev_breadcrumb_us  micros() stamp of that op in the previous boot
+//   off 55  u8  prev_breadcrumb_arg opcode when prev_breadcrumb == OP_CMD, else 0
+//   off 56  u8  prev_slow_op        previous boot's slowest single op
+//   off 57  u32 prev_slow_us        ...and its duration
+//   off 61  u8  slow_op             THIS boot's slowest single op so far
+//   off 62  u32 slow_us             ...and its duration
+//
+// Bytes 0..54 are the layout agreed in issue #50; 55..65 are an additive
+// tail (a SYSTEM_RESET sent by the host is itself a dispatched command, so
+// prev_breadcrumb after a commanded reset always reads OP_CMD/0x01 — the
+// slow-op fields are what carry the "what was wedging" answer).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+inline uint8_t *put8(uint8_t *p, uint8_t v)   { *p++ = v; return p; }
+inline uint8_t *put16(uint8_t *p, uint16_t v) { *p++ = (uint8_t)v; *p++ = (uint8_t)(v >> 8); return p; }
+inline uint8_t *put32(uint8_t *p, uint32_t v) {
+  *p++ = (uint8_t)v; *p++ = (uint8_t)(v >> 8);
+  *p++ = (uint8_t)(v >> 16); *p++ = (uint8_t)(v >> 24);
+  return p;
+}
+
+}  // namespace
+
+void CommandProcessor::handleGetHealth() {
+  constexpr uint8_t kHealthVersion    = 1;
+  constexpr size_t  kHealthPayloadLen = 66;
+  const Health::Stats &hs = Health::stats;
+
+  uint8_t flags = 0;
+  if (sd_.available())                flags |= 0x01;
+  if (sd_.patternOpen())              flags |= 0x02;
+  if (state_ != ArenaState::ALL_OFF)  flags |= 0x04;
+  if (hs.prev_valid)                  flags |= 0x08;
+
+  uint8_t payload[kHealthPayloadLen];
+  uint8_t *p = payload;
+  p = put8 (p, kHealthVersion);
+  p = put8 (p, flags);
+  p = put32(p, millis());
+  p = put32(p, hs.loop_count);
+  p = put32(p, hs.loop_max_us);
+  p = put32(p, hs.loop_max_1s_us);
+  p = put32(p, hs.sd_reads);
+  p = put32(p, hs.sd_read_max_us);
+  p = put8 (p, sd_.cardErrorCode());
+  p = put32(p, sd_.cardErrorData());
+  p = put32(p, spi_.framesSent());
+  p = put32(p, spi_.isr_count_);
+  p = put32(p, hs.cmd70_count);
+  p = put8 (p, (uint8_t)state_);
+  p = put16(p, cur_frame_index_);
+  p = put32(p, hs.reset_cause);
+  p = put8 (p, hs.prev_last_op);
+  p = put32(p, hs.prev_stamp_us);
+  p = put8 (p, hs.prev_op_arg);
+  p = put8 (p, hs.prev_slow_op);
+  p = put32(p, hs.prev_slow_us);
+  p = put8 (p, Health::slowOp());
+  p = put32(p, Health::slowUs());
+  static_assert(kHealthPayloadLen <= byte_count_per_response_max - 3,
+                "GET_HEALTH payload must fit one framed reply");
+  current_source_->sendResponse(GET_HEALTH_CMD, 0, payload, (size_t)(p - payload));
+}
+
+// ---------------------------------------------------------------------------
+// get-firmware-version (0xCB) — which build is this controller running?
+// Read-only, O(1), no SD I/O: every value is a compile-time constant from
+// src/Version.h, injected per build by scripts/build_version.py from the git
+// checkout. Advertised by the same capability bit 7 as 0xCA (both shipped in
+// the same build; older firmware flashes CE 01 on an unknown opcode, so hosts
+// gate on the bit rather than probing). Layout, 46 bytes, ASCII fields
+// right-padded with spaces (never NUL-terminated on the wire):
+//
+//   off  0  u8   ver         = 1 (schema version of this payload)
+//   off  1  u8   rows        panel_count_per_frame_row (this build's arena)
+//   off  2  u8   cols        panel_count_per_frame_col
+//   off  3  u8   flags       bit0 dirty working tree at build, bit1 DEBUG_SERIAL build
+//   off  4  char sha[8]      short git SHA, lowercase hex; "unknown " without git
+//   off 12  char date[10]    build date UTC "YYYY-MM-DD"
+//   off 22  char branch[24]  git branch; "detached" for detached HEAD; "unknown"
+//                            when unavailable; truncated to 24
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Copy src into a fixed-width field: truncate to `len`, right-pad with spaces.
+inline uint8_t *putField(uint8_t *p, const char *src, size_t len) {
+  size_t i = 0;
+  for (; i < len && src[i] != '\0'; ++i) *p++ = (uint8_t)src[i];
+  for (; i < len; ++i) *p++ = ' ';
+  return p;
+}
+
+}  // namespace
+
+void CommandProcessor::handleGetFirmwareVersion() {
+  using namespace AC::version;
+  uint8_t flags = 0;
+  if (fw_git_dirty)   flags |= fw_flag_dirty;
+  if (fw_debug_build) flags |= fw_flag_debug;
+
+  uint8_t payload[fw_version_payload_len];
+  uint8_t *p = payload;
+  p = put8(p, fw_version_payload_version);
+  p = put8(p, panel_count_per_frame_row);
+  p = put8(p, panel_count_per_frame_col);
+  p = put8(p, flags);
+  p = putField(p, fw_git_sha,    fw_sha_field_len);
+  p = putField(p, fw_build_date, fw_date_field_len);
+  p = putField(p, fw_git_branch, fw_branch_field_len);
+  static_assert(fw_version_payload_len == 46, "GET_FIRMWARE_VERSION payload is 46 bytes");
+  static_assert(fw_version_payload_len <= byte_count_per_response_max - 3,
+                "GET_FIRMWARE_VERSION payload must fit one framed reply");
+  current_source_->sendResponse(GET_FIRMWARE_VERSION_CMD, 0, payload, (size_t)(p - payload));
+  DBG_PRINTF("[cmd] firmware-version %s%s (%s) built %s, %ux%u%s\n",
+             fw_git_sha, fw_git_dirty ? "-dirty" : "", fw_git_branch, fw_build_date,
+             (unsigned)panel_count_per_frame_row, (unsigned)panel_count_per_frame_col,
+             fw_debug_build ? " DEBUG_SERIAL" : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,6 +1234,7 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
+  ++Health::stats.cmd70_count;  // every 0x70 received, rejected or not (#50)
   uint8_t param_len = cmd.data[0] - 1;
   if (param_len < 2) {
     showError(CE_BAD_PAYLOAD_LEN);
@@ -1539,7 +1703,14 @@ void CommandProcessor::serviceClosedLoop() {
 }
 
 bool CommandProcessor::loadFrame(uint16_t frame_index) {
+  // Health (#50): breadcrumb + readFrame timing. Only caller of readFrame.
+  Health::mark(Health::OP_SD_READ);
+  uint32_t t_sd = micros();
   uint8_t err = sd_.readFrame(frame_index, frame_buf_, sizeof(frame_buf_));
+  t_sd = micros() - t_sd;
+  Health::clear();
+  ++Health::stats.sd_reads;
+  if (t_sd > Health::stats.sd_read_max_us) Health::stats.sd_read_max_us = t_sd;
   if (err != CE_NONE) {
     DBG_PRINTF("[cmd] loadFrame %u failed err=%u\n",
                (unsigned)frame_index, (unsigned)err);
@@ -1615,7 +1786,9 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
                                         uint16_t init_frame, uint16_t duration_ticks) {
   spi_.disarmRefreshTimer();
 
+  Health::mark(Health::OP_SD_OPEN);  // #50 breadcrumb: SD open + header validate
   uint8_t err = sd_.openPattern(pattern_id);
+  Health::clear();
   if (err != CE_NONE) {
     DBG_PRINTF("[cmd] openPattern %u failed err=%u\n",
                (unsigned)pattern_id, (unsigned)err);

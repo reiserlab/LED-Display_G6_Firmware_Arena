@@ -1,5 +1,6 @@
 #include "SpiManager.h"
 #include "G6PanelProtocol.h"
+#include "Health.h"
 
 using namespace AC;
 using namespace AC::constants;
@@ -174,6 +175,7 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
     return;
   }
   ++frames_sent_;
+  Health::mark(Health::OP_SPI_FRAME);  // #50 breadcrumb; cleared at function end
 
   // Frame-scan gate HIGH: envelope opens just before the first panel set's
   // SPI transaction (out_debug_framescan, #135). digitalWrite (not Fast):
@@ -242,6 +244,7 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
   // actual SPI time.
   if (framescan_pin_a_ >= 0) digitalWrite((uint8_t)framescan_pin_a_, LOW);
   if (framescan_pin_b_ >= 0) digitalWrite((uint8_t)framescan_pin_b_, LOW);
+  Health::clear();  // SPI frame done (the diag dump below is USB, not SPI)
 
 #ifdef DEBUG_SERIAL
   if (capture) {
