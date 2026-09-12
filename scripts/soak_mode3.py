@@ -104,11 +104,14 @@ HEALTH_FMT_V2 = HEALTH_FMT + "BIIIBBII"
 HEALTH_LEN_V2 = struct.calcsize(HEALTH_FMT_V2)  # 89
 HEALTH_FMT_V3 = HEALTH_FMT_V2 + "II"  # + raw WDOG3_CS at boot / now
 HEALTH_LEN_V3 = struct.calcsize(HEALTH_FMT_V3)  # 97
+HEALTH_FMT_V4 = HEALTH_FMT_V3 + "IIB"  # + measured tick Hz, live TOVAL, verify bits
+HEALTH_LEN_V4 = struct.calcsize(HEALTH_FMT_V4)  # 106
 HEALTH_FIELDS_V2 = HEALTH_FIELDS + (
     "prev_isr_last", "prev_isr_count", "prev_wdog_pc", "prev_wdog_lr",
     "wdog_flags", "breadcrumb_isr_last", "breadcrumb_isr_count", "wdog_kicks",
 )
 HEALTH_FIELDS_V3 = HEALTH_FIELDS_V2 + ("wdog_cs_boot", "wdog_cs_now")
+HEALTH_FIELDS_V4 = HEALTH_FIELDS_V3 + ("wdog_tick_hz", "wdog_toval_now", "wdog_verify")
 HEALTH_ISRS = ("none", "refresh", "dma", "wdog")
 HEALTH_FMT_55 = "<BBIIIIIIBIIIIBHIBI"  # the 55-byte prefix (fields up to prev_breadcrumb_us)
 HEALTH_LEN_55 = struct.calcsize(HEALTH_FMT_55)
@@ -184,7 +187,12 @@ def decode_frames_sent(payload: bytes) -> Optional[int]:
 def decode_health(payload: bytes) -> Optional[dict]:
     """GET_HEALTH (0xCA) -> dict. 97-byte ver-3, 89-byte ver-2, 66-byte ver-1, or the 55-byte prefix."""
     if len(payload) >= HEALTH_LEN_V2:
-        if len(payload) >= HEALTH_LEN_V3:
+        if len(payload) >= HEALTH_LEN_V4:
+            vals = struct.unpack_from(HEALTH_FMT_V4, payload)
+            h = dict(zip(HEALTH_FIELDS_V4, vals))
+            if h["wdog_tick_hz"]:
+                h["wdog_timeout_s"] = round(h["wdog_toval_now"] / h["wdog_tick_hz"], 3)
+        elif len(payload) >= HEALTH_LEN_V3:
             vals = struct.unpack_from(HEALTH_FMT_V3, payload)
             h = dict(zip(HEALTH_FIELDS_V3, vals))
             h["wdog_cs_boot_hex"] = f"0x{h['wdog_cs_boot']:04X}"

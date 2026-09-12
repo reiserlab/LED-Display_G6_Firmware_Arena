@@ -33,9 +33,9 @@ from .commands import (
 )
 
 # Payload layout — mirrors CommandProcessor::handleGetHealth() (all LE).
-HEALTH_FMT = "<BBIIIIIIBIIIIBHIBIBBIBI" + "BIIIBBII" + "II"  # v1 66 B + v2 tail 23 B + v3 tail 8 B (raw WDOG3_CS)
-HEALTH_LEN = struct.calcsize(HEALTH_FMT)  # 97
-HEALTH_VER = 3
+HEALTH_FMT = "<BBIIIIIIBIIIIBHIBIBBIBI" + "BIIIBBII" + "II" + "IIB"  # v1 66 + v2 23 + v3 8 + v4 9 B
+HEALTH_LEN = struct.calcsize(HEALTH_FMT)  # 106
+HEALTH_VER = 4
 
 Health = namedtuple(
     "Health",
@@ -47,7 +47,7 @@ Health = namedtuple(
         "prev_slow_op", "prev_slow_us", "slow_op", "slow_us",
         "prev_isr_last", "prev_isr_count", "prev_wdog_pc", "prev_wdog_lr",
         "wdog_flags", "breadcrumb_isr_last", "breadcrumb_isr_count", "wdog_kicks",
-        "wdog_cs_boot", "wdog_cs_now",
+        "wdog_cs_boot", "wdog_cs_now", "wdog_tick_hz", "wdog_toval_now", "wdog_verify",
     ],
 )
 
@@ -199,6 +199,14 @@ def test_watchdog_armed_and_kicked(transport):
     assert (cs >> 8) & 0x3 == 1, f"CLK must be LPO: {cs:#06x}"
     assert not (cs & 0x4000), f"FLG set (timeout pending?): {cs:#06x}"
     assert a.wdog_cs_boot & 0x0020, f"reset default must have UPDATE=1 or we could never reconfigure: {a.wdog_cs_boot:#06x}"
+    # Timing is derived from a MEASURED tick rate (~500 Hz on this silicon): the
+    # live TOVAL must give 2.0 s +- 10 % unless a long-op window is open.
+    assert not (a.wdog_verify & 0x08), "tick-rate measurement fell back to the default"
+    assert not (a.wdog_verify & 0x06), f"EN/TOVAL readback mismatch: verify={a.wdog_verify:#04x}"
+    assert 100 <= a.wdog_tick_hz <= 200_000, f"implausible tick rate {a.wdog_tick_hz} Hz"
+    if not (a.wdog_flags & WDOG_SUSPENDED):
+        timeout_s = a.wdog_toval_now / a.wdog_tick_hz
+        assert 1.8 <= timeout_s <= 2.2, f"effective timeout {timeout_s:.2f} s (toval {a.wdog_toval_now}, {a.wdog_tick_hz} Hz)"
     assert not (a.wdog_flags & (WDOG_SUSPENDED | WDOG_STARVING))
     time.sleep(0.2)
     b = read_health(transport)

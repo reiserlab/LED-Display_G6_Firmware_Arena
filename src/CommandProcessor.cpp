@@ -1091,6 +1091,10 @@ void CommandProcessor::handleGetControllerInfo() {
 //   ---- ver 3 tail (RTWDOG raw state for the bench) ----
 //   off 89  u32 wdog_cs_boot        WDOG3_CS as found before the first programming (reset default; expect 0x2520)
 //   off 93  u32 wdog_cs_now         WDOG3_CS live readback (EN bit7, CMD32EN bit13, RCS bit10, ULK bit11, FLG bit14)
+//   ---- ver 4 tail (measured timing) ----
+//   off 97  u32 wdog_tick_hz        measured RTWDOG counter tick rate (0 = not measured; ~500 on this silicon)
+//   off 101 u32 wdog_toval_now      WDOG3_TOVAL live readback (ticks; == tick_hz * 2 s normally, * 30 s in a long-op window)
+//   off 105 u8  wdog_verify         bit0 RCS timeout, bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick-rate fallback, bit4 key-width retry
 //
 // Bytes 0..54 are the layout agreed in issue #50; 55..65 are an additive
 // tail (a SYSTEM_RESET sent by the host is itself a dispatched command, so
@@ -1111,8 +1115,8 @@ inline uint8_t *put32(uint8_t *p, uint32_t v) {
 }  // namespace
 
 void CommandProcessor::handleGetHealth() {
-  constexpr uint8_t kHealthVersion    = 3;   // v2: +23 B watchdog / ISR tail; v3: +8 B raw WDOG3_CS (offsets 0..88 unchanged)
-  constexpr size_t  kHealthPayloadLen = 97;
+  constexpr uint8_t kHealthVersion    = 4;   // v2 +23 B watchdog/ISR; v3 +8 B raw CS; v4 +9 B measured timing (offsets never move)
+  constexpr size_t  kHealthPayloadLen = 106;
   const Health::Stats &hs = Health::stats;
 
   uint8_t flags = 0;
@@ -1156,6 +1160,9 @@ void CommandProcessor::handleGetHealth() {
   p = put32(p, hs.wdog_kicks);
   p = put32(p, Health::watchdogCsAtBoot());
   p = put32(p, Health::watchdogCsNow());
+  p = put32(p, Health::watchdogTickHz());
+  p = put32(p, Health::watchdogTovalNow());
+  p = put8 (p, Health::watchdogVerify());
   static_assert(kHealthPayloadLen <= byte_count_per_response_max - 3,
                 "GET_HEALTH payload must fit one framed reply");
   current_source_->sendResponse(GET_HEALTH_CMD, 0, payload, (size_t)(p - payload));

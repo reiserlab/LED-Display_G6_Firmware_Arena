@@ -132,9 +132,10 @@ void setup() {
 
   setupInterruptPriorities();
 
-  // LAST: arm the 2 s hardware watchdog (RTWDOG, Health.h). Everything above
-  // (SD mount, boot blink, USB settle) ran unguarded; from here loop() must
-  // kick it every iteration or the controller resets WITH the breadcrumb +
+  // LAST: measure the RTWDOG tick rate and program the real 2 s timeout
+  // (Health::begin() already armed it with a long provisional timeout, so the
+  // boot above was protected but never clipped). From here loop() must kick
+  // it every iteration or the controller resets WITH the breadcrumb +
   // telemetry ring intact (the #50 hang becomes a self-healing reboot).
   Health::watchdogBegin();
 }

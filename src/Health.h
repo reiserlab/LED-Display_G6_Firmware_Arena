@@ -176,11 +176,12 @@ uint8_t  isrLast();
 uint32_t isrCount();
 
 // ---- Hardware watchdog (RTWDOG = WDOG3, LPO 32 kHz / 256 -> 125 Hz ticks) ----
-constexpr uint32_t watchdog_timeout_ms = 2000;   // normal: every loop() must kick within this
+constexpr uint32_t watchdog_timeout_ms = 2000;   // normal: every loop() must kick within this (TOVAL from the measured tick rate)
 constexpr uint32_t watchdog_longop_ms  = 30000;  // finite window for SD format / ISP / image upload
 
-// Arm at the END of setup() (SD mount, blink, USB settle run unguarded). Also
-// installs the pre-reset interrupt that captures the stacked PC/LR.
+// begin() arms the RTWDOG early with a long provisional timeout (boot is
+// protected, never clipped); call this at the END of setup() to MEASURE the
+// counter tick rate and program the real 2 s timeout from it.
 void watchdogBegin();
 // Refresh. Called by loopTick(); ALSO call from any bounded spin that runs in
 // main-loop context for longer than the timeout (sendRaw, drainBulkData, the
@@ -210,6 +211,13 @@ bool    watchdogArmed();
 // default — expected 0x2520: UPDATE, CLK=LPO, RCS, CMD32EN) and a live read.
 uint32_t watchdogCsAtBoot();
 uint32_t watchdogCsNow();
+// Measured counter tick rate (Hz; 0 until watchdogBegin ran), the live TOVAL
+// readback, and the last verification bits: bit0 RCS timeout (advisory),
+// bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick rate fell back to the
+// default, bit4 the other unlock key width had to be retried.
+uint32_t watchdogTickHz();
+uint32_t watchdogTovalNow();
+uint8_t  watchdogVerify();
 
 // PJRC CrashReport region: the top 128 B of OCRAM (arm_fault_info_struct at
 // 0x2027FF80, 44 B, len field = 11 words; PJRC's own breadcrumbs at

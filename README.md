@@ -196,7 +196,23 @@ follows the NXP order — unlock key(s) → `TOVAL`, `WIN`, `CS` **immediately**
 before declaring success; the refresh key width follows the `CMD32EN` bit actually in effect
 (32-bit `0xB480A602`, or `0xA602`/`0xB480`). Programming: `CS =
 CMD32EN | CLK(LPO 32 kHz) | PRES(/256) | UPDATE | INT | EN`, `TOVAL = 250` (125 Hz ticks → 2.000 s),
-unlock `0xD928C520` (or the 16-bit pair `0xC520`, `0xD928` when CMD32EN is clear); `UPDATE=1` keeps it reconfigurable: **runtime disable** (flags bit4 + bit6) and the
+unlock `0xD928C520` (or the 16-bit pair `0xC520`, `0xD928` when CMD32EN is clear);
+
+**Second bench round (86eeb4a) — two more findings, both fixed here.** (a) **The tick is ~500 Hz, not
+128 Hz:** the "LPO" feeding the RTWDOG on this silicon is 128 kHz, so `TOVAL = 250` expired in
+~0.5 s (the starve test's CDC port vanished 0.5 s after the reply) — short enough to clip SdFat's
+1 s busy timeouts. `Health::begin()` now arms the RTWDOG early with a long provisional `TOVAL`
+(`0xFFFF`, > 2 min) so the whole boot is protected but never clipped, and `watchdogBegin()` (end of
+`setup()`) **measures** the counter (`WDOG3_CNT` edge-synced, ≥ 64 ticks or 400 ms) and derives
+`TOVAL` for 2.0 s / 30 s from the measured rate (`wdog_tick_hz`; fallback 500 Hz flagged in
+`wdog_verify` bit3). (b) **`wdog_flags` bit6 was a false negative:** `RCS` is already 1 in the reset
+default and after any earlier configuration, so a spin on it returned before the reconfiguration
+latched and the `TOVAL` readback still showed the old value. Success is now judged from the `EN` +
+`TOVAL` readback after a 300 µs settle (RCS is advisory), with one retry using the other unlock key
+width. Observed CS values: reset default `0x2520`; after programming **`0x35E0`** (CMD32EN, PRES,
+RCS, CLK=LPO, EN, INT, UPDATE); after a **watchdog reset `0x31E0`** — the block keeps its registers
+across the reset it causes (EN still set, RCS clear), which is why the early arm first refreshes a
+still-running watchdog before reprogramming it. `UPDATE=1` keeps it reconfigurable: **runtime disable** (flags bit4 + bit6) and the
 nesting-safe **long-operation window** `watchdogSuspend()/Resume()`, which re-programs `TOVAL` live
 to **30 s** (3750 ticks) for the operation and back to 2 s afterwards — the watchdog is **never
 fully off** during SD format / ISP / image upload, only slower. Every reprogramming (unlock →
@@ -229,7 +245,7 @@ from interrupt context (under a brief IRQ mask so nested ISRs cannot leave a sta
 harvested at boot independently of the breadcrumb: a main loop caught mid-`mark()` (checksummed
 fields dirty) can no longer invalidate the PC capture, and vice versa. SdFat/USB ISRs live in the
 core and are not hooked.
-`GET_HEALTH` is now **ver 3, 97 B** — offsets 0..65 unchanged, tail appended (ver 2 added 66–88, ver 3 added 89–96):
+`GET_HEALTH` is now **ver 4, 106 B** — offsets never move; tails appended (ver 2: 66–88, ver 3: 89–96, ver 4: 97–105):
 
 | Off | Type | Field | Meaning |
 |---|---|---|---|
@@ -243,6 +259,9 @@ core and are not hooked.
 | 85 | u32 | `wdog_kicks` | this boot: watchdog refreshes |
 | 89 | u32 | `wdog_cs_boot` | (ver 3) raw `WDOG3_CS` as found before the first programming — this silicon's reset default, expected `0x2520` (UPDATE, CLK=LPO, RCS, CMD32EN) |
 | 93 | u32 | `wdog_cs_now` | (ver 3) live `WDOG3_CS` readback: EN bit7, UPDATE bit5, INT bit6, CLK bits 8–9, RCS bit10, ULK bit11, PRES bit12, CMD32EN bit13, FLG bit14 |
+| 97 | u32 | `wdog_tick_hz` | (ver 4) **measured** RTWDOG counter tick rate — ~500 Hz on this silicon (128 kHz LPO ÷ 256), 0 until `watchdogBegin` ran |
+| 101 | u32 | `wdog_toval_now` | (ver 4) live `WDOG3_TOVAL` (ticks): `tick_hz × 2 s` normally, `× 30 s` inside a long-op window |
+| 105 | u8 | `wdog_verify` | (ver 4) last programming: bit0 RCS timeout (advisory), bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick-rate measurement fell back to 500 Hz, bit4 retried with the other unlock key width |
 
 The telemetry `STATE(boot).arg` low byte gains **bit1 = previous boot ended in the watchdog ISR**
 (bit0 stays `prev_valid`; high byte = previous breadcrumb op).
