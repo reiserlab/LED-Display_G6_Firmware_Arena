@@ -9,14 +9,18 @@ SpiManager   *SpiManager::instance_     = nullptr;
 volatile bool SpiManager::dmaComplete_  = false;
 
 void SpiManager::dmaISR(EventResponderRef) {
+  Health::isrEnter(Health::ISR_DMA);
   dmaComplete_ = true;
+  Health::isrExit();
 }
 
 void SpiManager::refreshISR() {
+  Health::isrEnter(Health::ISR_REFRESH);
   if (instance_) {
     instance_->refreshFlag = true;
     instance_->isr_count_++;
   }
+  Health::isrExit();
 }
 
 void SpiManager::begin() {

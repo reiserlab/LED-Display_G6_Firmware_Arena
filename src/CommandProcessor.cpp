@@ -103,7 +103,9 @@ void CommandProcessor::processCommand() {
     current_source_ = &net_;
     const ParsedCommand &cmd = net_.command();
     if (cmd.is_bulk) {
+      if (cmd.cmd == SET_FIRMWARE_FILE_CMD) Health::watchdogSuspend();  // synchronous image upload can exceed 2 s
       bool async_handoff = handleBulkWriteCommand(cmd);
+      if (cmd.cmd == SET_FIRMWARE_FILE_CMD) Health::watchdogResume();
       if (!async_handoff) net_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
@@ -119,7 +121,9 @@ void CommandProcessor::processCommand() {
     current_source_ = &serial_;
     const ParsedCommand &cmd = serial_.command();
     if (cmd.is_bulk) {
+      if (cmd.cmd == SET_FIRMWARE_FILE_CMD) Health::watchdogSuspend();  // synchronous image upload can exceed 2 s
       bool async_handoff = handleBulkWriteCommand(cmd);
+      if (cmd.cmd == SET_FIRMWARE_FILE_CMD) Health::watchdogResume();
       if (!async_handoff) serial_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
@@ -149,6 +153,13 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
   // Health breadcrumb (issue #50): "dispatching opcode X". Handlers that hit
   // SD/SPI re-mark with their own op (innermost wins); cleared after the switch.
   Health::mark(Health::OP_CMD, command_byte);
+
+  // Synchronous handlers that legitimately run longer than the 2 s watchdog
+  // (SD format, panel ISP program/verify, ZIP entry collection over 258 files)
+  // pause it for the dispatch; everything else must finish in well under 2 s.
+  const bool long_op = command_byte == PURGE_MEMORY_CMD || command_byte == G6_PROGRAM_PANEL_CMD
+                    || command_byte == G6_VERIFY_PANEL_CMD || command_byte == GET_SD_ARCHIVE_CMD;
+  if (long_op) Health::watchdogSuspend();
 
   switch (command_byte) {
     case ALL_OFF_CMD:
@@ -240,6 +251,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
 
     case GET_FIRMWARE_VERSION_CMD:
       handleGetFirmwareVersion();
+      break;
+
+    case GET_CRASHREPORT_CMD:
+      handleGetCrashReport();
       break;
 
     case SET_DIAG_OUTPUT_CMD:
@@ -939,6 +954,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
   }
   Health::clear();
+  if (long_op) Health::watchdogResume();
 
   // Telemetry CMD record (Telemetry.h): receipt time, opcode, the reply's
   // status byte, and the first <= 8 request bytes after [len, cmd]. The
@@ -1055,6 +1071,16 @@ void CommandProcessor::handleGetControllerInfo() {
 //   off 57  u32 prev_slow_us        ...and its duration
 //   off 61  u8  slow_op             THIS boot's slowest single op so far
 //   off 62  u32 slow_us             ...and its duration
+//   ---- ver 2 tail (watchdog + ISR breadcrumb; Health.h) ----
+//   off 66  u8  prev_isr_last       ISR the previous boot was inside when it died (0 none, 1 refresh, 2 dma, 3 wdog)
+//   off 67  u32 prev_isr_count      ISR entries in the previous boot
+//   off 71  u32 prev_wdog_pc        stacked PC captured by the watchdog pre-reset IRQ (valid when prev_isr_last == 3)
+//   off 75  u32 prev_wdog_lr        stacked LR at that moment
+//   off 79  u8  wdog_flags          bit0 armed, bit1 prev reset = watchdog (SRSR wdog3), bit2 prev pc captured,
+//                                   bit3 compiled in, bit4 suspended, bit5 starving (test), bit6 RTWDOG config failed
+//   off 80  u8  isr_last            THIS boot: ISR currently inside (live)
+//   off 81  u32 isr_count           THIS boot: ISR entries
+//   off 85  u32 wdog_kicks          THIS boot: watchdog refreshes
 //
 // Bytes 0..54 are the layout agreed in issue #50; 55..65 are an additive
 // tail (a SYSTEM_RESET sent by the host is itself a dispatched command, so
@@ -1075,8 +1101,8 @@ inline uint8_t *put32(uint8_t *p, uint32_t v) {
 }  // namespace
 
 void CommandProcessor::handleGetHealth() {
-  constexpr uint8_t kHealthVersion    = 1;
-  constexpr size_t  kHealthPayloadLen = 66;
+  constexpr uint8_t kHealthVersion    = 2;   // v2: +23 B watchdog / ISR tail (offsets 0..65 unchanged)
+  constexpr size_t  kHealthPayloadLen = 89;
   const Health::Stats &hs = Health::stats;
 
   uint8_t flags = 0;
@@ -1110,9 +1136,36 @@ void CommandProcessor::handleGetHealth() {
   p = put32(p, hs.prev_slow_us);
   p = put8 (p, Health::slowOp());
   p = put32(p, Health::slowUs());
+  p = put8 (p, hs.prev_isr_last);
+  p = put32(p, hs.prev_isr_count);
+  p = put32(p, hs.prev_wdog_pc);
+  p = put32(p, hs.prev_wdog_lr);
+  p = put8 (p, Health::watchdogFlags());
+  p = put8 (p, Health::isrLast());
+  p = put32(p, Health::isrCount());
+  p = put32(p, hs.wdog_kicks);
   static_assert(kHealthPayloadLen <= byte_count_per_response_max - 3,
                 "GET_HEALTH payload must fit one framed reply");
   current_source_->sendResponse(GET_HEALTH_CMD, 0, payload, (size_t)(p - payload));
+}
+
+// ---------------------------------------------------------------------------
+// get-crashreport (0xCC) — raw passthrough of the top 128 B of OCRAM: PJRC's
+// arm_fault_info_struct at 0x2027FF80 {len, ipsr, cfsr, hfsr, mmfar, bfar, ret,
+// xpsr, temp(float), time, crc} (44 B; len == 0 means no fault recorded), then
+// PJRC's own breadcrumb words at 0x2027FFC0. Readable without DEBUG_SERIAL and
+// NEVER cleared by this read (CrashReport.clear() is only called by the core's
+// printTo — which the DEBUG_SERIAL boot banner invokes, so DEBUG builds hand
+// over a cleared record; the performance build preserves it until the next
+// fault overwrites it).
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::handleGetCrashReport() {
+  uint8_t payload[Health::crashreport_len];
+  memcpy(payload, reinterpret_cast<const void *>(Health::crashreport_addr), sizeof(payload));
+  static_assert(Health::crashreport_len <= byte_count_per_response_max - 4,
+                "GET_CRASHREPORT payload must fit one framed reply");
+  current_source_->sendResponse(GET_CRASHREPORT_CMD, 0, payload, sizeof(payload));
 }
 
 // ---------------------------------------------------------------------------
@@ -1202,6 +1255,11 @@ void CommandProcessor::handleSetTelemetry(const ParsedCommand &cmd) {
     rate = r;
   }
   Telemetry::configure(flags, rate);  // records STATE(telemetry, flags, rate) itself
+  // Watchdog bench control (Health.h): bit6 = watchdog OFF, bit5 = starve it
+  // (stop kicking -> reset in 2 s, validates the crash-dump path end to end).
+  // Re-asserted on EVERY SET_TELEMETRY, so a plain flags=0x01 re-arms it.
+  Health::watchdogSetEnabled(!(flags & 0x40));
+  Health::watchdogStarve((flags & 0x20) != 0);
   current_source_->sendResponse(SET_TELEMETRY_CMD, 0, "");
   DBG_PRINTF("[cmd] set-telemetry flags=0x%02X rate=%ld\n", (unsigned)flags, (long)rate);
 }
@@ -1381,19 +1439,27 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
     return;
   }
 
+  // Sub-op breadcrumbs (#50, 2026-09-12 wedge: OP_CMD/0x70 stamped 3.3 ms after
+  // the last FRAME, i.e. somewhere in this preamble). loadFrame's own clear()
+  // leaves OP_IDLE, so every step after it re-marks.
+  Health::mark(Health::OP_CMD_DISARM, SET_FRAME_POSITION_CMD);
   spi_.disarmRefreshTimer();
+  Health::mark(Health::OP_CMD_PRELOAD, SET_FRAME_POSITION_CMD);
   cur_frame_index_ = index;
   if (!loadFrame(cur_frame_index_)) {
+    Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
     current_source_->sendResponse(SET_FRAME_POSITION_CMD, 1,
                       "SET_FRAME_POSITION: frame read failed");
     return;
   }
+  Health::mark(Health::OP_CMD_ARM, SET_FRAME_POSITION_CMD);
   if (state_ != ArenaState::SHOW_FRAME) {
     Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::SHOW_FRAME, pattern_id_);
   }
   state_ = ArenaState::SHOW_FRAME;
   if (!refresh_rate_explicit_) refresh_rate_hz_ = defaultRefreshFor(block_byte_count_);
   spi_.armRefreshTimer(refresh_rate_hz_);
+  Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
   current_source_->sendResponse(SET_FRAME_POSITION_CMD, 0, "");
 }
 

@@ -198,7 +198,10 @@ size_t SerialManager::sendRaw(const uint8_t* buf, size_t len) {
   // millis() wrap; mirrors the idiom already used by serviceDownload() and
   // (below) this function's own stall_deadline check.
   uint32_t deadline = millis() + 5000UL;
-  while (resp_len_ > 0 && (int32_t)(millis() - deadline) < 0) flushResponses();
+  while (resp_len_ > 0 && (int32_t)(millis() - deadline) < 0) {
+    flushResponses();
+    Health::watchdogKick();  // bounded (5 s) spin in loop() context — longer than the 2 s watchdog
+  }
   if (!buf || len == 0) return 0;
   // Pace the bulk body to the USB-CDC TX FIFO. A single Serial.write() larger than
   // availableForWrite() blocks inside loop() until the host drains, which starves the
@@ -229,6 +232,7 @@ size_t SerialManager::sendRaw(const uint8_t* buf, size_t len) {
     if (room <= 0) {
       // Wrap-safe (PR #27 review point 9): see the deadline comment above.
       if ((int32_t)(millis() - stall_deadline) >= 0) break;
+      Health::watchdogKick();  // 2 s stall window == the watchdog period; still loop() context
       yield();
       continue;
     }

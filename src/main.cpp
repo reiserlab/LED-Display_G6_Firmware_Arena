@@ -80,6 +80,11 @@ void setup() {
                 (unsigned)AC::constants::panel_count_per_frame_col,
                 AC::version::fw_debug_build ? " DEBUG_SERIAL" : "");
     uint32_t srsr = Health::stats.reset_cause;  // SRC_SRSR itself is cleared by Health::begin()
+    if (Health::stats.prev_valid && Health::stats.prev_isr_last == Health::ISR_WDOG) {
+      diag.printf("=== WATCHDOG reset: previous boot hung at pc=0x%08lX lr=0x%08lX (isr entries %lu) ===\n",
+                  (unsigned long)Health::stats.prev_wdog_pc, (unsigned long)Health::stats.prev_wdog_lr,
+                  (unsigned long)Health::stats.prev_isr_count);
+    }
     if (Health::stats.prev_valid) {
       diag.printf("=== health breadcrumb from previous boot: op=%u arg=0x%02X at %lu us; slowest op=%u %lu us ===\n",
                   (unsigned)Health::stats.prev_last_op, (unsigned)Health::stats.prev_op_arg,
@@ -126,6 +131,12 @@ void setup() {
   sd.begin();  // mounts BUILTIN_SDCARD for Modes 2/3/4; safe with no card
 
   setupInterruptPriorities();
+
+  // LAST: arm the 2 s hardware watchdog (RTWDOG, Health.h). Everything above
+  // (SD mount, boot blink, USB settle) ran unguarded; from here loop() must
+  // kick it every iteration or the controller resets WITH the breadcrumb +
+  // telemetry ring intact (the #50 hang becomes a self-healing reboot).
+  Health::watchdogBegin();
 }
 
 // The external-trigger input path (BNC "Digital IO 2 (5V)"/J4 -> U3 SN74LVC1T45

@@ -33,9 +33,9 @@ from .commands import (
 )
 
 # Payload layout — mirrors CommandProcessor::handleGetHealth() (all LE).
-HEALTH_FMT = "<BBIIIIIIBIIIIBHIBIBBIBI"
-HEALTH_LEN = struct.calcsize(HEALTH_FMT)  # 66
-HEALTH_VER = 1
+HEALTH_FMT = "<BBIIIIIIBIIIIBHIBIBBIBI" + "BIIIBBII"  # v1 66 B + v2 tail 23 B (watchdog / ISR breadcrumb)
+HEALTH_LEN = struct.calcsize(HEALTH_FMT)  # 89
+HEALTH_VER = 2
 
 Health = namedtuple(
     "Health",
@@ -45,6 +45,8 @@ Health = namedtuple(
         "frames_sent", "isr_count", "cmd70_count", "state", "cur_frame", "reset_cause",
         "prev_breadcrumb", "prev_breadcrumb_us", "prev_breadcrumb_arg",
         "prev_slow_op", "prev_slow_us", "slow_op", "slow_us",
+        "prev_isr_last", "prev_isr_count", "prev_wdog_pc", "prev_wdog_lr",
+        "wdog_flags", "isr_last", "isr_count", "wdog_kicks",
     ],
 )
 
@@ -60,7 +62,12 @@ STATE_SHOW_FRAME = 4
 STATE_MAX = 7  # ERROR_DISPLAY
 
 # Health::LastOp
-OP_IDLE, OP_SD_READ, OP_SPI_FRAME, OP_USB_WRITE, OP_CMD, OP_SD_OPEN = range(6)
+(OP_IDLE, OP_SD_READ, OP_SPI_FRAME, OP_USB_WRITE, OP_CMD, OP_SD_OPEN,
+ OP_CMD_DISARM, OP_CMD_PRELOAD, OP_CMD_ARM, OP_CMD_RESPOND) = range(10)
+OP_MAX = OP_CMD_RESPOND
+ISR_NONE, ISR_REFRESH, ISR_DMA, ISR_WDOG = range(4)
+WDOG_ARMED, WDOG_PREV_RESET, WDOG_PREV_PC, WDOG_COMPILED, WDOG_SUSPENDED, WDOG_STARVING, WDOG_CONFIG_FAILED = (
+    0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40)
 
 CAP_HEALTH = 0x80  # GET_CONTROLLER_INFO capability bit 7
 
@@ -81,9 +88,10 @@ def test_health_reply_shape(transport):
     assert h.uptime_ms > 0
     assert h.loop_count > 0
     assert h.state <= STATE_MAX
-    assert h.slow_op <= OP_SD_OPEN
-    assert h.prev_breadcrumb <= OP_SD_OPEN
-    assert h.prev_slow_op <= OP_SD_OPEN
+    assert h.slow_op <= OP_MAX
+    assert h.prev_breadcrumb <= OP_MAX
+    assert h.prev_slow_op <= OP_MAX
+    assert h.isr_last <= ISR_WDOG and h.prev_isr_last <= ISR_WDOG
     # A live loop has measured at least one iteration by the time a host talks to it.
     assert h.loop_max_us > 0
 
@@ -163,7 +171,7 @@ def test_breadcrumb_consistency(transport):
     # without one (power-on), all prev_* fields must read as zero.
     h = read_health(transport)
     if h.flags & FLAG_BREADCRUMB_VALID:
-        assert h.prev_slow_op <= OP_SD_OPEN
+        assert h.prev_slow_op <= OP_MAX
         if h.prev_breadcrumb != OP_CMD:
             assert h.prev_breadcrumb_arg == 0
     else:
@@ -172,6 +180,35 @@ def test_breadcrumb_consistency(transport):
         assert h.prev_breadcrumb_arg == 0
         assert h.prev_slow_op == 0
         assert h.prev_slow_us == 0
+
+
+# ── watchdog (v2 tail) ────────────────────────────────────────────────────────
+
+def test_watchdog_armed_and_kicked(transport):
+    a = read_health(transport)
+    assert a.wdog_flags & WDOG_COMPILED, "this branch compiles the RTWDOG in"
+    assert a.wdog_flags & WDOG_ARMED, "watchdog is armed by default at the end of setup()"
+    assert not (a.wdog_flags & WDOG_CONFIG_FAILED), "RTWDOG unlock/reconfigure must succeed"
+    assert not (a.wdog_flags & (WDOG_SUSPENDED | WDOG_STARVING))
+    time.sleep(0.2)
+    b = read_health(transport)
+    assert b.wdog_kicks > a.wdog_kicks, "loop() kicks the watchdog every iteration"
+    assert b.isr_count >= a.isr_count
+    if b.wdog_flags & WDOG_PREV_RESET:
+        assert b.reset_cause & 0x80, "SRSR wdog3_rst_b"
+    if b.wdog_flags & WDOG_PREV_PC:
+        assert b.prev_isr_last == ISR_WDOG and b.prev_wdog_pc != 0
+
+
+def test_crashreport_passthrough(transport):
+    from .commands import GET_CRASHREPORT_CMD
+    st, echo, payload, _ = transport.command(GET_CRASHREPORT_CMD)
+    assert st == 0 and echo == GET_CRASHREPORT_CMD
+    assert len(payload) == 128
+    length = struct.unpack_from("<I", bytes(payload), 0)[0]
+    assert length == 0 or length == 44, f"arm_fault_info_struct.len is 0 (none) or 44, got {length}"
+    st2, _, payload2, _ = transport.command(GET_CRASHREPORT_CMD)
+    assert bytes(payload2) == bytes(payload), "reading must not clear the record"
 
 
 # ── 0x70 counter (needs a pattern open) ──────────────────────────────────────

@@ -161,6 +161,81 @@ Semantics:
 - Hot-path cost per mark/clear is a few stores, one `micros()`, and a one-line dcache flush;
   `handleSetFramePosition`'s SD/timer logic is untouched beyond the counter and marks.
 
+### Watchdog, sub-op / ISR breadcrumbs, CrashReport passthrough (diagnostic build, 2026-09-12)
+
+The #50 wedge reproduced on the ring build (`c47ee68`, 15:44 ET) and was captured through the
+bootloader route: breadcrumb `OP_CMD`/`0x70` stamped 3.3 ms after the last `FRAME` record, no
+STATE records or slow SD reads in the tail, total USB silence, **no reboot** (so not a plain CPU
+fault — the core's fault handler reboots 8 s later). `clear()` after a nested op leaves `OP_IDLE`,
+so `OP_CMD`/`0x70` means the loop stopped **between `Health::mark(OP_CMD)` in
+`handleBinaryCommand` and `Health::mark(OP_SD_READ)` in `loadFrame`** — the `handleSetFramePosition`
+preamble (`patternOpen` check, `spi_.disarmRefreshTimer()` = `IntervalTimer::end`, index store) — OR
+the main loop was preempted forever by an ISR-level spin / an interrupts-disabled wait / LOCKUP.
+This commit adds three things so the next occurrence answers that:
+
+**1. Hardware watchdog (RTWDOG / `WDOG3`, 2 s).** `Health::watchdogBegin()` runs LAST in `setup()`;
+`Health::loopTick()` refreshes it every `loop()` iteration — **never from an ISR**. On expiry the
+RTWDOG asserts a system reset through the SRC (`SRC_SRSR` bit 7 `wdog3_rst_b`, already in
+`GET_HEALTH.reset_cause` and in the telemetry `STATE(boot).code`), which is the same reset domain as
+`SYSRESETREQ`: OCRAM2 (`0x20200000..`) is not powered down, so the **telemetry ring and the
+breadcrumb survive exactly as they do for `SYSTEM_RESET`** (PJRC's CrashReport relies on the same
+property). Bench verification: `SET_TELEMETRY` flags **bit5 = starve** stops the kicks → reset in
+2 s → `GET_HEALTH` must show `wdog_flags` bit1 (previous reset was the watchdog), `breadcrumb_valid`,
+and the ring's `boot_count` incremented with the pre-reset records intact. Programming: `CS =
+CMD32EN | CLK(LPO 32 kHz) | PRES(/256) | UPDATE | INT | EN`, `TOVAL = 250` (125 Hz ticks → 2.000 s),
+unlock `0xD928C520`, refresh `0xB480A602`; `UPDATE=1` keeps it reconfigurable so a **runtime disable
+(flags bit6) and the nesting-safe `watchdogSuspend()/Resume()`** work. Both spins are bounded — a
+mis-programmed RTWDOG can never brick boot (`wdog_flags` bit6 reports a config failure instead).
+Compile-time switch `HEALTH_WATCHDOG` (default 1). **Pre-reset PC capture:** `INT=1` raises
+`IRQ_RTWDOG` (priority 0) 128 bus clocks before the reset; the naked ISR stores the stacked
+**PC/LR of the preempted context** (the hung main loop, or the ISR that was spinning) into the
+breadcrumb (`wdog_pc`/`wdog_lr`, `isr_last = 3`) and flushes the line. Limits: an equal-priority
+ISR (the LPSPI IRQs are also priority 0) or an interrupts-disabled spin cannot be preempted — then
+only the reset happens and `isr_last`/`prev_breadcrumb` carry the answer. Long synchronous handlers
+pause the watchdog for their dispatch: `PURGE_MEMORY` 0x8F (SD format), `G6_PROGRAM_PANEL` 0xC8 /
+`G6_VERIFY_PANEL` 0xC9 (ISP), `GET_SD_ARCHIVE` 0x8A (entry collection), `SET_FIRMWARE_FILE` 0xE0
+(synchronous image upload); `SerialManager::sendRaw`'s bounded 5 s / 2 s spins kick from inside
+(still `loop()` context). Everything else must finish in well under 2 s — a 129 ms SD read is fine.
+**Every `SET_TELEMETRY` re-asserts bits 5/6** (a plain `flags = 0x01` re-arms the watchdog).
+
+**2. Finer breadcrumbs.** Sub-ops inside the 0x70 handler, `op_arg = 0x70`: `6 OP_CMD_DISARM`
+(around `disarmRefreshTimer`), `7 OP_CMD_PRELOAD` (before `loadFrame`), `8 OP_CMD_ARM`
+(`armRefreshTimer`), `9 OP_CMD_RESPOND` (`sendResponse`). **ISR breadcrumb**: `isr_last` (byte 7 of
+the record — the old pad) is set at entry / cleared at exit of `SpiManager::refreshISR` (1) and
+`SpiManager::dmaISR` (2), and to 3 by the watchdog ISR; `isr_count` counts entries. These fields are
+written from interrupt context and are **not covered by the checksum** (an ISR landing between a
+main-loop field write and its seal would otherwise leave a stale checksum); they ride along with the
+main-loop flush and flush themselves. SdFat/USB ISRs live in the core and are not hooked.
+`GET_HEALTH` is now **ver 2, 89 B** — offsets 0..65 unchanged, tail appended:
+
+| Off | Type | Field | Meaning |
+|---|---|---|---|
+| 66 | u8 | `prev_isr_last` | ISR the previous boot was inside when it died (0 none, 1 refresh, 2 dma, 3 wdog) |
+| 67 | u32 | `prev_isr_count` | ISR entries in the previous boot |
+| 71 | u32 | `prev_wdog_pc` | stacked PC captured by the watchdog pre-reset IRQ (valid when `prev_isr_last` = 3) |
+| 75 | u32 | `prev_wdog_lr` | stacked LR at that moment |
+| 79 | u8 | `wdog_flags` | bit0 armed, bit1 previous reset was the watchdog, bit2 previous boot captured pc, bit3 compiled in, bit4 suspended, bit5 starving (test), bit6 RTWDOG config failed |
+| 80 | u8 | `isr_last` | this boot: ISR currently inside (live) |
+| 81 | u32 | `isr_count` | this boot: ISR entries |
+| 85 | u32 | `wdog_kicks` | this boot: watchdog refreshes |
+
+The telemetry `STATE(boot).arg` low byte gains **bit1 = previous boot ended in the watchdog ISR**
+(bit0 stays `prev_valid`; high byte = previous breadcrumb op).
+
+**3. `GET_CRASHREPORT` 0xCC.** `[01 CC]` → the raw **128 B** at `0x2027FF80..0x20280000`: PJRC's
+`arm_fault_info_struct` `{len@0, ipsr@4, cfsr@8, hfsr@12, mmfar@16, bfar@20, ret@24, xpsr@28,
+temp(float)@32, time@36, crc@40}` (`len == 0` = no fault recorded) followed by PJRC's own breadcrumb
+words at `0x2027FFC0`. Readable without `DEBUG_SERIAL`; **never cleared by this read**. Caveat: the
+`DEBUG_SERIAL` boot banner prints `CrashReport`, and the core's `printTo` clears it — so the debug
+build hands over an already-cleared record; the performance build preserves it until the next fault.
+Ships with the ring: gate on 0xCB `flags` bit 2.
+
+**Investigated and dropped:** the ELF string `beginCycles` from `IntervalTimer::beginCycles` is the
+symbol name; `cores/teensy4/debug/printf.h` compiles `printf(...)` to nothing unless
+`PRINT_DEBUG_STUFF` is defined, and `objdump` shows no call out of `beginCycles` — no `_write`
+override is needed. `platformio.ini`: `-DDEBUG_SERIAL` belongs to `[env:teensy41]` only; the
+performance env carries no `build_flags`.
+
 ### Build identity (`GET_FIRMWARE_VERSION`, 0xCB)
 
 Every build embeds the git identity of the checkout it was compiled from, so a controller in the

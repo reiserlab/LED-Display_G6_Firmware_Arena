@@ -273,7 +273,8 @@ class CommandProcessor {
   void handleGetControllerInfo();
   void handleGetHealth();                                // get-health (0xCA) — O(1), no SD I/O (issue #50)
   void handleGetFirmwareVersion();                       // get-firmware-version (0xCB) — compiled-in git identity (src/Version.h)
-  void handleSetTelemetry(const ParsedCommand &cmd);     // set-telemetry (0xA8) — events on/off (src/Telemetry.h)
+  void handleSetTelemetry(const ParsedCommand &cmd);     // set-telemetry (0xA8) — events on/off (src/Telemetry.h); bits 5/6 = watchdog starve/off (Health.h)
+  void handleGetCrashReport();                           // get-crashreport (0xCC) — raw 128 B PJRC CrashReport region, not cleared
   void handleGetTelemetryBlock(const ParsedCommand &cmd);// get-telemetry-block (0xA9) — ack cursor + framed chunk of ring records
   void handleDisplayPsramIndex(const ParsedCommand &cmd);
   void handlePsramPlay(const ParsedCommand &cmd);
