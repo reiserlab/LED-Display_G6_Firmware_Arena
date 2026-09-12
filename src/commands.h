@@ -55,6 +55,7 @@ enum ArenaCommands : uint8_t {
   G6_PROGRAM_PANEL_CMD        = 0xC8,  // [02 C8 panel_number] reflash one panel from /firmware/panel.bin via SPI ISP (panel_number 1-based, matches panel-map)
   G6_VERIFY_PANEL_CMD         = 0xC9,  // [02 C9 panel_number] CRC the panel's RUNNING app flash vs /firmware/panel.bin footer (panel_number 1-based)
   GET_HEALTH_CMD              = 0xCA,  // [01 CA] read-only controller health: loop/SD/SPI/USB counters + reset-surviving breadcrumb (issue #50; layout in README § Health)
+  GET_FIRMWARE_VERSION_CMD    = 0xCB,  // [01 CB] build identity: {ver, rows, cols, flags, sha[8], date[10], branch[24]} = 46 bytes, compiled in from git (src/Version.h; gated by capability bit 7 like 0xCA)
   // Panel firmware image transfer to the controller SD (g6_03 § Panel firmware update).
   SET_FIRMWARE_FILE_CMD       = 0xE0,  // [0xE0, len_b0..b7, data…] upload image → /firmware/panel.bin; reply u32 LE CRC-32
   GET_FIRMWARE_INFO_CMD       = 0xE3,  // [01 E3] reply: 32-byte footer {magic[8], version[16], crc32 LE, size LE}

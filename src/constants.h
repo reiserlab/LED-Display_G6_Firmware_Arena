@@ -159,7 +159,9 @@ constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // 0xAD / SET_AO_MODE 0xA3 / GET_ANALOG_IN 0xA4 — lets hosts detect the
 // #135 rig-I/O roles by capability instead of firmware-version guessing),
 // bit7 health (GET_HEALTH 0xCA: read-only loop/SD/SPI/USB telemetry + the
-// reset-surviving breadcrumb, issue #50).
+// reset-surviving breadcrumb, issue #50; also gates GET_FIRMWARE_VERSION
+// 0xCB — same build introduced both, and older firmware flashes a CE 01
+// glyph on any unknown opcode, so hosts must not probe 0xCB blind).
 // Advertises g6_mode + v2_local_storage + io_ext + health.
 constexpr uint8_t controller_capability_bitmap = 0xA3;
 
