@@ -66,6 +66,27 @@ inline uint32_t seqAt(uint32_t off) {
   return seq;
 }
 
+// Exact per-type record shape — the same rules tests/telemetry_codec.py
+// enforces, so a record that survives the boot repair or reaches peek() can
+// always be decoded by the host. PAD: len < kRecordHeaderLen with type 0 (a
+// 1-byte PAD has no type byte), or any len with type 0.
+inline bool wellFormedAt(uint32_t off, uint32_t w) {
+  uint8_t  len = data[off];
+  if (len == 0) return false;
+  uint32_t end = off + len;
+  if (end > kDataSize) return false;                 // straddles the ring end
+  if (off < w && end > w) return false;              // straddles the write cursor
+  if (len < kRecordHeaderLen) return len == 1 || data[off + 1] == REC_PAD;
+  switch (data[off + 1]) {
+    case REC_PAD:   return true;
+    case REC_CMD:   return len >= kRecordHeaderLen + 3 && len <= kCmdRecordLenMax
+                        && data[off + 12] == (uint8_t)(len - (kRecordHeaderLen + 3));
+    case REC_FRAME: return len == kFrameRecordLen;
+    case REC_STATE: return len == kStateRecordLen;
+    default:        return false;
+  }
+}
+
 inline void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 inline void put32(uint8_t *p, uint32_t v) {
   p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
@@ -117,6 +138,7 @@ uint32_t appendRaw(uint8_t *rec, uint8_t len) {
   }
 
   uint32_t seq = hdr->next_seq;
+  if (seq == 0 || seq == 0xFFFFFFFFUL) seq = 1;  // 0 = "none" in block headers, 0xFFFFFFFF = "no ack"
   put32(rec + 2, seq);
   memcpy(data + w, rec, len);
   arm_dcache_flush(data + w, len);  // record lines first ...
@@ -193,14 +215,11 @@ bool validHeader() {
 void repairChain() {
   uint32_t off = hdr->read_off, w = hdr->write_off, steps = 0;
   while (off != w) {
-    uint8_t  len = data[off];
-    uint32_t end = off + len;
-    bool bad = (len == 0) || (end > kDataSize) || (off < w && end > w)
-            || (!isPadAt(off) && data[off + 1] > REC_STATE) || (++steps > kDataSize);
-    if (bad) {
-      hdr->write_off = off;  // everything from here on is not a record
+    if (!wellFormedAt(off, w) || ++steps > kDataSize) {
+      hdr->write_off = off;  // everything from here on is not a decodable record
       return;
     }
+    uint32_t end = off + data[off];
     off = (end == kDataSize) ? 0 : end;
   }
 }
@@ -281,6 +300,7 @@ void service() {
 
 void configure(uint8_t flags, int32_t rate_hz) {
   if (!ring_ok_) return;  // heap guard tripped: stays disabled until reboot
+  if (heapTooClose()) { tripHeapGuard(); return; }
   bool on    = (flags & kFlagEventsEnabled) != 0;
   bool synth = (flags & kFlagSynthetic) != 0;
   if (on && !enabled_) {
@@ -347,11 +367,17 @@ void state(uint8_t kind, uint8_t code, uint16_t arg) {
 
 void ack(uint32_t ack_seq) {
   if (!ring_ok_ || ack_seq == 0xFFFFFFFFUL) return;
+  if (heapTooClose()) { tripHeapGuard(); return; }
+  // A seq this incarnation has not generated yet (e.g. a host still holding an
+  // ack from before a power cycle re-initialised the ring) is ignored — it
+  // would otherwise free records the host has never seen. The walk below only
+  // ever advances read_off forward, so it can never move backwards.
+  if (ack_seq >= hdr->next_seq) return;
   uint32_t off = hdr->read_off, w = hdr->write_off;
   bool moved = false;
   while (off != w) {
+    if (!wellFormedAt(off, w)) break;   // corrupt chain: stop, never run past it
     uint8_t len = data[off];
-    if (len == 0 || off + len > kDataSize) break;   // corrupt chain: stop, never run past it
     if (!isPadAt(off) && seqAt(off) > ack_seq) break;
     uint32_t end = off + len;
     off = (end == kDataSize) ? 0 : end;
@@ -368,11 +394,12 @@ size_t peek(uint8_t *dst, size_t max_bytes, BlockInfo &info) {
   info.n_records = 0;
   info.more      = false;
   if (!ring_ok_) return 0;
+  if (heapTooClose()) { tripHeapGuard(); return 0; }
   uint32_t off = hdr->read_off, w = hdr->write_off;
   size_t n = 0;
   while (off != w) {
+    if (!wellFormedAt(off, w)) break;   // never hand the host a record it cannot decode
     uint8_t len = data[off];
-    if (len == 0 || off + len > kDataSize) break;
     if (!isPadAt(off)) {
       if (n + len > max_bytes) break;   // whole records only; the rest waits
       memcpy(dst + n, data + off, len);

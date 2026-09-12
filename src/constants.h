@@ -152,10 +152,10 @@ constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // bit7 health (GET_HEALTH 0xCA: read-only loop/SD/SPI/USB telemetry + the
 // reset-surviving breadcrumb, issue #50; also gates GET_FIRMWARE_VERSION
 // 0xCB — same build introduced both, and older firmware flashes a CE 01
-// glyph on any unknown opcode, so hosts must not probe 0xCB blind). The
-// telemetry ring (SET_TELEMETRY 0xA8 / GET_TELEMETRY_BLOCK 0xA9, Telemetry.h)
-// ships in the same build and is gated by this same bit 7 — no new bit
-// (bit 6 is claimed by fw #47 ai_cal).
+// glyph on any unknown opcode, so hosts must not probe 0xCB blind). This byte
+// is FULL (bit 6 is claimed by fw #47 ai_cal): the telemetry ring
+// (SET_TELEMETRY 0xA8 / GET_TELEMETRY_BLOCK 0xA9, Telemetry.h) is advertised
+// by GET_FIRMWARE_VERSION (0xCB) flags bit 2 instead — hosts gate 0xA8 on that.
 // Advertises g6_mode + v2_local_storage + io_ext + health.
 constexpr uint8_t controller_capability_bitmap = 0xA3;
 

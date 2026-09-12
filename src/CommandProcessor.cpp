@@ -1176,7 +1176,8 @@ void CommandProcessor::handleGetFirmwareVersion() {
 // ---------------------------------------------------------------------------
 // Telemetry ring (issue #50 follow-on; layout + semantics in src/Telemetry.h,
 // README § Telemetry ring). Both opcodes were reserved by fw PR #47 for this
-// stream and are gated by the same capability bit 7 (`health`) as 0xCA/0xCB.
+// stream; hosts gate them on GET_FIRMWARE_VERSION (0xCB) flags bit 2
+// (fw_flag_telemetry) — the 0xC2 capability byte is full.
 //
 // set-telemetry (0xA8): [04 A8 flags rate_lo rate_hi] or [02 A8 flags].
 //   flags bit0 = record events (default ON at boot); bit7 = synthetic producer

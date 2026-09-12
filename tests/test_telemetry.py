@@ -79,7 +79,8 @@ from .telemetry_codec import (
     parse_block,
 )
 
-CAP_HEALTH = 0x80  # capability bit 7 gates 0xCA/0xCB and the telemetry ring
+CAP_HEALTH = 0x80  # capability bit 7 gates 0xCA/0xCB; the ring itself is GET_FIRMWARE_VERSION flags bit 2
+FW_FLAG_TELEMETRY = 0x04
 STATE_ALL_OFF = ARENA_STATE_NAMES.index("ALL_OFF")
 STATE_SHOW_FRAME = ARENA_STATE_NAMES.index("SHOW_FRAME")
 OP_CMD = 4  # Health::LastOp::OP_CMD (a commanded reset's breadcrumb)
@@ -161,7 +162,7 @@ def test_firmware_version_advertises_telemetry_flag(transport):
     assert payload[1] & CAP_HEALTH, "0xCB itself is gated by capability bit 7 (health)"
     st, echo, payload, _ = transport.command(GET_FIRMWARE_VERSION_CMD)
     assert st == 0 and echo == GET_FIRMWARE_VERSION_CMD
-    assert payload[3] & 0x04, "0xCB flags bit2 (telemetry ring compiled in) must be set"
+    assert payload[3] & FW_FLAG_TELEMETRY, "0xCB flags bit2 (telemetry ring compiled in) must be set"
 
 
 def test_set_telemetry_accepts_both_forms_and_rejects_bad_length(transport):
@@ -207,7 +208,7 @@ def test_drain_is_contiguous_and_cmd_records_match_sent_commands(transport):
         cmd, params = _probe_commands()[i % 4]
         st, _, _, _ = transport.command(cmd, params)
         sent.append((cmd, params, st))
-    recs, headers = drain(transport, ack=False)
+    recs, headers = drain(transport)  # acked: > 1 block, so an unacked loop could never finish
     assert recs, "commands must produce CMD records"
     assert_contiguous(recs)
     cmds = [r for r in recs if r.type == REC_CMD]
@@ -224,9 +225,15 @@ def test_drain_is_contiguous_and_cmd_records_match_sent_commands(transport):
         "GET_TELEMETRY_BLOCK must not be recorded"
     tel = [r for r in recs if r.type == REC_STATE and r.fields["kind"] == ST_TELEMETRY]
     assert tel and tel[-1].fields["rate_hz"] == 0x1234 and tel[-1].fields["events"]
-    # Timestamps are monotonic within a boot (no wrap expected during a test).
-    for a, b in zip(recs, recs[1:]):
-        assert (b.t_us - a.t_us) & 0xFFFFFFFF < 60_000_000
+    # seq is APPEND order, not t_us order: a CMD record carries the dispatch-entry
+    # time but is appended after the STATE records its handler produced. Assert the
+    # receipt -> effect relation instead: each SET_TELEMETRY's STATE(telemetry) is
+    # appended just before its CMD, stamped no earlier than the command's receipt.
+    for i, r in enumerate(recs):
+        if r.type == REC_CMD and r.fields["cmd"] == SET_TELEMETRY_CMD:
+            eff = recs[i - 1]
+            assert eff.type == REC_STATE and eff.fields["kind"] == ST_TELEMETRY
+            assert (eff.t_us - r.t_us) & 0xFFFFFFFF < 5_000_000, "effect stamped after receipt"
     assert all(h.dropped == headers[0].dropped for h in headers), "no evictions during a small test"
 
 
@@ -342,7 +349,10 @@ def test_overfill_evicts_oldest_and_reports_dropped(transport):
     transport.command(GET_REFRESH_RATE_CMD)
     hdr_m, marker, _ = get_block(transport)
     head_seq = marker[0].seq
-    set_telemetry(transport, SET_FLAG_EVENTS | SET_FLAG_SYNTHETIC, 8000)
+    # Phase A — modest overflow (~5000 × 17 B = 85 KB into a 65.5 KB ring): the
+    # marker written at the FIRST eviction sits ~3850 records in and is still in
+    # the ring when we drain, because fewer than a ring-full of records followed it.
+    set_telemetry(transport, SET_FLAG_EVENTS | SET_FLAG_SYNTHETIC, 5000)
     time.sleep(1.0)
     set_telemetry(transport, SET_FLAG_EVENTS, 0)
     hdr1, recs1, _ = get_block(transport)
@@ -356,13 +366,32 @@ def test_overfill_evicts_oldest_and_reports_dropped(transport):
     assert_contiguous(recs)
     assert len(recs) * 13 <= RING_DATA_BYTES
     overruns = [r for r in recs if r.type == REC_STATE and r.fields["kind"] == ST_RING_OVERRUN]
-    assert overruns, "an eviction episode leaves one STATE(ring_overrun) marker"
+    assert overruns, "the first eviction leaves a STATE(ring_overrun) marker (near the first overflow)"
     assert all(r.fields["code"] == OVERRUN_CODE_EVICTED for r in overruns)
     assert not any(r.fields["heap_collision"] for r in overruns)
-    # The newest synthetic records survived (overwrite-oldest, not drop-newest).
     synth = [r for r in recs if r.type == REC_CMD and r.fields["cmd"] == SYNTHETIC_CMD]
+    first_marker_pos = recs.index(overruns[0])
+    assert first_marker_pos < len(recs) // 2, "marker belongs to the start of the overflow, not its end"
+    # The newest synthetic records survived (overwrite-oldest, not drop-newest).
     assert synth and synth[-1].fields["counter"] == max(r.fields["counter"] for r in synth)
     assert synth[-1].fields["counter"] + 1 >= len(synth) + evicted - 10, "counter accounts for evicted records"
+
+    # Phase B — sustained overflow (~16000 records, > 4 ring-fulls): the marker is
+    # NOT guaranteed to survive; the contract is dropped + seq gaps. The marker's
+    # own eviction is counted in `dropped`, so gap == dropped still holds exactly.
+    transport.command(GET_REFRESH_RATE_CMD)
+    hdr_m, marker, _ = get_block(transport)
+    head_seq = marker[0].seq
+    dropped_before = hdr_m.dropped
+    set_telemetry(transport, SET_FLAG_EVENTS | SET_FLAG_SYNTHETIC, 8000)
+    time.sleep(2.0)
+    set_telemetry(transport, SET_FLAG_EVENTS, 0)
+    hdr2, _, _ = get_block(transport)
+    evicted2 = hdr2.dropped - dropped_before
+    assert evicted2 > 3 * len(recs), "sustained overflow evicts several ring-fulls"
+    assert hdr2.first_seq - head_seq == evicted2, "seq gap == dropped, with or without a surviving marker"
+    recs2, _ = drain(transport)
+    assert_contiguous(recs2)
 
 
 # ── frame storm (Mode 3) ──────────────────────────────────────────────────────
