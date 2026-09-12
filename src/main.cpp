@@ -4,6 +4,7 @@
 #include "SpiManager.h"
 #include "SdManager.h"
 #include "CommandProcessor.h"
+#include "Health.h"
 
 NetworkManager   net;
 SerialManager    serial;
@@ -55,13 +56,23 @@ void blinkStartupPattern();
 void setupInterruptPriorities();
 
 void setup() {
+  // FIRST: capture + clear the reset cause and harvest the previous boot's
+  // breadcrumb before anything else runs (GET_HEALTH 0xCA, issue #50).
+  Health::begin();
+
 #ifdef DEBUG_SERIAL
   Serial.begin(115200);
   delay(50);  // let CDC settle so this print isn't lost before the host attaches
   // TEMPORARY crash-loop diagnostic -- remove once root-caused.
   {
     SentinelPrint diag;
-    uint32_t srsr = SRC_SRSR;
+    uint32_t srsr = Health::stats.reset_cause;  // SRC_SRSR itself is cleared by Health::begin()
+    if (Health::stats.prev_valid) {
+      diag.printf("=== health breadcrumb from previous boot: op=%u arg=0x%02X at %lu us; slowest op=%u %lu us ===\n",
+                  (unsigned)Health::stats.prev_last_op, (unsigned)Health::stats.prev_op_arg,
+                  (unsigned long)Health::stats.prev_stamp_us,
+                  (unsigned)Health::stats.prev_slow_op, (unsigned long)Health::stats.prev_slow_us);
+    }
     diag.printf("=== SRC_SRSR (reset cause) = 0x%08lX ===\n", (unsigned long)srsr);
     if (srsr & SRC_SRSR_IPP_USER_RESET_B)     diag.println("  IPP_USER_RESET_B (reset pin / button)");
     if (srsr & SRC_SRSR_CSU_RESET_B)          diag.println("  CSU_RESET_B");
@@ -108,6 +119,7 @@ void setup() {
 // net against U3 (boot contention). applyDioRole tri-states D35 first.
 
 void loop() {
+  Health::loopTick();         // 0.  loop-iteration timing + count (GET_HEALTH 0xCA, #50)
   // Must run BEFORE net.serviceTcp(): net_'s client_ is a single reused slot,
   // so if the client owning an active 0x84/0x85/0x8A transfer disconnected,
   // serviceTcp() below would silently swap in a brand-new client on the same

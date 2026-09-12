@@ -265,6 +265,7 @@ class CommandProcessor {
   void handleTrialParams(const ParsedCommand &cmd);
   void handleSetFramePosition(const ParsedCommand &cmd);
   void handleGetControllerInfo();
+  void handleGetHealth();                                // get-health (0xCA) — O(1), no SD I/O (issue #50)
   void handleDisplayPsramIndex(const ParsedCommand &cmd);
   void handlePsramPlay(const ParsedCommand &cmd);
   bool handleBulkWriteCommand(const ParsedCommand &cmd);  // true = handed off to serviceUpload; caller must not consume yet

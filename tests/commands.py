@@ -37,9 +37,10 @@ SET_DIO_ROLE_CMD            = 0xAC   # [03 AC port role] 0=off 1=in_trigger 2=ou
 GET_DIO_ROLE_CMD            = 0xAD   # [01 AD] returns [role1, level1, role2, level2]
 SET_ETHERNET_IP_ADDRESS_CMD = 0xC0   # reserved, not yet implemented
 GET_ETHERNET_IP_ADDRESS_CMD = 0xC1
-GET_CONTROLLER_INFO_CMD     = 0xC2   # returns {version, capability_bitmap, mac[6]} (bit5 = io_ext)
+GET_CONTROLLER_INFO_CMD     = 0xC2   # returns {version, capability_bitmap, mac[6]} (bit5 = io_ext, bit7 = health)
 SET_DIAG_OUTPUT_CMD         = 0xC3
 GET_DIAG_OUTPUT_CMD         = 0xC4   # returns 0 or 1
 SET_SPI_CLOCK_CMD           = 0xC5   # [len=3,0xC5,lo,hi] uint16 LE MHz; echoes applied MHz
 GET_SPI_CLOCK_CMD           = 0xC6   # returns uint16 LE MHz
+GET_HEALTH_CMD              = 0xCA   # [01 CA] read-only health telemetry + reset-surviving breadcrumb (issue #50); 66-byte LE payload, see test_health.py
 ALL_ON_CMD                  = 0xFF

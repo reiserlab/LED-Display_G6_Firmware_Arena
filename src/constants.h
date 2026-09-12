@@ -157,9 +157,11 @@ constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // bit1 v2_local_storage, bit2 mode_1_tsi, bit3 v3_triggered, bit4 v3_gated,
 // bit5 io_ext (extended I/O command set: SET_DIO_ROLE 0xAC / GET_DIO_ROLE
 // 0xAD / SET_AO_MODE 0xA3 / GET_ANALOG_IN 0xA4 — lets hosts detect the
-// #135 rig-I/O roles by capability instead of firmware-version guessing).
-// Advertises g6_mode + v2_local_storage + io_ext.
-constexpr uint8_t controller_capability_bitmap = 0x23;
+// #135 rig-I/O roles by capability instead of firmware-version guessing),
+// bit7 health (GET_HEALTH 0xCA: read-only loop/SD/SPI/USB telemetry + the
+// reset-surviving breadcrumb, issue #50).
+// Advertises g6_mode + v2_local_storage + io_ext + health.
+constexpr uint8_t controller_capability_bitmap = 0xA3;
 
 // -----------------------------------------------------------------------------
 // SD pattern backend — Modes 2/3/4 load .pat files from the built-in SD slot.
