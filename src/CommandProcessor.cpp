@@ -2,6 +2,7 @@
 #include "Crc.h"
 #include "ErrorGlyph.h"
 #include "Health.h"
+#include "Version.h"
 #include <Wire.h>
 
 using namespace AC;
@@ -233,6 +234,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
 
     case GET_HEALTH_CMD:
       handleGetHealth();
+      break;
+
+    case GET_FIRMWARE_VERSION_CMD:
+      handleGetFirmwareVersion();
       break;
 
     case SET_DIAG_OUTPUT_CMD:
@@ -1088,6 +1093,62 @@ void CommandProcessor::handleGetHealth() {
   static_assert(kHealthPayloadLen <= byte_count_per_response_max - 3,
                 "GET_HEALTH payload must fit one framed reply");
   current_source_->sendResponse(GET_HEALTH_CMD, 0, payload, (size_t)(p - payload));
+}
+
+// ---------------------------------------------------------------------------
+// get-firmware-version (0xCB) — which build is this controller running?
+// Read-only, O(1), no SD I/O: every value is a compile-time constant from
+// src/Version.h, injected per build by scripts/build_version.py from the git
+// checkout. Advertised by the same capability bit 7 as 0xCA (both shipped in
+// the same build; older firmware flashes CE 01 on an unknown opcode, so hosts
+// gate on the bit rather than probing). Layout, 46 bytes, ASCII fields
+// right-padded with spaces (never NUL-terminated on the wire):
+//
+//   off  0  u8   ver         = 1 (schema version of this payload)
+//   off  1  u8   rows        panel_count_per_frame_row (this build's arena)
+//   off  2  u8   cols        panel_count_per_frame_col
+//   off  3  u8   flags       bit0 dirty working tree at build, bit1 DEBUG_SERIAL build
+//   off  4  char sha[8]      short git SHA, lowercase hex; "unknown " without git
+//   off 12  char date[10]    build date UTC "YYYY-MM-DD"
+//   off 22  char branch[24]  git branch; "detached" for detached HEAD; "unknown"
+//                            when unavailable; truncated to 24
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Copy src into a fixed-width field: truncate to `len`, right-pad with spaces.
+inline uint8_t *putField(uint8_t *p, const char *src, size_t len) {
+  size_t i = 0;
+  for (; i < len && src[i] != '\0'; ++i) *p++ = (uint8_t)src[i];
+  for (; i < len; ++i) *p++ = ' ';
+  return p;
+}
+
+}  // namespace
+
+void CommandProcessor::handleGetFirmwareVersion() {
+  using namespace AC::version;
+  uint8_t flags = 0;
+  if (fw_git_dirty)   flags |= fw_flag_dirty;
+  if (fw_debug_build) flags |= fw_flag_debug;
+
+  uint8_t payload[fw_version_payload_len];
+  uint8_t *p = payload;
+  p = put8(p, fw_version_payload_version);
+  p = put8(p, panel_count_per_frame_row);
+  p = put8(p, panel_count_per_frame_col);
+  p = put8(p, flags);
+  p = putField(p, fw_git_sha,    fw_sha_field_len);
+  p = putField(p, fw_build_date, fw_date_field_len);
+  p = putField(p, fw_git_branch, fw_branch_field_len);
+  static_assert(fw_version_payload_len == 46, "GET_FIRMWARE_VERSION payload is 46 bytes");
+  static_assert(fw_version_payload_len <= byte_count_per_response_max - 3,
+                "GET_FIRMWARE_VERSION payload must fit one framed reply");
+  current_source_->sendResponse(GET_FIRMWARE_VERSION_CMD, 0, payload, (size_t)(p - payload));
+  DBG_PRINTF("[cmd] firmware-version %s%s (%s) built %s, %ux%u%s\n",
+             fw_git_sha, fw_git_dirty ? "-dirty" : "", fw_git_branch, fw_build_date,
+             (unsigned)panel_count_per_frame_row, (unsigned)panel_count_per_frame_col,
+             fw_debug_build ? " DEBUG_SERIAL" : "");
 }
 
 // ---------------------------------------------------------------------------

@@ -43,4 +43,5 @@ GET_DIAG_OUTPUT_CMD         = 0xC4   # returns 0 or 1
 SET_SPI_CLOCK_CMD           = 0xC5   # [len=3,0xC5,lo,hi] uint16 LE MHz; echoes applied MHz
 GET_SPI_CLOCK_CMD           = 0xC6   # returns uint16 LE MHz
 GET_HEALTH_CMD              = 0xCA   # [01 CA] read-only health telemetry + reset-surviving breadcrumb (issue #50); 66-byte LE payload, see test_health.py
+GET_FIRMWARE_VERSION_CMD    = 0xCB   # [01 CB] build identity {ver, rows, cols, flags, sha[8], date[10], branch[24]} = 46 bytes; see test_firmware_version.py
 ALL_ON_CMD                  = 0xFF

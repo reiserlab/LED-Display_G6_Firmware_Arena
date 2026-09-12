@@ -5,6 +5,7 @@
 #include "SdManager.h"
 #include "CommandProcessor.h"
 #include "Health.h"
+#include "Version.h"
 
 NetworkManager   net;
 SerialManager    serial;
@@ -66,6 +67,13 @@ void setup() {
   // TEMPORARY crash-loop diagnostic -- remove once root-caused.
   {
     SentinelPrint diag;
+    // Build identity — same values GET_FIRMWARE_VERSION (0xCB) reports (src/Version.h).
+    diag.printf("=== G6 arena controller fw %s%s (%s) built %s, %ux%u panels%s ===\n",
+                AC::version::fw_git_sha, AC::version::fw_git_dirty ? "-dirty" : "",
+                AC::version::fw_git_branch, AC::version::fw_build_date,
+                (unsigned)AC::constants::panel_count_per_frame_row,
+                (unsigned)AC::constants::panel_count_per_frame_col,
+                AC::version::fw_debug_build ? " DEBUG_SERIAL" : "");
     uint32_t srsr = Health::stats.reset_cause;  // SRC_SRSR itself is cleared by Health::begin()
     if (Health::stats.prev_valid) {
       diag.printf("=== health breadcrumb from previous boot: op=%u arg=0x%02X at %lu us; slowest op=%u %lu us ===\n",

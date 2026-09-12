@@ -10,6 +10,7 @@ Current capabilities:
 - **Two command transports** — TCP (port 62222) and USB-CDC serial — sharing one parser and command set.
 - **`get-controller-info` (0xC2)** capability handshake and a **controller error display** ("CE / NN" glyph) for SD/CRC/parameter faults.
 - **`get-health` (0xCA)** read-only telemetry (loop/SD/SPI/USB counters, reset cause) plus a **reset-surviving breadcrumb** for soak-testing the Mode-3 streaming wedge (issue #50) — see [Health + breadcrumb](#health--breadcrumb-get-health-0xca).
+- **`get-firmware-version` (0xCB)** compiled-in **build identity** (git SHA, branch, dirty flag, UTC build date, arena rows×cols) so any controller can be pinned to the exact build it runs — see [Build identity](#build-identity-get-firmware-version-0xcb).
 - **Arena hardcoded to G6_2x10** — the panel-set table and CS pin map are baked in. Multi-arena lookup via [`g6_arena_configs.h`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_arena_configs.h) is deferred.
 - **10 MHz SPI**, MSB-first, **CPOL=1 / CPHA=1 (Mode 3)** per [`g6_01-panel-protocol.md`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_01-panel-protocol.md) § SPI framing. (Panels accept up to 30 MHz; the clock is held at 10 MHz during bring-up — see `spi_clock_speed` in `constants.h`.)
 - **G6 v2 `.pat` format** ([`g6_04-pattern-file-format.md`](https://github.com/reiserlab/Modular-LED-Display/blob/main/docs/development/g6_04-pattern-file-format.md)) is the on-disk file format the SD reader consumes.
@@ -73,6 +74,7 @@ All source files live in `src/`.
 | `ArenaConfig.h` | Hardcoded G6_2x10 panel-set table |
 | `constants.h` | Hardware constants, panel geometry, timing, SD/Mode-4/error constants |
 | `commands.h` | `ArenaCommands` enum (G4-compatible, G6-dropped commands marked) |
+| `Version.h` | Build identity constants (git SHA / branch / dirty / date) injected by `scripts/build_version.py`; reported by `GET_FIRMWARE_VERSION` (0xCB) |
 
 ## Host command protocol
 
@@ -156,6 +158,42 @@ Semantics:
   `4` / `0x01`; the `*slow_op` / `*slow_us` fields carry the "what was wedging" answer.
 - Hot-path cost per mark/clear is a few stores, one `micros()`, and a one-line dcache flush;
   `handleSetFramePosition`'s SD/timer logic is untouched beyond the counter and marks.
+
+### Build identity (`GET_FIRMWARE_VERSION`, 0xCB)
+
+Every build embeds the git identity of the checkout it was compiled from, so a controller in the
+field can be pinned to an exact build (issue #50 could not be: `GET_CONTROLLER_INFO` 0xC2 carries
+only a protocol version byte — always `1` — plus the capability bitmap and MAC, and 0xE3 describes
+the *panel* image on the SD card, not the controller). Request `[01 CB]`; framed reply `status 0`
++ a **46-byte** payload. Read-only, O(1), no SD I/O — every field is a compile-time constant
+(`src/Version.h`, `CommandProcessor::handleGetFirmwareVersion`; Python decoder in
+`tests/test_firmware_version.py`). ASCII fields are right-padded with spaces, never NUL-terminated:
+
+| Off | Type | Field | Meaning |
+|---|---|---|---|
+| 0 | u8 | `ver` | payload schema version, `1` |
+| 1 | u8 | `rows` | `panel_count_per_frame_row` this build was compiled for |
+| 2 | u8 | `cols` | `panel_count_per_frame_col` |
+| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build) |
+| 4 | char[8] | `sha` | short git SHA, lowercase hex (`git rev-parse --short=8`); `unknown ` when git was unavailable |
+| 12 | char[10] | `date` | build date, UTC, `YYYY-MM-DD` |
+| 22 | char[24] | `branch` | git branch, truncated to 24; `detached` for a detached HEAD; `unknown` when unavailable |
+
+How it gets in: `scripts/build_version.py` is a PlatformIO `pre:` extra script (listed in
+`platformio.ini` after the USB-string and port-finder scripts). On every `pio run` it runs
+`git rev-parse --short=8 HEAD`, `git rev-parse --abbrev-ref HEAD`, and
+`git status --porcelain --untracked-files=no` (untracked files do not make a build dirty), stamps
+the UTC date, and appends `FW_GIT_SHA` / `FW_GIT_BRANCH` / `FW_BUILD_DATE` / `FW_GIT_DIRTY` as
+`-D` macros; `src/Version.h` provides `"unknown"` fallbacks so a build without git still compiles.
+Because pre: scripts re-run on every build, **rebuilding after a commit picks up the new SHA** —
+and because the macros are on the compile command line, that rebuild is a full one (SCons
+re-compiles every object when its command changes), not incremental. The `DEBUG_SERIAL` boot
+banner prints the same identity (`=== G6 arena controller fw <sha> (<branch>) built <date> … ===`).
+
+Hosts: Arena Studio reads 0xCB at connect and records it in every run log as
+`run_metadata.firmware`. 0xCB is gated by the same **capability bit 7 (`health`)** in 0xC2 as
+`GET_HEALTH` — both shipped in the same build, and older firmware flashes a `CE 01` error glyph
+on any unknown opcode, so a host must check the bit before asking.
 
 ## SD pattern playback (Modes 2/3/4)
 
