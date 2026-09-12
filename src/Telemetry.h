@@ -57,7 +57,8 @@
 //                          malloc CAN in principle reach this region
 //   [~390 KiB unused]
 //   telemetry ring         0x2026F000 .. 0x2027F000    (this module)
-//   [3904 B gap]
+//   [3872 B gap]
+//   Health ISR/wdog record 0x2027FF20 .. 0x2027FF40
 //   Health breadcrumb      0x2027FF40 .. 0x2027FF60
 //   PJRC CrashReport       0x2027FF80 .. 0x20280000
 // HEAP GUARD. The heap would need ~390 KiB of malloc to reach the ring and
@@ -178,7 +179,7 @@ struct RingHeader {
 };
 static_assert(sizeof(RingHeader) == kHeaderSize, "RingHeader must be exactly 32 B");
 static_assert(kRingBase % 32 == 0, "ring base must be cache-line aligned");
-static_assert(kRingEnd <= 0x2027FF40UL, "ring must end below the Health breadcrumb");
+static_assert(kRingEnd <= 0x2027FF20UL, "ring must end below the Health ISR/watchdog record + breadcrumb");
 static_assert(kRingEnd <= 0x2027FF80UL, "ring must end below PJRC CrashReport");
 
 // Call in setup() AFTER Health::begin() (the boot record carries the reset

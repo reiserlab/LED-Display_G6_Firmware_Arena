@@ -46,7 +46,7 @@ Health = namedtuple(
         "prev_breadcrumb", "prev_breadcrumb_us", "prev_breadcrumb_arg",
         "prev_slow_op", "prev_slow_us", "slow_op", "slow_us",
         "prev_isr_last", "prev_isr_count", "prev_wdog_pc", "prev_wdog_lr",
-        "wdog_flags", "isr_last", "isr_count", "wdog_kicks",
+        "wdog_flags", "breadcrumb_isr_last", "breadcrumb_isr_count", "wdog_kicks",
     ],
 )
 
@@ -91,7 +91,7 @@ def test_health_reply_shape(transport):
     assert h.slow_op <= OP_MAX
     assert h.prev_breadcrumb <= OP_MAX
     assert h.prev_slow_op <= OP_MAX
-    assert h.isr_last <= ISR_WDOG and h.prev_isr_last <= ISR_WDOG
+    assert h.breadcrumb_isr_last <= ISR_WDOG and h.prev_isr_last <= ISR_WDOG
     # A live loop has measured at least one iteration by the time a host talks to it.
     assert h.loop_max_us > 0
 
@@ -172,8 +172,8 @@ def test_breadcrumb_consistency(transport):
     h = read_health(transport)
     if h.flags & FLAG_BREADCRUMB_VALID:
         assert h.prev_slow_op <= OP_MAX
-        if h.prev_breadcrumb != OP_CMD:
-            assert h.prev_breadcrumb_arg == 0
+        if h.prev_breadcrumb not in (OP_CMD, OP_CMD_DISARM, OP_CMD_PRELOAD, OP_CMD_ARM, OP_CMD_RESPOND):
+            assert h.prev_breadcrumb_arg == 0  # only dispatch + 0x70 sub-ops carry an opcode
     else:
         assert h.prev_breadcrumb == 0
         assert h.prev_breadcrumb_us == 0
@@ -193,11 +193,11 @@ def test_watchdog_armed_and_kicked(transport):
     time.sleep(0.2)
     b = read_health(transport)
     assert b.wdog_kicks > a.wdog_kicks, "loop() kicks the watchdog every iteration"
-    assert b.isr_count >= a.isr_count
+    assert b.breadcrumb_isr_count >= a.breadcrumb_isr_count
     if b.wdog_flags & WDOG_PREV_RESET:
         assert b.reset_cause & 0x80, "SRSR wdog3_rst_b"
     if b.wdog_flags & WDOG_PREV_PC:
-        assert b.prev_isr_last == ISR_WDOG and b.prev_wdog_pc != 0
+        assert b.prev_wdog_pc != 0
 
 
 def test_crashreport_passthrough(transport):
@@ -206,7 +206,7 @@ def test_crashreport_passthrough(transport):
     assert st == 0 and echo == GET_CRASHREPORT_CMD
     assert len(payload) == 128
     length = struct.unpack_from("<I", bytes(payload), 0)[0]
-    assert length == 0 or length == 44, f"arm_fault_info_struct.len is 0 (none) or 44, got {length}"
+    assert length in (0, 11), f"arm_fault_info_struct.len is 0 (none) or 11 words (44 B), got {length}"
     st2, _, payload2, _ = transport.command(GET_CRASHREPORT_CMD)
     assert bytes(payload2) == bytes(payload), "reading must not clear the record"
 

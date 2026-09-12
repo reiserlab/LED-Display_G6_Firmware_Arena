@@ -80,7 +80,7 @@ void setup() {
                 (unsigned)AC::constants::panel_count_per_frame_col,
                 AC::version::fw_debug_build ? " DEBUG_SERIAL" : "");
     uint32_t srsr = Health::stats.reset_cause;  // SRC_SRSR itself is cleared by Health::begin()
-    if (Health::stats.prev_valid && Health::stats.prev_isr_last == Health::ISR_WDOG) {
+    if (Health::stats.prev_isr_valid && Health::stats.prev_wdog_fired) {
       diag.printf("=== WATCHDOG reset: previous boot hung at pc=0x%08lX lr=0x%08lX (isr entries %lu) ===\n",
                   (unsigned long)Health::stats.prev_wdog_pc, (unsigned long)Health::stats.prev_wdog_lr,
                   (unsigned long)Health::stats.prev_isr_count);

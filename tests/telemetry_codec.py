@@ -61,6 +61,7 @@ ARENA_STATE_NAMES = ["ALL_OFF", "ALL_ON", "STREAMING_FRAME", "OPEN_LOOP", "SHOW_
 
 # SET_TELEMETRY request flags
 SET_FLAG_EVENTS = 0x01
+SET_FLAG_WDOG_CTRL = 0x10     # watchdog bits (5/6) present in this command; without it they are ignored
 SET_FLAG_WDOG_STARVE = 0x20   # bench test: stop kicking the 2 s watchdog -> reset with crash dump
 SET_FLAG_WDOG_OFF = 0x40      # runtime-disable the hardware watchdog (Health.h)
 SET_FLAG_SYNTHETIC = 0x80

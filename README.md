@@ -174,47 +174,63 @@ the main loop was preempted forever by an ISR-level spin / an interrupts-disable
 This commit adds three things so the next occurrence answers that:
 
 **1. Hardware watchdog (RTWDOG / `WDOG3`, 2 s).** `Health::watchdogBegin()` runs LAST in `setup()`;
-`Health::loopTick()` refreshes it every `loop()` iteration — **never from an ISR**. On expiry the
+`Health::loopTick()` refreshes it every `loop()` iteration — **never from an ISR**; the bounded
+main-loop spins that can outlast 2 s (`sendRaw`'s 5 s/2 s waits, `drainBulkData` up to 15 s on a
+rejected 0x85/0xE0, the synchronous 0xE0 upload loop with its 30 s idle deadline) kick from inside,
+deadlines unchanged. The one **unbounded** spin, `SpiManager::transferPanelSet`'s
+`while (!dmaComplete_)`, is deliberately NOT kicked — if the SPI DMA completion ever fails to
+arrive, the watchdog is what gets us out, and `wdog_pc` will point at it. On expiry the
 RTWDOG asserts a system reset through the SRC (`SRC_SRSR` bit 7 `wdog3_rst_b`, already in
 `GET_HEALTH.reset_cause` and in the telemetry `STATE(boot).code`), which is the same reset domain as
 `SYSRESETREQ`: OCRAM2 (`0x20200000..`) is not powered down, so the **telemetry ring and the
 breadcrumb survive exactly as they do for `SYSTEM_RESET`** (PJRC's CrashReport relies on the same
-property). Bench verification: `SET_TELEMETRY` flags **bit5 = starve** stops the kicks → reset in
-2 s → `GET_HEALTH` must show `wdog_flags` bit1 (previous reset was the watchdog), `breadcrumb_valid`,
-and the ring's `boot_count` incremented with the pre-reset records intact. Programming: `CS =
+property). Bench verification: `SET_TELEMETRY` flags **bit4 + bit5 = starve** stops the kicks (the check lives inside
+`watchdogKick()`, so every kick path honours it) → reset in 2 s → `GET_HEALTH` must show
+`wdog_flags` bit1 (previous reset was the watchdog), bit2 (PC captured), `breadcrumb_valid`, and the
+ring's `boot_count` incremented with the pre-reset records intact. Programming: `CS =
 CMD32EN | CLK(LPO 32 kHz) | PRES(/256) | UPDATE | INT | EN`, `TOVAL = 250` (125 Hz ticks → 2.000 s),
-unlock `0xD928C520`, refresh `0xB480A602`; `UPDATE=1` keeps it reconfigurable so a **runtime disable
-(flags bit6) and the nesting-safe `watchdogSuspend()/Resume()`** work. Both spins are bounded — a
-mis-programmed RTWDOG can never brick boot (`wdog_flags` bit6 reports a config failure instead).
+unlock `0xD928C520`, refresh `0xB480A602`; `UPDATE=1` keeps it reconfigurable: **runtime disable** (flags bit4 + bit6) and the
+nesting-safe **long-operation window** `watchdogSuspend()/Resume()`, which re-programs `TOVAL` live
+to **30 s** (3750 ticks) for the operation and back to 2 s afterwards — the watchdog is **never
+fully off** during SD format / ISP / image upload, only slower. Every reprogramming (unlock →
+TOVAL → CS → RCS) is a few µs with IRQs masked and refreshes the counter immediately. Both spins
+are bounded — a mis-programmed RTWDOG can never brick boot. If a reprogramming FAILS the hardware
+state is unknown: it is reported as still armed (`wdog_flags` bit6 "last reprogramming failed"),
+`watchdogSuspend/Resume/SetEnabled` return false, and the caller proceeds anyway after appending a
+telemetry `STATE(telemetry, code 0xEE, arg = opcode)` so the trace shows it.
 Compile-time switch `HEALTH_WATCHDOG` (default 1). **Pre-reset PC capture:** `INT=1` raises
 `IRQ_RTWDOG` (priority 0) 128 bus clocks before the reset; the naked ISR stores the stacked
 **PC/LR of the preempted context** (the hung main loop, or the ISR that was spinning) into the
-breadcrumb (`wdog_pc`/`wdog_lr`, `isr_last = 3`) and flushes the line. Limits: an equal-priority
+**separate ISR/watchdog record** (`wdog_pc`/`wdog_lr`/`wdog_stamp_us`, `wdog_fired = 1`,
+`isr_last = 3`) and seals it. Limits: an equal-priority
 ISR (the LPSPI IRQs are also priority 0) or an interrupts-disabled spin cannot be preempted — then
 only the reset happens and `isr_last`/`prev_breadcrumb` carry the answer. Long synchronous handlers
-pause the watchdog for their dispatch: `PURGE_MEMORY` 0x8F (SD format), `G6_PROGRAM_PANEL` 0xC8 /
+open the 30 s window for their dispatch: `PURGE_MEMORY` 0x8F (SD format), `G6_PROGRAM_PANEL` 0xC8 /
 `G6_VERIFY_PANEL` 0xC9 (ISP), `GET_SD_ARCHIVE` 0x8A (entry collection), `SET_FIRMWARE_FILE` 0xE0
-(synchronous image upload); `SerialManager::sendRaw`'s bounded 5 s / 2 s spins kick from inside
-(still `loop()` context). Everything else must finish in well under 2 s — a 129 ms SD read is fine.
-**Every `SET_TELEMETRY` re-asserts bits 5/6** (a plain `flags = 0x01` re-arms the watchdog).
+(synchronous image upload). Everything else must finish in well under 2 s — a 129 ms SD read is
+fine. **Watchdog policy bits are applied only when `SET_TELEMETRY` bit4 ("watchdog bits present")
+is set**; a plain logging enable/disable (`0x01` / `0x00`) never touches the watchdog.
 
 **2. Finer breadcrumbs.** Sub-ops inside the 0x70 handler, `op_arg = 0x70`: `6 OP_CMD_DISARM`
 (around `disarmRefreshTimer`), `7 OP_CMD_PRELOAD` (before `loadFrame`), `8 OP_CMD_ARM`
-(`armRefreshTimer`), `9 OP_CMD_RESPOND` (`sendResponse`). **ISR breadcrumb**: `isr_last` (byte 7 of
-the record — the old pad) is set at entry / cleared at exit of `SpiManager::refreshISR` (1) and
-`SpiManager::dmaISR` (2), and to 3 by the watchdog ISR; `isr_count` counts entries. These fields are
-written from interrupt context and are **not covered by the checksum** (an ISR landing between a
-main-loop field write and its seal would otherwise leave a stale checksum); they ride along with the
-main-loop flush and flush themselves. SdFat/USB ISRs live in the core and are not hooked.
+(`armRefreshTimer`), `9 OP_CMD_RESPOND` (`sendResponse`). The main-loop breadcrumb keeps its v1
+layout. **ISR / watchdog record**: a SEPARATE 32-byte OCRAM line at `0x2027FF20` (below the
+breadcrumb at `0x2027FF40`) with its own magic `'H6IR'` + checksum — `isr_last` (set at entry /
+cleared at exit of `SpiManager::refreshISR` = 1 and `SpiManager::dmaISR` = 2, 3 = watchdog ISR),
+`isr_count`, `wdog_fired`, `wdog_pc`, `wdog_lr`, `wdog_stamp_us`. It is written and sealed ONLY
+from interrupt context (under a brief IRQ mask so nested ISRs cannot leave a stale checksum) and
+harvested at boot independently of the breadcrumb: a main loop caught mid-`mark()` (checksummed
+fields dirty) can no longer invalidate the PC capture, and vice versa. SdFat/USB ISRs live in the
+core and are not hooked.
 `GET_HEALTH` is now **ver 2, 89 B** — offsets 0..65 unchanged, tail appended:
 
 | Off | Type | Field | Meaning |
 |---|---|---|---|
 | 66 | u8 | `prev_isr_last` | ISR the previous boot was inside when it died (0 none, 1 refresh, 2 dma, 3 wdog) |
 | 67 | u32 | `prev_isr_count` | ISR entries in the previous boot |
-| 71 | u32 | `prev_wdog_pc` | stacked PC captured by the watchdog pre-reset IRQ (valid when `prev_isr_last` = 3) |
+| 71 | u32 | `prev_wdog_pc` | stacked PC captured by the watchdog pre-reset IRQ (valid when `wdog_flags` bit2) |
 | 75 | u32 | `prev_wdog_lr` | stacked LR at that moment |
-| 79 | u8 | `wdog_flags` | bit0 armed, bit1 previous reset was the watchdog, bit2 previous boot captured pc, bit3 compiled in, bit4 suspended, bit5 starving (test), bit6 RTWDOG config failed |
+| 79 | u8 | `wdog_flags` | bit0 armed, bit1 previous reset was the watchdog, bit2 previous boot captured pc, bit3 compiled in, bit4 long-op window (30 s) active, bit5 starving (test), bit6 last RTWDOG reprogramming failed (state unknown) |
 | 80 | u8 | `isr_last` | this boot: ISR currently inside (live) |
 | 81 | u32 | `isr_count` | this boot: ISR entries |
 | 85 | u32 | `wdog_kicks` | this boot: watchdog refreshes |
@@ -224,11 +240,17 @@ The telemetry `STATE(boot).arg` low byte gains **bit1 = previous boot ended in t
 
 **3. `GET_CRASHREPORT` 0xCC.** `[01 CC]` → the raw **128 B** at `0x2027FF80..0x20280000`: PJRC's
 `arm_fault_info_struct` `{len@0, ipsr@4, cfsr@8, hfsr@12, mmfar@16, bfar@20, ret@24, xpsr@28,
-temp(float)@32, time@36, crc@40}` (`len == 0` = no fault recorded) followed by PJRC's own breadcrumb
+temp(float)@32, time@36, crc@40}` (`len` is in **words**: 11 when a fault is recorded, 0 when none) followed by PJRC's own breadcrumb
 words at `0x2027FFC0`. Readable without `DEBUG_SERIAL`; **never cleared by this read**. Caveat: the
 `DEBUG_SERIAL` boot banner prints `CrashReport`, and the core's `printTo` clears it — so the debug
 build hands over an already-cleared record; the performance build preserves it until the next fault.
-Ships with the ring: gate on 0xCB `flags` bit 2.
+Gate on **0xCB `flags` bit 3** (`crashreport`, also implies `GET_HEALTH` ver 2) — not on bit 2: a
+rollback to the ring build c47ee68 has the ring but neither 0xCC nor the v2 tail.
+
+**Deferred (recorded, not planned for this diagnostic build):** temp-file pattern replacement;
+a recovery-mode boot path / consecutive-watchdog-reset failure counter; a versioned crash envelope
+wrapping breadcrumb + ISR record + CrashReport; ISR hooks bracketing core driver code (SdFat, USB,
+LPSPI/DMA); dual ring headers.
 
 **Investigated and dropped:** the ELF string `beginCycles` from `IntervalTimer::beginCycles` is the
 symbol name; `cores/teensy4/debug/printf.h` compiles `printf(...)` to nothing unless
@@ -251,7 +273,7 @@ the *panel* image on the SD card, not the controller). Request `[01 CB]`; framed
 | 0 | u8 | `ver` | payload schema version, `1` |
 | 1 | u8 | `rows` | `panel_count_per_frame_row` this build was compiled for |
 | 2 | u8 | `cols` | `panel_count_per_frame_col` |
-| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build), bit2 `telemetry` (telemetry ring compiled in — `SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9 answer; **hosts gate 0xA8 on this bit**, not on 0xC2 bit 7) |
+| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build), bit2 `telemetry` (telemetry ring compiled in — `SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9 answer; **hosts gate 0xA8 on this bit**, not on 0xC2 bit 7), bit3 `crashreport` (`GET_CRASHREPORT` 0xCC + `GET_HEALTH` ver 2 present; **hosts gate 0xCC on this bit** — a rollback to c47ee68 has bit2 but not bit3) |
 | 4 | char[8] | `sha` | short git SHA, lowercase hex (`git rev-parse --short=8`); `unknown ` when git was unavailable |
 | 12 | char[10] | `date` | build date, UTC, `YYYY-MM-DD` |
 | 22 | char[24] | `branch` | git branch, truncated to 24; `detached` for a detached HEAD; `unknown` when unavailable |

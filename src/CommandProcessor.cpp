@@ -103,9 +103,10 @@ void CommandProcessor::processCommand() {
     current_source_ = &net_;
     const ParsedCommand &cmd = net_.command();
     if (cmd.is_bulk) {
-      if (cmd.cmd == SET_FIRMWARE_FILE_CMD) Health::watchdogSuspend();  // synchronous image upload can exceed 2 s
+      const bool fw_upload = (cmd.cmd == SET_FIRMWARE_FILE_CMD);  // synchronous image upload: 30 s watchdog window
+      if (fw_upload && !Health::watchdogSuspend()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, cmd.cmd);
       bool async_handoff = handleBulkWriteCommand(cmd);
-      if (cmd.cmd == SET_FIRMWARE_FILE_CMD) Health::watchdogResume();
+      if (fw_upload && !Health::watchdogResume()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, cmd.cmd);
       if (!async_handoff) net_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
@@ -121,9 +122,10 @@ void CommandProcessor::processCommand() {
     current_source_ = &serial_;
     const ParsedCommand &cmd = serial_.command();
     if (cmd.is_bulk) {
-      if (cmd.cmd == SET_FIRMWARE_FILE_CMD) Health::watchdogSuspend();  // synchronous image upload can exceed 2 s
+      const bool fw_upload = (cmd.cmd == SET_FIRMWARE_FILE_CMD);  // synchronous image upload: 30 s watchdog window
+      if (fw_upload && !Health::watchdogSuspend()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, cmd.cmd);
       bool async_handoff = handleBulkWriteCommand(cmd);
-      if (cmd.cmd == SET_FIRMWARE_FILE_CMD) Health::watchdogResume();
+      if (fw_upload && !Health::watchdogResume()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, cmd.cmd);
       if (!async_handoff) serial_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
@@ -159,7 +161,11 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
   // pause it for the dispatch; everything else must finish in well under 2 s.
   const bool long_op = command_byte == PURGE_MEMORY_CMD || command_byte == G6_PROGRAM_PANEL_CMD
                     || command_byte == G6_VERIFY_PANEL_CMD || command_byte == GET_SD_ARCHIVE_CMD;
-  if (long_op) Health::watchdogSuspend();
+  if (long_op && !Health::watchdogSuspend()) {
+    // The RTWDOG refused the 30 s window (unlock/RCS timeout; state unknown).
+    // Proceed anyway, but leave a trace: STATE(telemetry, code 0xEE, arg opcode).
+    Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, command_byte);
+  }
 
   switch (command_byte) {
     case ALL_OFF_CMD:
@@ -954,7 +960,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
   }
   Health::clear();
-  if (long_op) Health::watchdogResume();
+  if (long_op && !Health::watchdogResume()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, command_byte);
 
   // Telemetry CMD record (Telemetry.h): receipt time, opcode, the reply's
   // status byte, and the first <= 8 request bytes after [len, cmd]. The
@@ -1074,10 +1080,11 @@ void CommandProcessor::handleGetControllerInfo() {
 //   ---- ver 2 tail (watchdog + ISR breadcrumb; Health.h) ----
 //   off 66  u8  prev_isr_last       ISR the previous boot was inside when it died (0 none, 1 refresh, 2 dma, 3 wdog)
 //   off 67  u32 prev_isr_count      ISR entries in the previous boot
-//   off 71  u32 prev_wdog_pc        stacked PC captured by the watchdog pre-reset IRQ (valid when prev_isr_last == 3)
+//   off 71  u32 prev_wdog_pc        stacked PC captured by the watchdog pre-reset IRQ (valid when wdog_flags bit2)
 //   off 75  u32 prev_wdog_lr        stacked LR at that moment
 //   off 79  u8  wdog_flags          bit0 armed, bit1 prev reset = watchdog (SRSR wdog3), bit2 prev pc captured,
-//                                   bit3 compiled in, bit4 suspended, bit5 starving (test), bit6 RTWDOG config failed
+//                                   bit3 compiled in, bit4 long-op window (30 s) active, bit5 starving (test),
+//                                   bit6 last RTWDOG reprogramming failed (state unknown)
 //   off 80  u8  isr_last            THIS boot: ISR currently inside (live)
 //   off 81  u32 isr_count           THIS boot: ISR entries
 //   off 85  u32 wdog_kicks          THIS boot: watchdog refreshes
@@ -1181,7 +1188,8 @@ void CommandProcessor::handleGetCrashReport() {
 //   off  1  u8   rows        panel_count_per_frame_row (this build's arena)
 //   off  2  u8   cols        panel_count_per_frame_col
 //   off  3  u8   flags       bit0 dirty working tree at build, bit1 DEBUG_SERIAL build,
-//                            bit2 telemetry ring compiled in (0xA8/0xA9 present)
+//                            bit2 telemetry ring compiled in (0xA8/0xA9 present),
+//                            bit3 GET_CRASHREPORT 0xCC + GET_HEALTH ver 2 present
 //   off  4  char sha[8]      short git SHA, lowercase hex; "unknown " without git
 //   off 12  char date[10]    build date UTC "YYYY-MM-DD"
 //   off 22  char branch[24]  git branch; "detached" for detached HEAD; "unknown"
@@ -1206,6 +1214,7 @@ void CommandProcessor::handleGetFirmwareVersion() {
   if (fw_git_dirty)     flags |= fw_flag_dirty;
   if (fw_debug_build)   flags |= fw_flag_debug;
   if (fw_has_telemetry) flags |= fw_flag_telemetry;  // hosts gate SET_TELEMETRY on this, not on 0xC2 bit 7
+  if (fw_has_crashreport) flags |= fw_flag_crashreport;  // hosts gate GET_CRASHREPORT 0xCC (+ HEALTH v2) on this
 
   uint8_t payload[fw_version_payload_len];
   uint8_t *p = payload;
@@ -1235,7 +1244,8 @@ void CommandProcessor::handleGetFirmwareVersion() {
 // set-telemetry (0xA8): [04 A8 flags rate_lo rate_hi] or [02 A8 flags].
 //   flags bit0 = record events (default ON at boot); bit7 = synthetic producer
 //   (bench test T1: a dummy CMD record, cmd 0xFE, at `rate` records/s, paced
-//   from loop(); off at boot); bits 1..6 reserved (analog ticks come later).
+//   from loop(); off at boot); bit4 = watchdog bits present, then bit6 =
+//   watchdog OFF, bit5 = starve (bench test) — see Health.h; bits 1..3 reserved.
 //   The 2-byte form leaves `rate` unchanged. Reply: status 0, no payload.
 // ---------------------------------------------------------------------------
 
@@ -1255,11 +1265,16 @@ void CommandProcessor::handleSetTelemetry(const ParsedCommand &cmd) {
     rate = r;
   }
   Telemetry::configure(flags, rate);  // records STATE(telemetry, flags, rate) itself
-  // Watchdog bench control (Health.h): bit6 = watchdog OFF, bit5 = starve it
-  // (stop kicking -> reset in 2 s, validates the crash-dump path end to end).
-  // Re-asserted on EVERY SET_TELEMETRY, so a plain flags=0x01 re-arms it.
-  Health::watchdogSetEnabled(!(flags & 0x40));
-  Health::watchdogStarve((flags & 0x20) != 0);
+  // Watchdog bench control (Health.h): applied ONLY when bit4 ("watchdog bits
+  // present") is set, so a plain logging enable/disable (0x01 / 0x00) never
+  // touches watchdog policy. bit6 = watchdog OFF, bit5 = starve it (stop
+  // kicking -> reset in 2 s, validates the crash-dump path end to end).
+  if (flags & 0x10) {
+    if (!Health::watchdogSetEnabled(!(flags & 0x40))) {
+      Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, SET_TELEMETRY_CMD);  // RTWDOG refused; state unknown
+    }
+    Health::watchdogStarve((flags & 0x20) != 0);
+  }
   current_source_->sendResponse(SET_TELEMETRY_CMD, 0, "");
   DBG_PRINTF("[cmd] set-telemetry flags=0x%02X rate=%ld\n", (unsigned)flags, (long)rate);
 }
@@ -2352,6 +2367,7 @@ bool CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
   const char *fail_msg = "Upload timeout";
 
   while (remaining > 0) {
+    Health::watchdogKick();  // synchronous upload (30 s idle deadline) in loop() context
     size_t want = (remaining < CHUNK) ? (size_t)remaining : CHUNK;
     size_t got  = current_source_->readBulkBytes(chunk, want);
     if (got > 0) {
@@ -2493,6 +2509,7 @@ void CommandProcessor::drainBulkData(uint32_t remaining) {
   uint32_t t0 = start;
   while (remaining > 0) {
     if ((uint32_t)(millis() - start) > kAbsoluteTimeoutMs) break;
+    Health::watchdogKick();  // up to 15 s of draining in loop() context; deadlines below unchanged
     size_t want = (remaining < sizeof(buf)) ? (size_t)remaining : sizeof(buf);
     size_t got = current_source_->readBulkBytes(buf, want);
     if (got > 0) {

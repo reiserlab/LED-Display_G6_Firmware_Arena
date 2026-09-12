@@ -270,7 +270,7 @@ void begin() {
   // must already have run so both are harvested).
   uint16_t arg = ((uint16_t)Health::stats.prev_last_op << 8)
                | (Health::stats.prev_valid ? 1 : 0)
-               | ((Health::stats.prev_valid && Health::stats.prev_isr_last == Health::ISR_WDOG) ? 2 : 0);
+               | ((Health::stats.prev_isr_valid && Health::stats.prev_wdog_fired) ? 2 : 0);
   state(ST_BOOT, (uint8_t)(Health::stats.reset_cause & 0xFF), arg);
 }
 

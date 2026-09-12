@@ -99,9 +99,18 @@ HEALTH_FIELDS = (
     "prev_breadcrumb", "prev_breadcrumb_us", "prev_breadcrumb_arg",
     "prev_slow_op", "prev_slow_us", "slow_op", "slow_us",
 )
+# ver 2 (fw feat/telemetry-ring-2x10 fb11681+): 23-byte watchdog / ISR tail appended at offset 66.
+HEALTH_FMT_V2 = HEALTH_FMT + "BIIIBBII"
+HEALTH_LEN_V2 = struct.calcsize(HEALTH_FMT_V2)  # 89
+HEALTH_FIELDS_V2 = HEALTH_FIELDS + (
+    "prev_isr_last", "prev_isr_count", "prev_wdog_pc", "prev_wdog_lr",
+    "wdog_flags", "breadcrumb_isr_last", "breadcrumb_isr_count", "wdog_kicks",
+)
+HEALTH_ISRS = ("none", "refresh", "dma", "wdog")
 HEALTH_FMT_55 = "<BBIIIIIIBIIIIBHIBI"  # the 55-byte prefix (fields up to prev_breadcrumb_us)
 HEALTH_LEN_55 = struct.calcsize(HEALTH_FMT_55)
-HEALTH_OPS = ("idle", "sd_read", "spi_transfer", "usb_write", "command", "sd_open")
+HEALTH_OPS = ("idle", "sd_read", "spi_transfer", "usb_write", "command", "sd_open",
+              "cmd_disarm", "cmd_preload", "cmd_arm", "cmd_respond")  # 6-9: 0x70 sub-ops (v2 fw)
 ARENA_STATES = ("ALL_OFF", "ALL_ON", "STREAMING_FRAME", "OPEN_LOOP", "SHOW_FRAME",
                 "CLOSED_LOOP", "PSRAM_PLAY", "ERROR_DISPLAY")
 
@@ -170,8 +179,21 @@ def decode_frames_sent(payload: bytes) -> Optional[int]:
 
 
 def decode_health(payload: bytes) -> Optional[dict]:
-    """GET_HEALTH (0xCA) -> dict. Full 66-byte ver-1 layout, or the 55-byte prefix."""
-    if len(payload) >= HEALTH_LEN:
+    """GET_HEALTH (0xCA) -> dict. 89-byte ver-2, 66-byte ver-1, or the 55-byte prefix."""
+    if len(payload) >= HEALTH_LEN_V2:
+        vals = struct.unpack_from(HEALTH_FMT_V2, payload)
+        h = dict(zip(HEALTH_FIELDS_V2, vals))
+        wf = h["wdog_flags"]
+        h["wdog_armed"] = bool(wf & 0x01)
+        h["prev_reset_was_wdog"] = bool(wf & 0x02)
+        h["prev_wdog_pc_valid"] = bool(wf & 0x04)
+        h["wdog_longop_window"] = bool(wf & 0x10)
+        h["wdog_starving"] = bool(wf & 0x20)
+        h["wdog_reprogram_failed"] = bool(wf & 0x40)
+        h["prev_isr_last_name"] = _name(HEALTH_ISRS, h["prev_isr_last"], "isr")
+        h["prev_wdog_pc_hex"] = f"0x{h['prev_wdog_pc']:08X}"
+        h["prev_wdog_lr_hex"] = f"0x{h['prev_wdog_lr']:08X}"
+    elif len(payload) >= HEALTH_LEN:
         vals = struct.unpack_from(HEALTH_FMT, payload)
         h = dict(zip(HEALTH_FIELDS, vals))
     elif len(payload) >= HEALTH_LEN_55:

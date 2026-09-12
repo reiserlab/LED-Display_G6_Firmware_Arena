@@ -60,6 +60,9 @@ constexpr bool fw_debug_build  = false;
 //                       bit, not on 0xC2 bit 7 (health): the 0xC2 capability byte is
 //                       full, and health-only firmware (22b756d) flashes a CE 01
 //                       glyph on an unknown 0xA8.
+//                       bit3 GET_CRASHREPORT 0xCC + GET_HEALTH ver 2 (89 B) present —
+//                       hosts gate 0xCC on THIS bit (a rollback to c47ee68 has the
+//                       ring but neither).
 //   off  4  char sha[8]      short git SHA, lowercase hex, right-padded with spaces
 //   off 12  char date[10]    build date UTC "YYYY-MM-DD"
 //   off 22  char branch[24]  git branch, right-padded with spaces, truncated to 24
@@ -73,6 +76,8 @@ constexpr uint8_t fw_flag_dirty     = 0x01;
 constexpr uint8_t fw_flag_debug     = 0x02;
 constexpr uint8_t fw_flag_telemetry = 0x04;  // src/Telemetry.h is always compiled into this build
 constexpr bool    fw_has_telemetry  = true;  // the build condition for the ring (unconditional here)
+constexpr uint8_t fw_flag_crashreport = 0x08;  // GET_CRASHREPORT 0xCC + GET_HEALTH ver 2 compiled in
+constexpr bool    fw_has_crashreport  = true;
 
 }  // namespace version
 }  // namespace AC
