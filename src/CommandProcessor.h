@@ -103,7 +103,8 @@ class CommandProcessor {
   bool     pending_req_valid_ = false;
   uint32_t frame_req_us_     = 0;      // request/decision time of the frame now in frame_buf_
   uint8_t  frame_src_flags_  = 0;      // Telemetry::kFrameFlag*
-  uint16_t loads_since_frame_rec_ = 0; // loadFrame successes since the last FRAME record
+  bool     buf_presented_    = true;   // frame_buf_ content has reached the panels at least once
+  uint8_t  superseded_pending_ = 0;    // buffers replaced before any transfer since the last FRAME record (saturating)
   uint32_t open_reads_       = 0;      // readFrame calls since the pattern was opened (STATE sd_reads)
 
   // Digital IO roles (#135, SET_DIO_ROLE 0xAC). Ports are 1-based on the wire
@@ -322,6 +323,7 @@ class CommandProcessor {
   void servicePsramPlay();               // V2 auto-advance (LAB-41/42)
   bool loadFrame(uint16_t frame_index);  // false on SD/CRC error (shows glyph)
   void flushOpenReads();                 // STATE(sd_reads) for the pattern being left
+  void invalidateFrameBuf();             // buffer ownership changes: drop SD validity + provenance, count an unpresented frame
 
   // Helpers.
   void fillFrameBufferAllOn(uint16_t block_byte_count);

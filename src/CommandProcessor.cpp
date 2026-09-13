@@ -1005,7 +1005,7 @@ void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
 
   // Copy the frame payload into our owned buffer so the network layer can
   // recycle its receive slot.
-  frame_buf_is_frame_ = false;  // streamed frame replaces the SD frame
+  invalidateFrameBuf();  // streamed frame replaces the SD frame
   memcpy(frame_buf_, buf + stream_header_byte_count, frame_byte_count);
   frame_byte_count_  = (uint16_t)frame_byte_count;
   block_byte_count_  = block_size;
@@ -1551,7 +1551,11 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
   // saved read is one fewer card operation feeding the card's read-count
   // maintenance (the 30–90 ms stalls). The held buffer already carries this
   // trial's duty, the live panel display mode and the AO outputs.
-  if (state_ == ArenaState::SHOW_FRAME && frame_buf_is_frame_ && index == cur_frame_index_) {
+  // Only when the refresh timer is actually running at the current rate: a
+  // previous arm failure must be retried by the normal path, never hidden
+  // behind a cached-frame success (Codex review, blocking).
+  if (state_ == ArenaState::SHOW_FRAME && frame_buf_is_frame_ && index == cur_frame_index_
+      && spi_.refreshArmedAt(refresh_rate_hz_)) {
     ++Health::stats.cmd70_same_index;
     Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
     current_source_->sendResponse(SET_FRAME_POSITION_CMD, 0, "");
@@ -1597,7 +1601,7 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::buildPsramFrame(uint16_t index) {
-  frame_buf_is_frame_ = false;
+  invalidateFrameBuf();
   memset(frame_buf_, 0, sizeof(frame_buf_));
   frame_buf_[0] = 'F';
   frame_buf_[1] = 'R';
@@ -1708,6 +1712,7 @@ void CommandProcessor::transmitOnRefresh() {
     spi_.refreshFlag = false;
     uint32_t t0 = micros();
     spi_.transferFrame(frame_buf_, block_byte_count_);
+    buf_presented_ = true;  // presentation accounting runs on EVERY transfer, not only on recorded changes
     // Telemetry FRAME (Telemetry.h): one record per displayed frame CHANGE —
     // t_us = start of the SPI push (what the panels latch), spi_us = its
     // duration, sd_load_us = the readFrame that produced this frame. Held
@@ -1716,13 +1721,12 @@ void CommandProcessor::transmitOnRefresh() {
     if (cur_frame_index_ != tel_last_frame_ || pattern_id_ != tel_last_pattern_) {
       tel_last_frame_   = cur_frame_index_;
       tel_last_pattern_ = pattern_id_;
-      uint16_t superseded = loads_since_frame_rec_ > 0 ? (uint16_t)(loads_since_frame_rec_ - 1) : 0;
-      loads_since_frame_rec_ = 0;
+      const uint8_t superseded = superseded_pending_;  // buffers replaced before any transfer since the last record
+      superseded_pending_ = 0;
       Telemetry::frame(t0, cur_frame_index_, pattern_id_,
                        Health::stats.last_sd_read_us, micros() - t0,
                        t0 - frame_req_us_,                       // dispatch/decision → SPI start
-                       superseded > 0xFF ? 0xFF : (uint8_t)superseded,
-                       frame_src_flags_);
+                       superseded, frame_src_flags_);
     }
   }
 }
@@ -2049,17 +2053,37 @@ void CommandProcessor::serviceClosedLoop() {
 // counter restarts at 0 so a STOP followed by a new trial emits it once.
 void CommandProcessor::flushOpenReads() {
   if (open_reads_ == 0) return;
-  Telemetry::state(Telemetry::ST_SD_READS, 0,
-                   open_reads_ > 0xFFFF ? 0xFFFF : (uint16_t)open_reads_);
+  // code = binary shift, arg = reads >> shift: a 20-minute single-pattern trial at
+  // 300 reads/s is 360k reads, well past a bare u16 (Codex review).
+  uint8_t shift = 0;
+  uint32_t v = open_reads_;
+  while (v > 0xFFFF) { v >>= 1; ++shift; }
+  Telemetry::state(Telemetry::ST_SD_READS, shift, (uint16_t)v);
   open_reads_ = 0;
+}
+
+// Buffer ownership changes hands (error glyph / all-on / dark / streamed frame /
+// PSRAM index block / pattern open): drop the SD-frame validity AND its
+// provenance, so a FRAME record for the new content never inherits sd_read /
+// contiguous flags or a stale request time, and count an SD frame that never
+// reached the panels as superseded (Codex review, 2026-09-13).
+void CommandProcessor::invalidateFrameBuf() {
+  if (frame_buf_is_frame_ && !buf_presented_ && superseded_pending_ < 0xFF) ++superseded_pending_;
+  frame_buf_is_frame_ = false;
+  frame_src_flags_ = 0;
+  frame_req_us_ = micros();
+  buf_presented_ = false;
 }
 
 bool CommandProcessor::loadFrame(uint16_t frame_index) {
   // Request/decision time of the frame about to be loaded: the 0x70 dispatch
   // when handleSetFramePosition asked for it, else now (Mode 2/4 decided here).
+  if (frame_buf_is_frame_ && !buf_presented_ && superseded_pending_ < 0xFF) ++superseded_pending_;  // the previous SD frame never reached the panels
   frame_req_us_ = pending_req_valid_ ? pending_req_us_ : micros();
   pending_req_valid_ = false;
   frame_buf_is_frame_ = false;  // being overwritten; set again below on success
+  frame_src_flags_ = 0;
+  buf_presented_ = false;
   // Health (#50): breadcrumb + readFrame timing. Only caller of readFrame.
   Health::mark(Health::OP_SD_READ);
   uint32_t t_sd = micros();
@@ -2082,8 +2106,11 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
                                        : Telemetry::kSdSlowPhaseTail;
     if (err != CE_NONE) phase |= Telemetry::kSdSlowErrorFlag;
     Telemetry::state(Telemetry::ST_SD_SLOW, phase, hundreds > 0xFFFF ? 0xFFFF : (uint16_t)hundreds);
+    // errorData() is the USDHC IRQSTAT the driver saved at its LAST error (sticky, may
+    // predate this read); its informative bits are 16-28 (command/data timeout, CRC,
+    // end-bit, auto-CMD12, DMA errors) — keep the upper half (Codex review).
     Telemetry::state(Telemetry::ST_SD_SLOW_CTX, sd_.cardErrorCode(),
-                     (uint16_t)(sd_.cardErrorData() & 0xFFFF));
+                     (uint16_t)(sd_.cardErrorData() >> 16));
   }
   if (err != CE_NONE) {
     DBG_PRINTF("[cmd] loadFrame %u failed err=%u\n",
@@ -2096,7 +2123,6 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   frame_buf_is_frame_ = true;
   frame_src_flags_ = (uint8_t)(Telemetry::kFrameFlagSdRead
                                | (sd_.contiguous() ? Telemetry::kFrameFlagContiguous : 0));
-  if (loads_since_frame_rec_ < 0xFFFF) ++loads_since_frame_rec_;
   patchDispMode();
   patchTrialDuty();
   if (ao_mode_ == 1) {
@@ -2170,7 +2196,7 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
                                         uint16_t init_frame, uint16_t duration_ticks) {
   spi_.disarmRefreshTimer();
   flushOpenReads();              // STATE(sd_reads) for the pattern being left, if any
-  frame_buf_is_frame_ = false;   // a new pattern: whatever is buffered is not its frame
+  invalidateFrameBuf();          // a new pattern: whatever is buffered is not its frame
 
   Health::mark(Health::OP_SD_OPEN);  // #50 breadcrumb: SD open + header validate
   uint8_t err = sd_.openPattern(pattern_id);
@@ -2228,7 +2254,7 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
 void CommandProcessor::showError(uint8_t code) {
   spi_.disarmRefreshTimer();
   block_byte_count_ = G6::block_byte_count_gs16;
-  frame_buf_is_frame_ = false;
+  invalidateFrameBuf();
   frame_byte_count_ = G6Error::buildErrorFrame(frame_buf_, code, panel_count_per_frame);
   state_ = ArenaState::ERROR_DISPLAY;
   error_until_ms_ = millis() + error_display_hold_ms;
@@ -2314,7 +2340,7 @@ void CommandProcessor::fillFrameBufferAllOn(uint16_t block_byte_count) {
   // Synthesize an all-max-pixel frame using the current panel display mode.
   // Block layout: [header][cmd][200 pixel bytes = 0xFF][duty_cycle=0xFF].
   // Parity is recomputed per block.
-  frame_buf_is_frame_ = false;
+  invalidateFrameBuf();
   memset(frame_buf_, 0, sizeof(frame_buf_));
 
   // Frame prefix: "FR" + frame index 0 — informational only, matches the
@@ -2347,7 +2373,7 @@ void CommandProcessor::fillFrameBufferDark() {
   // HOLD dark after transmission stops. A fixed Persistent opcode (not
   // panel_disp_mode_) guarantees blanking even from Triggered/Gated modes,
   // mirroring how the error-glyph path uses a mode-independent opcode.
-  frame_buf_is_frame_ = false;
+  invalidateFrameBuf();
   memset(frame_buf_, 0, sizeof(frame_buf_));
   frame_buf_[0] = 'F';
   frame_buf_[1] = 'R';

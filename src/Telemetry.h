@@ -129,11 +129,14 @@
 //         kind 10 timer_fail   code = 0, arg = requested refresh rate (Hz); the timer stayed un-armed
 //         kind 11 sd_layout    after every sd_open: code bit0 = pattern file contiguous (FILE_FLAG_CONTIGUOUS
 //                              set by contiguousRange → O(1) seeks), bit1 = exFAT volume; arg = sectors per cluster
-//         kind 12 sd_slow_ctx  follows every sd_slow: code = SdFat card errorCode(), arg = errorData() & 0xFFFF
-//                              (USDHC IRQSTAT at the last driver error) — did the driver see an error/retry?
-//         kind 13 sd_reads     at pattern close / re-open: code = 0, arg = min(65535, readFrame calls while
-//                              that pattern was open) — the read count the host cannot derive once
-//                              same-index SET_FRAME_POSITIONs skip the SD read
+//         kind 12 sd_slow_ctx  follows every sd_slow: code = SdFat card errorCode() (sticky: 0 = the driver never
+//                              saw an error this boot), arg = errorData() >> 16 = USDHC IRQSTAT bits 16-31 saved at
+//                              the LAST driver error (command/data timeout, CRC, end-bit, auto-CMD12, DMA error
+//                              bits; may predate this read) — did the driver see an error/retry, or did the card
+//                              just hold the bus?
+//         kind 13 sd_reads     at pattern close / re-open: reads = arg << code (code = binary shift so a
+//                              360k-read trial fits) — readFrame calls while that pattern was open; the host
+//                              cannot derive it once same-index SET_FRAME_POSITIONs skip the SD read
 //         sd_slow (kind 4) code byte, since ring v2: bits 0-1 = slowest phase of the read (1 seek,
 //                              2 body read, 3 CRC-trailer read), bit7 = the read returned an error
 // ---------------------------------------------------------------------------
@@ -181,8 +184,8 @@ enum StateKind : uint8_t {
                           // arg = min(65535, count >> 12) (units of 4096 entries)
   ST_TIMER_FAIL   = 10, // IntervalTimer::begin() failed (no free PIT channel): code = 0, arg = requested refresh Hz
   ST_SD_LAYOUT    = 11, // after sd_open: code bit0 contiguous file, bit1 exFAT; arg = sectors per cluster
-  ST_SD_SLOW_CTX  = 12, // follows sd_slow: code = card errorCode(), arg = errorData() & 0xFFFF
-  ST_SD_READS     = 13, // at pattern close/re-open: arg = readFrame calls during that open (saturating)
+  ST_SD_SLOW_CTX  = 12, // follows sd_slow: code = card errorCode(), arg = errorData() >> 16 (USDHC error bits)
+  ST_SD_READS     = 13, // at pattern close/re-open: reads = arg << code (readFrame calls during that open)
 };
 // sd_slow (kind 4) code byte: which phase of readFrame was slowest, + error flag.
 constexpr uint8_t kSdSlowPhaseSeek  = 1;

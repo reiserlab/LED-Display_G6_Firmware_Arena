@@ -127,10 +127,13 @@ def test_sd_slow_phase_and_error_flag():
 
 
 def test_sd_layout_slow_ctx_and_reads():
-    (a, b, c) = _block(_state(13, ST_SD_LAYOUT, 0x01, 8),
-                       _state(14, ST_SD_SLOW_CTX, 0, 0x0001),
-                       _state(15, ST_SD_READS, 0, 24_573))
+    (a, b, c, d) = _block(_state(13, ST_SD_LAYOUT, 0x01, 8),
+                          _state(14, ST_SD_SLOW_CTX, 0, 0x0001),
+                          _state(15, ST_SD_READS, 0, 24_573),
+                          _state(16, ST_SD_READS, 3, 45_000))   # 360,000 reads, shift 3
     assert a.fields["kind_name"] == "sd_layout" and a.fields["contiguous"] is True
     assert a.fields["exfat"] is False and a.fields["sectors_per_cluster"] == 8
-    assert b.fields["kind_name"] == "sd_slow_ctx" and b.fields["card_error_code"] == 0 and b.fields["irqstat_lo"] == 1
+    assert b.fields["kind_name"] == "sd_slow_ctx" and b.fields["card_error_code"] == 0
+    assert b.fields["irqstat_hi"] == 1 and b.fields["driver_saw_error"] is False
     assert c.fields["kind_name"] == "sd_reads" and c.fields["reads"] == 24_573
+    assert d.fields["reads"] == 360_000

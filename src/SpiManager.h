@@ -33,7 +33,8 @@ class SpiManager {
   // FREE-RUNNING refresh timer (2026-09-13, wedge #5 caught by the watchdog at
   // IntervalTimer::end()'s PIT register store, prev_breadcrumb OP_CMD_DISARM/0x70):
   // arm is IDEMPOTENT — already running at this rate = no PIT access at all;
-  // a different rate re-begins the channel. Callers on the per-command hot
+  // a different rate on a running timer updates LDVAL (IntervalTimer::update),
+  // from a stopped timer begin()s the channel. Callers on the per-command hot
   // path (0x70, 0x3A) never disarm; only geometry/mode changes do.
   // Returns false only when the timer could not be started (no free PIT
   // channel — STATE(timer_fail) is recorded); callers that enter a display

@@ -432,8 +432,11 @@ def test_frame_storm_yields_frame_records_in_index_order(transport, pat):
                for r in states), "trial start records STATE(sd_open, ok, pattern)"
     assert any(r.fields["kind"] == ST_STATE_CHANGE and r.fields["code"] == STATE_SHOW_FRAME
                for r in states), "trial start records STATE(state_change, SHOW_FRAME)"
-    assert states[-1].fields["kind"] == ST_STATE_CHANGE and states[-1].fields["code"] == STATE_ALL_OFF, \
-        "STOP records STATE(state_change, ALL_OFF) last"
+    changes = [r for r in states if r.fields["kind"] == ST_STATE_CHANGE]
+    assert changes[-1].fields["code"] == STATE_ALL_OFF, \
+        "STOP records STATE(state_change, ALL_OFF) as the last state change"
+    assert states[-1].fields["kind"] == ST_SD_READS, \
+        "STOP then records STATE(sd_reads) for the closed pattern (ring v2)"
 
     cmd70 = [r for r in recs if r.type == REC_CMD and r.fields["cmd"] == SET_FRAME_POSITION_CMD]
     assert len(cmd70) == n

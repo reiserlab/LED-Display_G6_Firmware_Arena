@@ -217,9 +217,10 @@ def _decode_payload(rtype: int, body: bytes) -> dict[str, Any]:
             d["sectors_per_cluster"] = arg
         if kind == ST_SD_SLOW_CTX:
             d["card_error_code"] = code
-            d["irqstat_lo"] = arg
+            d["irqstat_hi"] = arg          # USDHC IRQSTAT bits 16-31 at the driver's last error (sticky)
+            d["driver_saw_error"] = code != 0
         if kind == ST_SD_READS:
-            d["reads"] = arg
+            d["reads"] = arg << code       # code = binary shift
         if kind == ST_TELEMETRY:
             d["events"] = bool(code & SET_FLAG_EVENTS)
             d["synthetic"] = bool(code & SET_FLAG_SYNTHETIC)
