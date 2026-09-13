@@ -126,7 +126,7 @@ def test_sd_info_reply_shape_and_identity(transport):
         assert card_type in (1, 2, 3)
         assert fat_type in (12, 16, 32, 64)
         assert sectors > 0 and bpc in (512 << n for n in range(8))
-        assert cid[0] != 0, "CID manufacturer id"
+        assert any(cid), "CID must not be all zero"  # MID 0x00 exists in the wild (the bench card: OEM "42" SD8GB)
         assert maint == 0xFF  # SD_STATUS maintenance bits are not read by SdFat 2.1.2
     else:
         assert not (flags & 0x01)
