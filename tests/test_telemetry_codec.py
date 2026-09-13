@@ -14,6 +14,7 @@ from .telemetry_codec import (
     ST_PREV_ISR_COUNT,
     ST_SD_LAYOUT,
     ST_SD_READS,
+    ST_SD_READS_CKPT,
     ST_SD_SLOW,
     ST_SD_SLOW_CTX,
     ST_TIMER_FAIL,
@@ -140,5 +141,5 @@ def test_sd_layout_slow_ctx_and_reads():
     assert b.fields["irqstat_hi"] == 1 and b.fields["driver_saw_error"] is False
     assert c.fields["kind_name"] == "sd_reads" and c.fields["reads"] == 24_573 and c.fields["checkpoint"] is False
     assert d.fields["reads"] == 360_000
-    (e,) = _block(_state(17, ST_SD_READS, 0x80, 30_000))
-    assert e.fields["reads"] == 30_000 and e.fields["checkpoint"] is True
+    (e,) = _block(_state(17, ST_SD_READS_CKPT, 0, 30_000))
+    assert e.fields["kind_name"] == "sd_reads_ckpt" and e.fields["reads"] == 30_000 and e.fields["checkpoint"] is True

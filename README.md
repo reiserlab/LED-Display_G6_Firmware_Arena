@@ -470,7 +470,7 @@ O(1) (SdFat caches CID/CSD at mount; no card traffic). Gated on 0xCB flags bit 5
 | 8 | u32 | `bytes_per_cluster` | volume cluster size |
 | 12 | u8[16] | `cid` | raw CID register: MID @0, OID @1–2, PNM @3–7, PRV @8, PSN @9–12 (BE), MDT @13–14, CRC @15 |
 | 28 | u8 | `sd_status_maint` | SD 6.0 §4.18 maintenance-support bits (SD_STATUS b328/329); `0xFF` = not read (SdFat 2.1.2 has no ACMD13 reader) |
-| 29 | u8 | `sd_diag` | `SET_SD_DIAG` (0xCE) flags in force: bit0 legacy seek (next open skips `contiguousRange()` → FAT-chain-walking seeks), bit1 no same-index skip. Bench A/B switches for the causal test of the card stalls; both OFF at boot; each arm switch also leaves a `STATE(telemetry, code 0xCE, arg = flags)` marker and every `sd_layout` record carries bits 2/3 |
+| 29 | u8 | `sd_diag` | `SET_SD_DIAG` (0xCE): bit0 legacy seek requested (next open skips `contiguousRange()` → FAT-chain-walking seeks), bit1 no same-index skip, **bit2 legacy seek applied to the open file**. Bench A/B switches for the causal test of the card stalls; both OFF at boot; each arm switch also leaves a `STATE(telemetry, code 0xCE, arg = flags)` marker and every `sd_layout` record carries bits 2/3 |
 
 Arena Studio reads it at link-up into `run_metadata.sd_card`; `tests/test_firmware_version.py` decodes it.
 
@@ -480,8 +480,11 @@ Arena Studio reads it at link-up into `run_metadata.sd_card`; `tests/test_firmwa
 `contiguousRange()`, so `FatFile::seekSet` walks the FAT chain again (the pre-fast-path behaviour); bit1 **no
 same-index skip**: every `SET_FRAME_POSITION` reads its frame. Both OFF at boot; bits 2–7 refused. Each switch
 appends `STATE(telemetry, code 0xCE, arg = flags)`; every later `sd_layout` record carries bits 2/3;
-`GET_SD_INFO` byte 29 reports the flags. Purpose: the causal test of the card stalls on one build without
-reflashing (webDisplayTools `docs/development/sd-stall-causal-test-plan-2026-09-13.md`). Gate on 0xCB flags bit 5.
+`GET_SD_INFO` byte 29 reports the flags (bits 0–1 requested, **bit 2 = legacy seek applied to the currently open
+file** — `openPattern` reopens a same-pattern restart when the requested seek mode differs). On exFAT volumes the
+library sets the contiguous flag at open by itself, so the legacy arm only reproduces the chain walk on FAT16/32
+(`sd_layout` bit1). Purpose: the causal test of the card stalls on one build without reflashing (webDisplayTools
+`docs/development/sd-stall-causal-test-plan-2026-09-13.md`). **Gate on 0xCB flags bit 6** (`sd_diag`), not bit 5.
 
 ### Build identity (`GET_FIRMWARE_VERSION`, 0xCB)
 
@@ -498,7 +501,7 @@ the *panel* image on the SD card, not the controller). Request `[01 CB]`; framed
 | 0 | u8 | `ver` | payload schema version, `1` |
 | 1 | u8 | `rows` | `panel_count_per_frame_row` this build was compiled for |
 | 2 | u8 | `cols` | `panel_count_per_frame_col` |
-| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build), bit2 `telemetry` (telemetry ring compiled in — `SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9 answer; **hosts gate 0xA8 on this bit**, not on 0xC2 bit 7), bit3 `crashreport` (`GET_CRASHREPORT` 0xCC + `GET_HEALTH` ver ≥ 2 present; **hosts gate 0xCC on this bit** — a rollback to c47ee68 has bit2 but not bit3), bit4 `freerun_refresh` (free-running refresh timer: a valid steady-state `SET_FRAME_POSITION` never disarms/re-arms the PIT; transitions/glyph/rate changes use the guarded disarm — variant marker so run logs can tell which build ran), bit5 `sd_fastpath` (contiguous-file O(1) seeks, same-index `SET_FRAME_POSITION` skips the SD read, FRAME records 26 B = ring v2, STATE kinds 11–13, `GET_SD_INFO` 0xCD answers — **hosts gate 0xCD on this bit**) |
+| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build), bit2 `telemetry` (telemetry ring compiled in — `SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9 answer; **hosts gate 0xA8 on this bit**, not on 0xC2 bit 7), bit3 `crashreport` (`GET_CRASHREPORT` 0xCC + `GET_HEALTH` ver ≥ 2 present; **hosts gate 0xCC on this bit** — a rollback to c47ee68 has bit2 but not bit3), bit4 `freerun_refresh` (free-running refresh timer: a valid steady-state `SET_FRAME_POSITION` never disarms/re-arms the PIT; transitions/glyph/rate changes use the guarded disarm — variant marker so run logs can tell which build ran), bit5 `sd_fastpath` (contiguous-file O(1) seeks, same-index `SET_FRAME_POSITION` skips the SD read, FRAME records 26 B = ring v2, STATE kinds 11–13, `GET_SD_INFO` 0xCD answers — **hosts gate 0xCD on this bit**), bit6 `sd_diag` (`SET_SD_DIAG` 0xCE + STATE kind 14 — **hosts gate 0xCE on this bit**) |
 | 4 | char[8] | `sha` | short git SHA, lowercase hex (`git rev-parse --short=8`); `unknown ` when git was unavailable |
 | 12 | char[10] | `date` | build date, UTC, `YYYY-MM-DD` |
 | 22 | char[24] | `branch` | git branch, truncated to 24; `detached` for a detached HEAD; `unknown` when unavailable |
@@ -604,7 +607,8 @@ Record: len u8 (total incl. this byte), type u8, seq u32, t_us u32 (micros()), p
              10 timer_fail (IntervalTimer::begin() failed, timer left un-armed: code = 0, arg = requested refresh Hz),
              11 sd_layout (after every sd_open: code bit0 = pattern file contiguous, bit1 = exFAT, bit2 = legacy seek forced (0xCE), bit3 = same-index skip disabled (0xCE); arg = sectors per cluster),
              12 sd_slow_ctx (follows every sd_slow: code = SdFat card errorCode() — sticky, 0 = no driver error this boot; arg = errorData() >> 16 = USDHC IRQSTAT error bits 16-31 saved at the driver's LAST error, may predate this read),
-             13 sd_reads (at STOP / next trial start: reads = arg << (code & 0x7F), readFrame calls while that pattern was open; code bit 7 = cumulative checkpoint every 30k reads)
+             13 sd_reads (at STOP / next trial start: reads = arg << code, readFrame calls while that pattern was open),
+             14 sd_reads_ckpt (every 30k reads while a pattern is open: cumulative so far = arg << code — a lower bound if the run dies before kind 13)
       sd_slow code byte (ring v2): bits 0-1 = slowest phase of the read (1 seek, 2 body, 3 CRC trailer), bit7 = the read returned an error; threshold 10 ms (was 20 ms)
 ```
 

@@ -46,7 +46,8 @@ REC_PAD, REC_CMD, REC_FRAME, REC_STATE = 0, 1, 2, 3
 REC_NAMES = {REC_CMD: "cmd", REC_FRAME: "frame", REC_STATE: "state"}
 
 (ST_BOOT, ST_STATE_CHANGE, ST_ERROR_GLYPH, ST_SD_SLOW, ST_RING_OVERRUN, ST_TELEMETRY, ST_SD_OPEN,
- ST_WDOG_CONTEXT, ST_PREV_ISR_COUNT, ST_TIMER_FAIL, ST_SD_LAYOUT, ST_SD_SLOW_CTX, ST_SD_READS) = range(1, 14)
+ ST_WDOG_CONTEXT, ST_PREV_ISR_COUNT, ST_TIMER_FAIL, ST_SD_LAYOUT, ST_SD_SLOW_CTX, ST_SD_READS,
+ ST_SD_READS_CKPT) = range(1, 15)
 SD_SLOW_PHASE_NAMES = {0: "unknown", 1: "seek", 2: "body", 3: "tail"}   # sd_slow code bits 0-1 (ring v2)
 SD_SLOW_ERROR_FLAG = 0x80
 FRAME_FLAG_SD_READ = 0x01
@@ -65,6 +66,7 @@ STATE_KIND_NAMES = {
     ST_SD_LAYOUT: "sd_layout",
     ST_SD_SLOW_CTX: "sd_slow_ctx",
     ST_SD_READS: "sd_reads",
+    ST_SD_READS_CKPT: "sd_reads_ckpt",
 }
 
 
@@ -222,8 +224,11 @@ def _decode_payload(rtype: int, body: bytes) -> dict[str, Any]:
             d["irqstat_hi"] = arg          # USDHC IRQSTAT bits 16-31 at the driver's last error (sticky)
             d["driver_saw_error"] = code != 0
         if kind == ST_SD_READS:
-            d["reads"] = arg << (code & 0x7F)   # code bits 0-6 = binary shift
-            d["checkpoint"] = bool(code & 0x80)  # cumulative checkpoint mid-open (every 30k reads), not a close
+            d["reads"] = arg << code            # final count for that open; code = binary shift
+            d["checkpoint"] = False
+        if kind == ST_SD_READS_CKPT:
+            d["reads"] = arg << code            # cumulative so far (lower bound if the run dies before sd_reads)
+            d["checkpoint"] = True
         if kind == ST_TELEMETRY and code == 0xCE:
             d["sd_diag_flags"] = arg                 # timeline marker: SET_SD_DIAG arm switch
         elif kind == ST_TELEMETRY:

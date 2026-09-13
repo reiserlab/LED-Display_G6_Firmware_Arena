@@ -97,6 +97,7 @@ class CommandProcessor {
   // the next 0x70 re-derives the outputs). A SET_FRAME_POSITION for that same
   // index is then answered without touching the SD card.
   bool     frame_buf_is_frame_ = false;
+  bool     sd_cache_ok_ = false;        // reuse eligibility for the same-index skip (derived outputs current); cleared by dropFrameCache
   bool     sd_skip_same_index_ = true;  // SET_SD_DIAG bit1 clears it: every 0x70 reads (A/B arm)
   // Request→presentation instrumentation (FRAME.req_age_us / superseded).
   uint32_t last_cmd_rx_us_   = 0;      // dispatch entry of the command being handled

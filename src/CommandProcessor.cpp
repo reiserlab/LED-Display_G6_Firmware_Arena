@@ -1252,6 +1252,7 @@ void CommandProcessor::handleGetFirmwareVersion() {
   if (fw_has_crashreport) flags |= fw_flag_crashreport;  // hosts gate GET_CRASHREPORT 0xCC (+ HEALTH v2) on this
   if (fw_freerun_refresh) flags |= fw_flag_freerun_refresh;  // variant marker for run logs: 0x70 no longer touches the PIT
   if (fw_sd_fastpath)     flags |= fw_flag_sd_fastpath;      // O(1) seeks + same-index skip + FRAME 26 B + GET_SD_INFO 0xCD
+  if (fw_sd_diag)         flags |= fw_flag_sd_diag;          // SET_SD_DIAG 0xCE + STATE kind 14 present — hosts gate 0xCE on THIS bit
 
   uint8_t payload[fw_version_payload_len];
   uint8_t *p = payload;
@@ -1284,7 +1285,7 @@ void CommandProcessor::handleGetFirmwareVersion() {
 //   off  8  u32  bytes_per_cluster
 //   off 12  u8[16] cid      raw CID: MID @0, OID @1-2, PNM @3-7, PRV @8, PSN @9-12, MDT @13-14, CRC @15
 //   off 28  u8   sd_status_maint  SD 6.0 §4.18 maintenance support bits (SD_STATUS b328/329); 0xFF = not read
-//   off 29  u8   sd_diag    SET_SD_DIAG (0xCE) flags in force: bit0 legacy seek, bit1 no same-index skip
+//   off 29  u8   sd_diag    SET_SD_DIAG (0xCE): bit0 legacy seek requested, bit1 no same-index skip, bit2 legacy seek APPLIED to the currently open file
 // Status 1 (payload still sent, flags bit0 clear) when no card is mounted.
 // Gated on GET_FIRMWARE_VERSION flags bit 5 (fw_flag_sd_fastpath).
 // ---------------------------------------------------------------------------
@@ -1315,7 +1316,7 @@ void CommandProcessor::handleSetSdDiag(const ParsedCommand &cmd) {
   }
   sd_.setLegacySeek(flags & 0x01);
   sd_skip_same_index_ = !(flags & 0x02);
-  if (!sd_skip_same_index_) frame_buf_is_frame_ = false;  // the next 0x70 reads even if it repeats the index
+  if (!sd_skip_same_index_) sd_cache_ok_ = false;  // the next 0x70 reads even if it repeats the index
   uint8_t echo = sdDiagFlags();
   Telemetry::state(Telemetry::ST_TELEMETRY, 0xCE, echo);  // timeline marker: arm switch (code 0xCE, arg = flags)
   current_source_->sendResponse(SET_SD_DIAG_CMD, 0, &echo, 1);
@@ -1339,7 +1340,7 @@ void CommandProcessor::handleGetSdInfo() {
   p = put32(p, ci.bytes_per_cluster);
   memcpy(p, ci.cid, sizeof(ci.cid)); p += sizeof(ci.cid);
   p = put8(p, 0xFF);  // SD_STATUS maintenance bits: SdFat 2.1.2 exposes no ACMD13 reader
-  p = put8(p, sdDiagFlags());  // byte 29: SET_SD_DIAG readback (bit0 legacy seek, bit1 no same-index skip)
+  p = put8(p, (uint8_t)(sdDiagFlags() | (sd_.appliedLegacySeek() ? 0x04 : 0)));  // byte 29: bits 0-1 requested, bit 2 legacy seek APPLIED to the open file
   static_assert(sizeof(payload) == 30, "GET_SD_INFO payload is 30 bytes");
   current_source_->sendResponse(GET_SD_INFO_CMD, mounted ? 0 : 1, payload, (size_t)(p - payload));
 }
@@ -1595,8 +1596,8 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
   // Only when the refresh timer is actually running at the current rate: a
   // previous arm failure must be retried by the normal path, never hidden
   // behind a cached-frame success (Codex review, blocking).
-  if (sd_skip_same_index_ && state_ == ArenaState::SHOW_FRAME && frame_buf_is_frame_ && index == cur_frame_index_
-      && spi_.refreshArmedAt(refresh_rate_hz_)) {
+  if (sd_skip_same_index_ && state_ == ArenaState::SHOW_FRAME && frame_buf_is_frame_ && sd_cache_ok_
+      && index == cur_frame_index_ && spi_.refreshArmedAt(refresh_rate_hz_)) {
     ++Health::stats.cmd70_same_index;
     Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
     current_source_->sendResponse(SET_FRAME_POSITION_CMD, 0, "");
@@ -2115,14 +2116,16 @@ void CommandProcessor::flushOpenReads() {
 // buffer's provenance and count it as superseded only if it was never shown
 // (Codex round 2: an AO change between two loads lost one superseded count).
 void CommandProcessor::dropFrameCache() {
-  if (frame_buf_is_frame_ && !buf_presented_ && superseded_pending_ < 0xFF) ++superseded_pending_;
-  frame_buf_is_frame_ = false;
-  buf_presented_ = true;  // already accounted: the next replacement must not count it again
+  // Reuse eligibility only: the pixels stay valid (and may still be presented at the
+  // next refresh), so provenance and presentation accounting are untouched — an
+  // unpresented frame is counted as superseded when its pixels are actually replaced.
+  sd_cache_ok_ = false;
 }
 
 void CommandProcessor::invalidateFrameBuf() {
   if (frame_buf_is_frame_ && !buf_presented_ && superseded_pending_ < 0xFF) ++superseded_pending_;
   frame_buf_is_frame_ = false;
+  sd_cache_ok_ = false;
   frame_src_flags_ = 0;
   frame_req_us_ = micros();
   buf_presented_ = false;
@@ -2151,7 +2154,7 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
     uint8_t shift = 0;
     uint32_t v = open_reads_;
     while (v > 0xFFFF) { v >>= 1; ++shift; }
-    Telemetry::state(Telemetry::ST_SD_READS, (uint8_t)(0x80 | shift), (uint16_t)v);
+    Telemetry::state(Telemetry::ST_SD_READS_CKPT, shift, (uint16_t)v);  // own kind: kind 13 keeps its meaning
   }
   if (t_sd > Health::stats.sd_read_max_us) Health::stats.sd_read_max_us = t_sd;
   Health::stats.last_sd_read_us = t_sd;  // -> telemetry FRAME.sd_load_us
@@ -2182,6 +2185,7 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + (uint32_t)sd_.info().num_panels * block_byte_count_);
   frame_buf_is_frame_ = true;
+  sd_cache_ok_ = true;
   frame_src_flags_ = (uint8_t)(Telemetry::kFrameFlagSdRead
                                | (sd_.contiguous() ? Telemetry::kFrameFlagContiguous : 0));
   patchDispMode();
@@ -2275,7 +2279,7 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
     uint32_t spc = sd_.sectorsPerCluster();
     Telemetry::state(Telemetry::ST_SD_LAYOUT,
                      (uint8_t)((sd_.contiguous() ? 1 : 0) | (sd_.fatType() == 64 ? 2 : 0)
-                               | (sd_.legacySeek() ? 4 : 0) | (sd_skip_same_index_ ? 0 : 8)),
+                               | (sd_.appliedLegacySeek() ? 4 : 0) | (sd_skip_same_index_ ? 0 : 8)),
                      spc > 0xFFFF ? 0xFFFF : (uint16_t)spc);
   }
 

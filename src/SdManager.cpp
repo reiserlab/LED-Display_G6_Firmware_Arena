@@ -275,8 +275,10 @@ uint8_t SdManager::openPattern(uint16_t pattern_id) {
   if (!mounted_) return CE_SD_NOT_PRESENT;
   if (pattern_id == 0 || pattern_id > pattern_count_) return CE_BAD_PARAM;
 
-  // Already open and validated.
-  if (file_open_ && open_id_ == pattern_id) return CE_NONE;
+  // Already open and validated — reuse the handle ONLY if it was opened under the
+  // seek mode now requested (SET_SD_DIAG bit0 must take effect on a same-pattern
+  // restart too; Codex round 3).
+  if (file_open_ && open_id_ == pattern_id && applied_legacy_seek_ == legacy_seek_) return CE_NONE;
 
   if (file_open_) {
     file_.close();
@@ -316,7 +318,10 @@ uint8_t SdManager::openPattern(uint16_t pattern_id) {
     uint32_t bgn = 0, end = 0;
     contiguous_ = file_.contiguousRange(&bgn, &end);
     (void)bgn; (void)end;
-  }  // legacy_seek_ (SET_SD_DIAG bit0): leave the flag clear → FatFile::seekSet walks the chain (A/B arm)
+  }  // legacy_seek_ (SET_SD_DIAG bit0): leave the flag clear → FatFile::seekSet walks the chain (A/B arm).
+     // NOTE: on exFAT the contiguous flag is set at open by the library itself, so the legacy arm only
+     // reproduces the chain walk on FAT16/FAT32 volumes (sd_layout bit1 tells which).
+  applied_legacy_seek_ = legacy_seek_;
   file_.seekSet(pattern_header_byte_count);  // contiguousRange leaves the position alone; be explicit
 
   file_open_ = true;
