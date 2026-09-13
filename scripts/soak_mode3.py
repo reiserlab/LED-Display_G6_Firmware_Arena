@@ -664,6 +664,16 @@ class Soak:
         self.next_progress = self.start_mono + args.progress_every
 
     # -- one command, logged as an ["a", ...] row -------------------------------
+    def _resync(self) -> bool:
+        """One GET_CONTROLLER_INFO probe; True (and synchronised) only when ITS echo came back."""
+        try:
+            self.link.command(GET_CONTROLLER_INFO_CMD, b"", 0.5)
+            self.unsynced = False
+            return True
+        except Exception:
+            self.unsynced = True
+            return False
+
     def send(self, cmd: int, params: bytes = b"", timeout: float = None, track: bool = False):
         """Send one framed command, log the row, return (reply|None, error|None).
         `track=True` feeds the fault window (steady-state commands only)."""
@@ -673,6 +683,18 @@ class Soak:
         t0 = time.monotonic()
         self.total_cmds += 1
         reply = err = None
+        # After a timeout the link is UNSYNCHRONISED: a late reply to the timed-out command would
+        # be taken for the next same-opcode command's (replies match by opcode only). No stimulus
+        # command goes out until one probe of a different opcode has come back — Link.command
+        # discards every frame that is not its echo, so the stale reply is consumed by the probe.
+        if getattr(self, "unsynced", False) and cmd != GET_CONTROLLER_INFO_CMD:
+            if not self._resync():
+                err = "link unsynchronised: no reply to the resync probe (late reply may be outstanding)"
+                if track:
+                    self.timeouts += 1
+                    self._win["timeouts"] += 1
+                self.log.arena(t_off, 0.0, request, None, t_off, err)
+                return None, err
         try:
             reply = self.link.command(cmd, params, timeout)
         except ReplyTimeout as e:
@@ -680,14 +702,9 @@ class Soak:
             if track:
                 self.timeouts += 1
                 self._win["timeouts"] += 1
-            # A late reply to THIS command would be taken for the next same-opcode command's
-            # (replies match by opcode only). One probe of a different opcode: Link.command
-            # discards every frame that is not its echo, so a stale reply is consumed here.
             if cmd != GET_CONTROLLER_INFO_CMD:
-                try:
-                    self.link.command(GET_CONTROLLER_INFO_CMD, b"", 0.3)
-                except Exception:
-                    pass
+                self.unsynced = True
+                self._resync()
         except Exception as e:  # SerialException, OSError, ...
             err = f"transport error: {e.__class__.__name__}: {e}"
             if track:

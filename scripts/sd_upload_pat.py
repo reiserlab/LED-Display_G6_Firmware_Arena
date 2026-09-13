@@ -28,8 +28,13 @@ try:
     if st2 != 0:
         print(f"rename failed status={st2}", file=sys.stderr); sys.exit(1)
     idx = struct.unpack_from("<H", bytes(payload[:2]))[0]
-    st3, _, pip, _ = t.command(GET_PATTERN_INFO_CMD, struct.pack("<H", idx), timeout=5.0)
-    frames = struct.unpack_from("<H", bytes(pip))[0] if st3 == 0 and len(pip) >= 2 else -1
+    st3, echo3, pip, _ = t.command(GET_PATTERN_INFO_CMD, struct.pack("<H", idx), timeout=5.0)
+    if st3 != 0 or echo3 != GET_PATTERN_INFO_CMD or len(pip) < 2:
+        print(f"uploaded as index {idx} but GET_PATTERN_INFO failed (status {st3}) — do not use", file=sys.stderr); sys.exit(1)
+    frames = struct.unpack_from("<H", bytes(pip))[0]
+    if frames == 0:
+        print(f"uploaded as index {idx} but the controller reads 0 frames — do not use", file=sys.stderr); sys.exit(1)
+    # NOTE: patterns are indexed by sorted filename — uploading ANOTHER file later can renumber this one.
     print(f"{idx} {frames}  ({len(data)} B in {dt:.1f} s = {len(data)/dt/1e6:.2f} MB/s)")
 finally:
     t.close()

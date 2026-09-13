@@ -13,26 +13,33 @@ cd "$(dirname "$0")/.." || exit 2
 mkdir -p soak-logs
 LOG=soak-logs/campaign-$(date +%Y%m%d-%H%M%S).log
 now() { TZ=America/New_York date '+%H:%M:%S ET'; }
-hhmm() { TZ=America/New_York date '+%H%M'; }
-# "until" times are compared on the ET clock; a NIGHT_UNTIL before the current time means "tomorrow".
-phase_over() { local until=$1 started=$2; local h=$(hhmm)
-  if (( until > started )); then (( h >= until || h < started - 100 )); else (( h >= until && h < started )); fi; }
+# Deadlines are resolved ONCE per phase to an absolute epoch: HHMM today on the ET clock, or tomorrow if
+# that instant has already passed (an overnight NIGHT_UNTIL). No sampling of a narrow clock window.
+deadline_epoch() { local hhmm=$1; local d
+  d=$(TZ=America/New_York date -j -f '%Y-%m-%d %H%M' "$(TZ=America/New_York date '+%Y-%m-%d') $hhmm" '+%s' 2>/dev/null) || return 1
+  (( d <= $(date +%s) )) && d=$(( d + 86400 ))
+  echo $d; }
 echo "$(now) campaign start: patterns ${PATS[*]}, stress ${SHZ} Hz until ${SUNTIL}, night ${NHZ} Hz until ${NUNTIL}, ${SEG}-min segments" | tee -a "$LOG"
-i=0
-run_phase() { local hz=$1 until=$2 tag=$3; local started=$(hhmm)
-  while ! phase_over $until $started; do
+i=0; failed=0
+run_phase() { local hz=$1 tag=$3; local until; until=$(deadline_epoch "$2") || { echo "$(now) bad deadline $2" | tee -a "$LOG"; return 1; }
+  echo "$(now) phase $tag: ${hz} Hz until $(TZ=America/New_York date -r $until '+%Y-%m-%d %H:%M ET')" | tee -a "$LOG"
+  while (( $(date +%s) < until )); do
+    local remain_min=$(( (until - $(date +%s) + 59) / 60 )); local mins=$SEG; (( remain_min < mins )) && mins=$remain_min
+    (( mins < 2 )) && break   # a segment shorter than 2 min is not a measurement
     local idx=${PATS[$(( i % ${#PATS[@]} + 1 ))]}; i=$((i+1))
     local n=0; until [[ -e $PORT ]]; do sleep 2; n=$((n+1)); (( n < 150 )) || { echo "$(now) port $PORT gone for 5 min — giving up" | tee -a "$LOG"; return 1; }; done
-    echo "$(now) segment $i: pattern $idx at ${hz} Hz for ${SEG} min ($tag)" | tee -a "$LOG"
-    python3 scripts/sd_stall_test.py --port "$PORT" --pattern "$idx" --hz "$hz" --minutes "$SEG" --sd-diag 0 \
+    echo "$(now) segment $i: pattern $idx at ${hz} Hz for ${mins} min ($tag)" | tee -a "$LOG"
+    python3 scripts/sd_stall_test.py --port "$PORT" --pattern "$idx" --hz "$hz" --minutes "$mins" --sd-diag 0 \
         --label "camp-${hz}-p${idx}" --log-dir soak-logs > "soak-logs/segment-$i.out" 2>&1
     local rc=$?
     local summ=$(grep -o '"stalls_over_gap": [0-9]*, "stall_detail_truncated": [a-z]*, "clusters": [0-9]*' soak-logs/segment-$i.out | head -1)
     local worst=$(grep -o '"worst_ms": [0-9.]*' soak-logs/segment-$i.out | head -1)
     local usable=$(grep -o '"measurement_usable": [a-z]*' soak-logs/segment-$i.out | head -1)
     echo "$(now) segment $i done rc=$rc $summ $worst $usable" | tee -a "$LOG"
-    (( rc == 0 )) || sleep 10
+    (( rc == 0 )) || { failed=$((failed+1)); sleep 10; }
   done; }
-run_phase "$SHZ" "$SUNTIL" stress
-run_phase "$NHZ" "$NUNTIL" night
-echo "$(now) campaign end after $i segments" | tee -a "$LOG"
+rc_all=0
+run_phase "$SHZ" "$SUNTIL" stress || rc_all=1
+run_phase "$NHZ" "$NUNTIL" night  || rc_all=1
+echo "$(now) campaign $([[ $rc_all == 0 ]] && echo completed || echo ABORTED) after $i segments ($failed with a non-zero exit)" | tee -a "$LOG"
+exit $rc_all
