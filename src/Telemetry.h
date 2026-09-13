@@ -134,9 +134,10 @@
 //                              the LAST driver error (command/data timeout, CRC, end-bit, auto-CMD12, DMA error
 //                              bits; may predate this read) — did the driver see an error/retry, or did the card
 //                              just hold the bus?
-//         kind 13 sd_reads     at pattern close / re-open: reads = arg << code (code = binary shift so a
+//         kind 13 sd_reads     at pattern close / re-open: reads = arg << (code & 0x7F) (binary shift so a
 //                              360k-read trial fits) — readFrame calls while that pattern was open; the host
-//                              cannot derive it once same-index SET_FRAME_POSITIONs skip the SD read
+//                              cannot derive it once same-index SET_FRAME_POSITIONs skip the SD read.
+//                              code bit 7 = cumulative CHECKPOINT (every 30 000 reads, same open), not a close
 //         sd_slow (kind 4) code byte, since ring v2: bits 0-1 = slowest phase of the read (1 seek,
 //                              2 body read, 3 CRC-trailer read), bit7 = the read returned an error
 // ---------------------------------------------------------------------------
@@ -185,7 +186,7 @@ enum StateKind : uint8_t {
   ST_TIMER_FAIL   = 10, // IntervalTimer::begin() failed (no free PIT channel): code = 0, arg = requested refresh Hz
   ST_SD_LAYOUT    = 11, // after sd_open: code bit0 contiguous file, bit1 exFAT; arg = sectors per cluster
   ST_SD_SLOW_CTX  = 12, // follows sd_slow: code = card errorCode(), arg = errorData() >> 16 (USDHC error bits)
-  ST_SD_READS     = 13, // at pattern close/re-open: reads = arg << code (readFrame calls during that open)
+  ST_SD_READS     = 13, // at pattern close/re-open: reads = arg << (code & 0x7F); code bit 7 = periodic checkpoint
 };
 // sd_slow (kind 4) code byte: which phase of readFrame was slowest, + error flag.
 constexpr uint8_t kSdSlowPhaseSeek  = 1;

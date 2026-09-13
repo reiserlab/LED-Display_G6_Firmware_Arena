@@ -135,5 +135,7 @@ def test_sd_layout_slow_ctx_and_reads():
     assert a.fields["exfat"] is False and a.fields["sectors_per_cluster"] == 8
     assert b.fields["kind_name"] == "sd_slow_ctx" and b.fields["card_error_code"] == 0
     assert b.fields["irqstat_hi"] == 1 and b.fields["driver_saw_error"] is False
-    assert c.fields["kind_name"] == "sd_reads" and c.fields["reads"] == 24_573
+    assert c.fields["kind_name"] == "sd_reads" and c.fields["reads"] == 24_573 and c.fields["checkpoint"] is False
     assert d.fields["reads"] == 360_000
+    (e,) = _block(_state(17, ST_SD_READS, 0x80, 30_000))
+    assert e.fields["reads"] == 30_000 and e.fields["checkpoint"] is True

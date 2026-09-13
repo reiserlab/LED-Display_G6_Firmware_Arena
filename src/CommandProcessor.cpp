@@ -823,7 +823,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         break;
       }
       ao_mode_ = new_mode;
-      frame_buf_is_frame_ = false;  // next 0x70 re-runs loadFrame's output derivation (SD fast path B)
+      dropFrameCache();  // next 0x70 re-runs loadFrame's output derivation (SD fast path B)
       if (ao_mode_ == 1) {
         ao_lut_len_ = 0;  // frame_number owns the DAC — stop LUT playback
         // Reflect the current position immediately if a pattern is open.
@@ -887,7 +887,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case SET_AO_LUT_CMD: {
-      frame_buf_is_frame_ = false;  // a new LUT must be applied by the next loadFrame (SD fast path B)
+      dropFrameCache();  // a new LUT must be applied by the next loadFrame (SD fast path B)
       // [len, 0xA2, mode, step_hz_lo, step_hz_hi, count_lo, count_hi, mv[0..n-1]×2]
       //   mode     uint8:  0 = frame-locked, 1 = time-based
       //   step_hz  uint16 LE: step rate for mode 1 (ignored for mode 0; max 1000 Hz)
@@ -2051,6 +2051,8 @@ void CommandProcessor::serviceClosedLoop() {
 // transfer frames are not FRAMEs) nor, since same-index 0x70s skip the read,
 // from accepted commands. Emitted from enterAllOff and enterPatternMode; the
 // counter restarts at 0 so a STOP followed by a new trial emits it once.
+static constexpr uint32_t kSdReadsCheckpoint = 30000;  // ≈ 2.5 min at 200 reads/s
+
 void CommandProcessor::flushOpenReads() {
   if (open_reads_ == 0) return;
   // code = binary shift, arg = reads >> shift: a 20-minute single-pattern trial at
@@ -2067,6 +2069,16 @@ void CommandProcessor::flushOpenReads() {
 // provenance, so a FRAME record for the new content never inherits sd_read /
 // contiguous flags or a stale request time, and count an SD frame that never
 // reached the panels as superseded (Codex review, 2026-09-13).
+// The pixels stay, the derived outputs (DAC frame marker, LUT) may not: make the
+// next SET_FRAME_POSITION for this index run loadFrame again, but keep the
+// buffer's provenance and count it as superseded only if it was never shown
+// (Codex round 2: an AO change between two loads lost one superseded count).
+void CommandProcessor::dropFrameCache() {
+  if (frame_buf_is_frame_ && !buf_presented_ && superseded_pending_ < 0xFF) ++superseded_pending_;
+  frame_buf_is_frame_ = false;
+  buf_presented_ = true;  // already accounted: the next replacement must not count it again
+}
+
 void CommandProcessor::invalidateFrameBuf() {
   if (frame_buf_is_frame_ && !buf_presented_ && superseded_pending_ < 0xFF) ++superseded_pending_;
   frame_buf_is_frame_ = false;
@@ -2092,6 +2104,14 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   Health::clear();
   ++Health::stats.sd_reads;
   ++open_reads_;
+  if ((open_reads_ % kSdReadsCheckpoint) == 0) {
+    // Cumulative checkpoint (code bit 7): a watchdog reset mid-trial would otherwise
+    // lose the read count of exactly the trial worth analysing (Codex round 2).
+    uint8_t shift = 0;
+    uint32_t v = open_reads_;
+    while (v > 0xFFFF) { v >>= 1; ++shift; }
+    Telemetry::state(Telemetry::ST_SD_READS, (uint8_t)(0x80 | shift), (uint16_t)v);
+  }
   if (t_sd > Health::stats.sd_read_max_us) Health::stats.sd_read_max_us = t_sd;
   Health::stats.last_sd_read_us = t_sd;  // -> telemetry FRAME.sd_load_us
   if (t_sd > Telemetry::kSdSlowThresholdUs) {

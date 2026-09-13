@@ -220,7 +220,8 @@ def _decode_payload(rtype: int, body: bytes) -> dict[str, Any]:
             d["irqstat_hi"] = arg          # USDHC IRQSTAT bits 16-31 at the driver's last error (sticky)
             d["driver_saw_error"] = code != 0
         if kind == ST_SD_READS:
-            d["reads"] = arg << code       # code = binary shift
+            d["reads"] = arg << (code & 0x7F)   # code bits 0-6 = binary shift
+            d["checkpoint"] = bool(code & 0x80)  # cumulative checkpoint mid-open (every 30k reads), not a close
         if kind == ST_TELEMETRY:
             d["events"] = bool(code & SET_FLAG_EVENTS)
             d["synthetic"] = bool(code & SET_FLAG_SYNTHETIC)

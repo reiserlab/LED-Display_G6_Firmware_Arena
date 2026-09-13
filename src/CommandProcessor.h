@@ -324,6 +324,7 @@ class CommandProcessor {
   bool loadFrame(uint16_t frame_index);  // false on SD/CRC error (shows glyph)
   void flushOpenReads();                 // STATE(sd_reads) for the pattern being left
   void invalidateFrameBuf();             // buffer ownership changes: drop SD validity + provenance, count an unpresented frame
+  void dropFrameCache();                 // outputs derived in loadFrame changed (AO mode/LUT): drop cache reuse only, keep provenance
 
   // Helpers.
   void fillFrameBufferAllOn(uint16_t block_byte_count);

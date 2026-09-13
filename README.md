@@ -595,7 +595,7 @@ Record: len u8 (total incl. this byte), type u8, seq u32, t_us u32 (micros()), p
              10 timer_fail (IntervalTimer::begin() failed, timer left un-armed: code = 0, arg = requested refresh Hz),
              11 sd_layout (after every sd_open: code bit0 = pattern file contiguous, bit1 = exFAT; arg = sectors per cluster),
              12 sd_slow_ctx (follows every sd_slow: code = SdFat card errorCode() — sticky, 0 = no driver error this boot; arg = errorData() >> 16 = USDHC IRQSTAT error bits 16-31 saved at the driver's LAST error, may predate this read),
-             13 sd_reads (at STOP / next trial start: reads = arg << code, readFrame calls while that pattern was open)
+             13 sd_reads (at STOP / next trial start: reads = arg << (code & 0x7F), readFrame calls while that pattern was open; code bit 7 = cumulative checkpoint every 30k reads)
       sd_slow code byte (ring v2): bits 0-1 = slowest phase of the read (1 seek, 2 body, 3 CRC trailer), bit7 = the read returned an error; threshold 10 ms (was 20 ms)
 ```
 
