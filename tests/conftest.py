@@ -14,16 +14,11 @@ tcp_only     tests that only make sense over TCP
 The session-scoped `transport` fixture opens/closes the selected backend.
 """
 
-import glob
-
 import pytest
 
+from scripts.arena_port import describe_usb_ports, find_arena_port
+
 from .transport import SerialTransport, TcpTransport
-
-
-def _find_teensy() -> str | None:
-    matches = glob.glob("/dev/serial/by-id/usb-Reiser_Lab_G6_Arena_*-if00")
-    return matches[0] if matches else None
 
 
 def pytest_addoption(parser):
@@ -100,9 +95,12 @@ def pytest_collection_modifyitems(config, items):
 def transport(pytestconfig):
     tr = pytestconfig.getoption("--transport")
     if tr == "serial":
-        port = pytestconfig.getoption("--port") or _find_teensy()
+        port = pytestconfig.getoption("--port") or find_arena_port()
         if not port:
-            pytest.fail("No Teensy USB-CDC port found; pass --port /dev/...")
+            pytest.fail(
+                "No G6 arena USB-CDC port found; pass --port <device>. "
+                f"USB serial ports seen: {describe_usb_ports()}"
+            )
         t = SerialTransport(port)
     else:
         ip = pytestconfig.getoption("--ip")
