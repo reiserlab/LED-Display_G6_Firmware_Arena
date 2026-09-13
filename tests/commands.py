@@ -31,15 +31,22 @@ GET_AO_VOLTAGE_CMD          = 0xA1   # [01 A1] returns hardware DAC readback as 
 SET_AO_LUT_CMD              = 0xA2   # [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
 SET_AO_MODE_CMD             = 0xA3   # [02 A3 mode] 0=programmable | 1=frame_number (DAC tracks frame index, 0-5V)
 GET_ANALOG_IN_CMD           = 0xA4   # [01 A4] returns Analog In 1+2 as two int16 LE mV (±10V front-end)
+SET_TELEMETRY_CMD           = 0xA8   # [04 A8 flags rate_lo rate_hi] or [02 A8 flags]; bit0 = record events (default ON), bit7 = synthetic producer at rate/s; bit4 = watchdog bits present (bit6 off, bit5 starve)
+GET_TELEMETRY_BLOCK_CMD     = 0xA9   # [08 A9 ack_seq(u32) max_bytes(u16) flags] ack cursor + framed chunk of ring records; see telemetry_codec.py
 SET_DIGITAL_OUT_CMD         = 0xAA   # [03 AA ch state] drive "Digital IO 1/2 (5V)" BNC (role-gated, #135)
 GET_DIGITAL_OUT_CMD         = 0xAB   # [01 AB] returns Digital IO 1 and 2 data-pin state as two bytes
 SET_DIO_ROLE_CMD            = 0xAC   # [03 AC port role] 0=off 1=in_trigger 2=out_programmable 3=out_debug_framescan
 GET_DIO_ROLE_CMD            = 0xAD   # [01 AD] returns [role1, level1, role2, level2]
 SET_ETHERNET_IP_ADDRESS_CMD = 0xC0   # reserved, not yet implemented
 GET_ETHERNET_IP_ADDRESS_CMD = 0xC1
-GET_CONTROLLER_INFO_CMD     = 0xC2   # returns {version, capability_bitmap, mac[6]} (bit5 = io_ext)
+GET_CONTROLLER_INFO_CMD     = 0xC2   # returns {version, capability_bitmap, mac[6]} (bit5 = io_ext, bit7 = health)
 SET_DIAG_OUTPUT_CMD         = 0xC3
 GET_DIAG_OUTPUT_CMD         = 0xC4   # returns 0 or 1
 SET_SPI_CLOCK_CMD           = 0xC5   # [len=3,0xC5,lo,hi] uint16 LE MHz; echoes applied MHz
 GET_SPI_CLOCK_CMD           = 0xC6   # returns uint16 LE MHz
+GET_HEALTH_CMD              = 0xCA   # [01 CA] read-only health telemetry + reset-surviving breadcrumb (issue #50); 66-byte LE payload, see test_health.py
+GET_CRASHREPORT_CMD         = 0xCC   # [01 CC] raw 128 B PJRC CrashReport region (0x2027FF80..); gate on 0xCB flags bit 3 (crash report)
+GET_FIRMWARE_VERSION_CMD    = 0xCB   # [01 CB] build identity {ver, rows, cols, flags, sha[8], date[10], branch[24]} = 46 bytes; see test_firmware_version.py
+GET_SD_INFO_CMD             = 0xCD   # [01 CD] SD card identity + geometry {ver, flags, card_type, fat_type, sectors u32, bytes_per_cluster u32, cid[16], maint, sd_diag} = 30 bytes; gate on 0xCB flags bit 5
+SET_SD_DIAG_CMD             = 0xCE   # [02 CE flags] bench A/B: bit0 legacy seek (next open), bit1 no same-index skip; echoes flags; readback 0xCD byte 29
 ALL_ON_CMD                  = 0xFF
