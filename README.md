@@ -474,6 +474,15 @@ O(1) (SdFat caches CID/CSD at mount; no card traffic). Gated on 0xCB flags bit 5
 
 Arena Studio reads it at link-up into `run_metadata.sd_card`; `tests/test_firmware_version.py` decodes it.
 
+### SD fast-path A/B switches (`SET_SD_DIAG`, 0xCE) — bench only
+
+`[02 CE flags]`, reply status 0 + the flags in force (1 B). bit0 **legacy seek**: the next `openPattern` skips
+`contiguousRange()`, so `FatFile::seekSet` walks the FAT chain again (the pre-fast-path behaviour); bit1 **no
+same-index skip**: every `SET_FRAME_POSITION` reads its frame. Both OFF at boot; bits 2–7 refused. Each switch
+appends `STATE(telemetry, code 0xCE, arg = flags)`; every later `sd_layout` record carries bits 2/3;
+`GET_SD_INFO` byte 29 reports the flags. Purpose: the causal test of the card stalls on one build without
+reflashing (webDisplayTools `docs/development/sd-stall-causal-test-plan-2026-09-13.md`). Gate on 0xCB flags bit 5.
+
 ### Build identity (`GET_FIRMWARE_VERSION`, 0xCB)
 
 Every build embeds the git identity of the checkout it was compiled from, so a controller in the
