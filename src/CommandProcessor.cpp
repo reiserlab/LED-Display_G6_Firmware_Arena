@@ -269,6 +269,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       handleGetSdInfo();
       break;
 
+    case SET_SD_DIAG_CMD:
+      handleSetSdDiag(cmd);
+      break;
+
     case SET_DIAG_OUTPUT_CMD:
       // [len=2, 0xC3, on]: mute (0) / unmute (non-zero) DEBUG_SERIAL
       // diagnostics on the shared USB-CDC pipe. Always accepted so the wire
@@ -1280,10 +1284,47 @@ void CommandProcessor::handleGetFirmwareVersion() {
 //   off  8  u32  bytes_per_cluster
 //   off 12  u8[16] cid      raw CID: MID @0, OID @1-2, PNM @3-7, PRV @8, PSN @9-12, MDT @13-14, CRC @15
 //   off 28  u8   sd_status_maint  SD 6.0 §4.18 maintenance support bits (SD_STATUS b328/329); 0xFF = not read
-//   off 29  u8   reserved
+//   off 29  u8   sd_diag    SET_SD_DIAG (0xCE) flags in force: bit0 legacy seek, bit1 no same-index skip
 // Status 1 (payload still sent, flags bit0 clear) when no card is mounted.
 // Gated on GET_FIRMWARE_VERSION flags bit 5 (fw_flag_sd_fastpath).
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// set-sd-diag (0xCE): [02 CE flags] — bench A/B switches for the causal test of
+// the card stalls (2026-09-13). bit0 = legacy seek: the NEXT pattern open skips
+// contiguousRange(), so FatFile::seekSet walks the FAT chain again (the
+// pre-fast-path behaviour; on this 4 KB-cluster card the 813 KB pattern's chain
+// spans two FAT sectors → a FAT-sector read from the card on most backward
+// seeks — the suspected read-disturb hot spot). bit1 = no same-index skip: every
+// 0x70 reads its frame (takes effect immediately). Both default OFF at boot and
+// are reported in GET_SD_INFO byte 29 and in STATE(sd_layout) code bit 2 (legacy
+// seek at that open), so every log line carries the arm it was recorded under.
+// Reply: status 0, payload = the flags now in force.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::handleSetSdDiag(const ParsedCommand &cmd) {
+  uint8_t claimed_len = cmd.data[0];
+  if (claimed_len != 2) {
+    current_source_->sendResponse(SET_SD_DIAG_CMD, 1, "Expected [02 CE flags]");
+    return;
+  }
+  uint8_t flags = cmd.data[2];
+  if (flags & ~0x03) {
+    current_source_->sendResponse(SET_SD_DIAG_CMD, 1, "SET_SD_DIAG: bits 2-7 reserved");
+    return;
+  }
+  sd_.setLegacySeek(flags & 0x01);
+  sd_skip_same_index_ = !(flags & 0x02);
+  if (!sd_skip_same_index_) frame_buf_is_frame_ = false;  // the next 0x70 reads even if it repeats the index
+  uint8_t echo = sdDiagFlags();
+  Telemetry::state(Telemetry::ST_TELEMETRY, 0xCE, echo);  // timeline marker: arm switch (code 0xCE, arg = flags)
+  current_source_->sendResponse(SET_SD_DIAG_CMD, 0, &echo, 1);
+  DBG_PRINTF("[cmd] set-sd-diag flags=0x%02X\n", (unsigned)echo);
+}
+
+uint8_t CommandProcessor::sdDiagFlags() const {
+  return (uint8_t)((sd_.legacySeek() ? 0x01 : 0) | (sd_skip_same_index_ ? 0 : 0x02));
+}
 
 void CommandProcessor::handleGetSdInfo() {
   SdManager::CardInfo ci;
@@ -1298,7 +1339,7 @@ void CommandProcessor::handleGetSdInfo() {
   p = put32(p, ci.bytes_per_cluster);
   memcpy(p, ci.cid, sizeof(ci.cid)); p += sizeof(ci.cid);
   p = put8(p, 0xFF);  // SD_STATUS maintenance bits: SdFat 2.1.2 exposes no ACMD13 reader
-  p = put8(p, 0);
+  p = put8(p, sdDiagFlags());  // byte 29: SET_SD_DIAG readback (bit0 legacy seek, bit1 no same-index skip)
   static_assert(sizeof(payload) == 30, "GET_SD_INFO payload is 30 bytes");
   current_source_->sendResponse(GET_SD_INFO_CMD, mounted ? 0 : 1, payload, (size_t)(p - payload));
 }
@@ -1554,7 +1595,7 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
   // Only when the refresh timer is actually running at the current rate: a
   // previous arm failure must be retried by the normal path, never hidden
   // behind a cached-frame success (Codex review, blocking).
-  if (state_ == ArenaState::SHOW_FRAME && frame_buf_is_frame_ && index == cur_frame_index_
+  if (sd_skip_same_index_ && state_ == ArenaState::SHOW_FRAME && frame_buf_is_frame_ && index == cur_frame_index_
       && spi_.refreshArmedAt(refresh_rate_hz_)) {
     ++Health::stats.cmd70_same_index;
     Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
@@ -2233,7 +2274,8 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
   {
     uint32_t spc = sd_.sectorsPerCluster();
     Telemetry::state(Telemetry::ST_SD_LAYOUT,
-                     (uint8_t)((sd_.contiguous() ? 1 : 0) | (sd_.fatType() == 64 ? 2 : 0)),
+                     (uint8_t)((sd_.contiguous() ? 1 : 0) | (sd_.fatType() == 64 ? 2 : 0)
+                               | (sd_.legacySeek() ? 4 : 0) | (sd_skip_same_index_ ? 0 : 8)),
                      spc > 0xFFFF ? 0xFFFF : (uint16_t)spc);
   }
 

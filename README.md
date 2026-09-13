@@ -470,7 +470,7 @@ O(1) (SdFat caches CID/CSD at mount; no card traffic). Gated on 0xCB flags bit 5
 | 8 | u32 | `bytes_per_cluster` | volume cluster size |
 | 12 | u8[16] | `cid` | raw CID register: MID @0, OID @1–2, PNM @3–7, PRV @8, PSN @9–12 (BE), MDT @13–14, CRC @15 |
 | 28 | u8 | `sd_status_maint` | SD 6.0 §4.18 maintenance-support bits (SD_STATUS b328/329); `0xFF` = not read (SdFat 2.1.2 has no ACMD13 reader) |
-| 29 | u8 | reserved | 0 |
+| 29 | u8 | `sd_diag` | `SET_SD_DIAG` (0xCE) flags in force: bit0 legacy seek (next open skips `contiguousRange()` → FAT-chain-walking seeks), bit1 no same-index skip. Bench A/B switches for the causal test of the card stalls; both OFF at boot; each arm switch also leaves a `STATE(telemetry, code 0xCE, arg = flags)` marker and every `sd_layout` record carries bits 2/3 |
 
 Arena Studio reads it at link-up into `run_metadata.sd_card`; `tests/test_firmware_version.py` decodes it.
 
@@ -593,7 +593,7 @@ Record: len u8 (total incl. this byte), type u8, seq u32, t_us u32 (micros()), p
                              arg bits 0-8 = xPSR IPSR (0 = thread, else exception number — PIT = 138), arg bits 9-15 = isr_last when the watchdog fired),
              9 prev_isr_count (boot after a watchdog reset, one per ISR id with entries: code = ISR id, arg = min(65535, entries >> 12)),
              10 timer_fail (IntervalTimer::begin() failed, timer left un-armed: code = 0, arg = requested refresh Hz),
-             11 sd_layout (after every sd_open: code bit0 = pattern file contiguous, bit1 = exFAT; arg = sectors per cluster),
+             11 sd_layout (after every sd_open: code bit0 = pattern file contiguous, bit1 = exFAT, bit2 = legacy seek forced (0xCE), bit3 = same-index skip disabled (0xCE); arg = sectors per cluster),
              12 sd_slow_ctx (follows every sd_slow: code = SdFat card errorCode() — sticky, 0 = no driver error this boot; arg = errorData() >> 16 = USDHC IRQSTAT error bits 16-31 saved at the driver's LAST error, may predate this read),
              13 sd_reads (at STOP / next trial start: reads = arg << (code & 0x7F), readFrame calls while that pattern was open; code bit 7 = cumulative checkpoint every 30k reads)
       sd_slow code byte (ring v2): bits 0-1 = slowest phase of the read (1 seek, 2 body, 3 CRC trailer), bit7 = the read returned an error; threshold 10 ms (was 20 ms)

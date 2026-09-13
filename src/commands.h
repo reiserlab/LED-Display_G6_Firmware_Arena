@@ -59,7 +59,8 @@ enum ArenaCommands : uint8_t {
   GET_HEALTH_CMD              = 0xCA,  // [01 CA] read-only controller health: loop/SD/SPI/USB counters + reset-surviving breadcrumb (issue #50; layout in README § Health)
   GET_CRASHREPORT_CMD         = 0xCC,  // [01 CC] raw 128 B of OCRAM 0x2027FF80..0x20280000: PJRC arm_fault_info_struct (44 B) + PJRC breadcrumbs; never cleared by this read (ships with the telemetry ring: gate on 0xCB flags bit 2)
   GET_FIRMWARE_VERSION_CMD    = 0xCB,  // [01 CB] build identity: {ver, rows, cols, flags, sha[8], date[10], branch[24]} = 46 bytes, compiled in from git (src/Version.h; gated by capability bit 7 like 0xCA)
-  GET_SD_INFO_CMD             = 0xCD,  // [01 CD] SD card identity + volume geometry: {ver, flags, card_type, fat_type, sectors u32, bytes_per_cluster u32, cid[16], sd_status_maint, reserved} = 30 bytes; O(1) (SdFat caches CID/CSD at mount); gate on 0xCB flags bit 5
+  GET_SD_INFO_CMD             = 0xCD,  // [01 CD] SD card identity + volume geometry: {ver, flags, card_type, fat_type, sectors u32, bytes_per_cluster u32, cid[16], sd_status_maint, sd_diag} = 30 bytes; O(1) (SdFat caches CID/CSD at mount); gate on 0xCB flags bit 5
+  SET_SD_DIAG_CMD             = 0xCE,  // [02 CE flags] bench A/B switches for the SD fast path: bit0 legacy seek (skip contiguousRange at the NEXT pattern open → FAT-chain walk), bit1 no same-index skip (every 0x70 reads); reply echoes the flags; readback = GET_SD_INFO byte 29; gate on 0xCB flags bit 5
   // Panel firmware image transfer to the controller SD (g6_03 § Panel firmware update).
   SET_FIRMWARE_FILE_CMD       = 0xE0,  // [0xE0, len_b0..b7, data…] upload image → /firmware/panel.bin; reply u32 LE CRC-32
   GET_FIRMWARE_INFO_CMD       = 0xE3,  // [01 E3] reply: 32-byte footer {magic[8], version[16], crc32 LE, size LE}

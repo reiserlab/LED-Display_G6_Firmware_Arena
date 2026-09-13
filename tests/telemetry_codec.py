@@ -214,6 +214,8 @@ def _decode_payload(rtype: int, body: bytes) -> dict[str, Any]:
         if kind == ST_SD_LAYOUT:
             d["contiguous"] = bool(code & 1)
             d["exfat"] = bool(code & 2)
+            d["legacy_seek"] = bool(code & 4)       # SET_SD_DIAG bit0 was in force at this open (A/B arm)
+            d["no_same_index_skip"] = bool(code & 8)  # SET_SD_DIAG bit1 in force
             d["sectors_per_cluster"] = arg
         if kind == ST_SD_SLOW_CTX:
             d["card_error_code"] = code
@@ -222,7 +224,9 @@ def _decode_payload(rtype: int, body: bytes) -> dict[str, Any]:
         if kind == ST_SD_READS:
             d["reads"] = arg << (code & 0x7F)   # code bits 0-6 = binary shift
             d["checkpoint"] = bool(code & 0x80)  # cumulative checkpoint mid-open (every 30k reads), not a close
-        if kind == ST_TELEMETRY:
+        if kind == ST_TELEMETRY and code == 0xCE:
+            d["sd_diag_flags"] = arg                 # timeline marker: SET_SD_DIAG arm switch
+        elif kind == ST_TELEMETRY:
             d["events"] = bool(code & SET_FLAG_EVENTS)
             d["synthetic"] = bool(code & SET_FLAG_SYNTHETIC)
             d["rate_hz"] = arg

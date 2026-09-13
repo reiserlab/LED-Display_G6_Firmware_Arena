@@ -114,6 +114,10 @@ class SdManager {
   const PatternInfo &info() const { return info_; }
   bool patternOpen() const { return file_open_; }
   bool contiguous() const { return contiguous_; }
+  // Bench A/B (SET_SD_DIAG 0xCE bit0): skip contiguousRange() at the next open so
+  // the file keeps SdFat's FAT-chain-walking seek — the pre-2026-09-13 behaviour.
+  void setLegacySeek(bool on) { legacy_seek_ = on; }
+  bool legacySeek() const { return legacy_seek_; }
 
   // Volume geometry for the sd_layout record / GET_SD_INFO (0xCD). 0 when unmounted.
   uint8_t  fatType() const;            // 12 / 16 / 32, 64 = exFAT
@@ -172,6 +176,7 @@ class SdManager {
   FsFile   file_;              // SdFat handle (not the Teensy File wrapper): contiguousRange/seekSet
   bool     file_open_ = false;
   bool     contiguous_ = false;  // FILE_FLAG_CONTIGUOUS set by contiguousRange() at open
+  bool     legacy_seek_ = false; // diag: do not call contiguousRange() (causal test for the card stalls)
   uint16_t open_id_   = 0;
   uint32_t last_seek_us_ = 0, last_body_us_ = 0, last_tail_us_ = 0;
   PatternInfo info_;

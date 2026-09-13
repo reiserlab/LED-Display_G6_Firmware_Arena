@@ -133,6 +133,9 @@ def test_sd_layout_slow_ctx_and_reads():
                           _state(16, ST_SD_READS, 3, 45_000))   # 360,000 reads, shift 3
     assert a.fields["kind_name"] == "sd_layout" and a.fields["contiguous"] is True
     assert a.fields["exfat"] is False and a.fields["sectors_per_cluster"] == 8
+    assert a.fields["legacy_seek"] is False and a.fields["no_same_index_skip"] is False
+    (arm,) = _block(_state(18, ST_SD_LAYOUT, 0x0C, 8))   # legacy seek + no skip, file not flagged contiguous
+    assert arm.fields["legacy_seek"] is True and arm.fields["no_same_index_skip"] is True and arm.fields["contiguous"] is False
     assert b.fields["kind_name"] == "sd_slow_ctx" and b.fields["card_error_code"] == 0
     assert b.fields["irqstat_hi"] == 1 and b.fields["driver_saw_error"] is False
     assert c.fields["kind_name"] == "sd_reads" and c.fields["reads"] == 24_573 and c.fields["checkpoint"] is False

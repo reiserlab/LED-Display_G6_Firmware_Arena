@@ -312,11 +312,11 @@ uint8_t SdManager::openPattern(uint16_t pattern_id) {
   // On a contiguous file SdFat sets FILE_FLAG_CONTIGUOUS as a side effect and
   // FatFile::seekSet() becomes m_firstCluster + n. A fragmented file returns
   // false and keeps the chain-walking seek; the caller logs which (sd_layout).
-  {
+  if (!legacy_seek_) {
     uint32_t bgn = 0, end = 0;
     contiguous_ = file_.contiguousRange(&bgn, &end);
     (void)bgn; (void)end;
-  }
+  }  // legacy_seek_ (SET_SD_DIAG bit0): leave the flag clear → FatFile::seekSet walks the chain (A/B arm)
   file_.seekSet(pattern_header_byte_count);  // contiguousRange leaves the position alone; be explicit
 
   file_open_ = true;

@@ -128,7 +128,9 @@
 //         kind 9 prev_isr_count (boot after a watchdog reset) code = ISR id, arg = min(65535, entries >> 12)
 //         kind 10 timer_fail   code = 0, arg = requested refresh rate (Hz); the timer stayed un-armed
 //         kind 11 sd_layout    after every sd_open: code bit0 = pattern file contiguous (FILE_FLAG_CONTIGUOUS
-//                              set by contiguousRange → O(1) seeks), bit1 = exFAT volume; arg = sectors per cluster
+//                              set by contiguousRange → O(1) seeks), bit1 = exFAT volume, bit2 = legacy seek forced
+//                              (SET_SD_DIAG 0xCE bit0: contiguousRange skipped at this open), bit3 = same-index
+//                              skip disabled (0xCE bit1); arg = sectors per cluster
 //         kind 12 sd_slow_ctx  follows every sd_slow: code = SdFat card errorCode() (sticky: 0 = the driver never
 //                              saw an error this boot), arg = errorData() >> 16 = USDHC IRQSTAT bits 16-31 saved at
 //                              the LAST driver error (command/data timeout, CRC, end-bit, auto-CMD12, DMA error
@@ -184,7 +186,7 @@ enum StateKind : uint8_t {
   ST_PREV_ISR_COUNT = 9,  // after a watchdog reset, one per ISR id with a non-zero count: code = ISR id,
                           // arg = min(65535, count >> 12) (units of 4096 entries)
   ST_TIMER_FAIL   = 10, // IntervalTimer::begin() failed (no free PIT channel): code = 0, arg = requested refresh Hz
-  ST_SD_LAYOUT    = 11, // after sd_open: code bit0 contiguous file, bit1 exFAT; arg = sectors per cluster
+  ST_SD_LAYOUT    = 11, // after sd_open: code bit0 contiguous, bit1 exFAT, bit2 legacy seek (diag), bit3 no same-index skip (diag); arg = sectors/cluster
   ST_SD_SLOW_CTX  = 12, // follows sd_slow: code = card errorCode(), arg = errorData() >> 16 (USDHC error bits)
   ST_SD_READS     = 13, // at pattern close/re-open: reads = arg << (code & 0x7F); code bit 7 = periodic checkpoint
 };

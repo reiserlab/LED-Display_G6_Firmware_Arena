@@ -97,6 +97,7 @@ class CommandProcessor {
   // the next 0x70 re-derives the outputs). A SET_FRAME_POSITION for that same
   // index is then answered without touching the SD card.
   bool     frame_buf_is_frame_ = false;
+  bool     sd_skip_same_index_ = true;  // SET_SD_DIAG bit1 clears it: every 0x70 reads (A/B arm)
   // Request→presentation instrumentation (FRAME.req_age_us / superseded).
   uint32_t last_cmd_rx_us_   = 0;      // dispatch entry of the command being handled
   uint32_t pending_req_us_   = 0;      // set by handleSetFramePosition before loadFrame
@@ -292,6 +293,8 @@ class CommandProcessor {
   void handleSetTelemetry(const ParsedCommand &cmd);     // set-telemetry (0xA8) — events on/off (src/Telemetry.h); bits 5/6 = watchdog starve/off (Health.h)
   void handleGetCrashReport();                           // get-crashreport (0xCC) — raw 128 B PJRC CrashReport region, not cleared
   void handleGetSdInfo();                                // get-sd-info (0xCD) — card CID/CSD identity + volume geometry, O(1)
+  void handleSetSdDiag(const ParsedCommand &cmd);        // set-sd-diag (0xCE) — bench A/B switches (legacy seek / no same-index skip)
+  uint8_t sdDiagFlags() const;
   void handleGetTelemetryBlock(const ParsedCommand &cmd);// get-telemetry-block (0xA9) — ack cursor + framed chunk of ring records
   void handleDisplayPsramIndex(const ParsedCommand &cmd);
   void handlePsramPlay(const ParsedCommand &cmd);

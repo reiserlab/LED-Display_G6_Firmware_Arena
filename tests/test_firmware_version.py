@@ -17,7 +17,7 @@ import re
 import struct
 from collections import namedtuple
 
-from .commands import GET_CONTROLLER_INFO_CMD, GET_FIRMWARE_VERSION_CMD, GET_SD_INFO_CMD
+from .commands import GET_CONTROLLER_INFO_CMD, GET_FIRMWARE_VERSION_CMD, GET_SD_INFO_CMD, SET_SD_DIAG_CMD
 
 # Payload layout — mirrors CommandProcessor::handleGetFirmwareVersion() /
 # src/Version.h. ASCII fields are right-padded with spaces (no NUL).
@@ -132,3 +132,19 @@ def test_sd_info_reply_shape_and_identity(transport):
         assert not (flags & 0x01)
     # O(1) and constant: two reads are byte-identical.
     assert transport.command(GET_SD_INFO_CMD)[2] == payload
+
+
+def test_sd_diag_switches_round_trip(transport):
+    """SET_SD_DIAG (0xCE) bits echo back and show in GET_SD_INFO byte 29; both cleared afterwards."""
+    v = read_firmware_version(transport)
+    assert v.flags & FLAG_SD_FASTPATH
+    try:
+        for flags in (0x01, 0x02, 0x03, 0x00):
+            st, echo, payload, _ = transport.command(SET_SD_DIAG_CMD, bytes([flags]))
+            assert st == 0 and echo == SET_SD_DIAG_CMD and bytes(payload) == bytes([flags])
+            _, _, info, _ = transport.command(GET_SD_INFO_CMD)
+            assert bytes(info)[29] == flags, "GET_SD_INFO byte 29 reports the diag flags in force"
+        st, _, _, _ = transport.command(SET_SD_DIAG_CMD, bytes([0x04]))
+        assert st == 1, "reserved bits are refused"
+    finally:
+        transport.command(SET_SD_DIAG_CMD, bytes([0x00]))
