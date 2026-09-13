@@ -21,11 +21,16 @@ equal-priority ISRs with a lower IRQ number (USB!) keep running, so the board st
 The wait is essential: a tight `end(); begin();` loop restarts the period every iteration and the timer
 never expires (0 storms in 53 M cycles) — the same starvation that capped the arena's displayed frame rate.
 
-**Fix (either line closes it; both is belt and braces):**
+**Invariant a core fix must establish:** an asserted channel flag must never become unserviceable because the
+callback state changed. Candidates (NOT individually tested here — the reproducer tests the NVIC guard):
 1. `pit_isr()`: acknowledge the flag regardless of the callback —
    `if (channel->TFLG) { channel->TFLG = 1; if (funct_table[i]) funct_table[i](); }`
-2. `end()`: disable first, null the callback last — `channel->TCTRL = 0; channel->TFLG = 1; funct_table[i] = nullptr;`
+2. `end()`: disable the channel + clear the flag + barrier/read-back FIRST, then release the callback. `funct_table`
+   holds an `inplace_function` whose null assignment destroys the callable before marking it empty, so the callback
+   must not be reachable from the ISR during teardown (mask `IRQ_PIT` for that step).
+Application-side workaround (this firmware, `SpiManager::disarmRefreshTimer`): mask `IRQ_PIT` at the NVIC around
+`end()`. TODO for the close-out: preserve the entry enable state instead of re-enabling unconditionally.
 
 Build: `pio run -d tools/pit-race-repro -e teensy41`. Drive: open the CDC port, send `u`/`g`/`s`/`?`;
-a heartbeat line prints every 500 ms. Side observation: `pit_irq` ≈ 2 × `ticks` — the ISR is entered a
-second time per expiry because the posted `TFLG` write has not reached the PIT when the ISR returns.
+a heartbeat line prints every 500 ms. Unexplained observation (not investigated): `pit_irq` ≈ 2 × `ticks` — the ISR appears to be entered twice per
+expiry in this sketch (which also re-attaches the vector after every `begin()`).
