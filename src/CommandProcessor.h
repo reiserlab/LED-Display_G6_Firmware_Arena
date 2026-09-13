@@ -93,9 +93,11 @@ class CommandProcessor {
   // SD fast path (2026-09-13). frame_buf_is_frame_: frame_buf_ holds the frame
   // cur_frame_index_ of the open pattern, loaded by a successful loadFrame and
   // not overwritten since (every other writer of frame_buf_ — glyph, all-on,
-  // dark, stream, PSRAM index — clears it; AO mode/LUT changes clear it too so
-  // the next 0x70 re-derives the outputs). A SET_FRAME_POSITION for that same
-  // index is then answered without touching the SD card.
+  // dark, stream, PSRAM index — clears it). sd_cache_ok_ is the REUSE gate:
+  // AO mode/LUT changes clear only that (the pixels stay valid and may still
+  // be presented) so the next 0x70 re-derives the outputs. A SET_FRAME_POSITION
+  // for the same index is answered without touching the SD card only when both
+  // are set.
   bool     frame_buf_is_frame_ = false;
   bool     sd_cache_ok_ = false;        // reuse eligibility for the same-index skip (derived outputs current); cleared by dropFrameCache
   bool     sd_skip_same_index_ = true;  // SET_SD_DIAG bit1 clears it: every 0x70 reads (A/B arm)

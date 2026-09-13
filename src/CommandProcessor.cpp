@@ -2149,8 +2149,9 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   ++Health::stats.sd_reads;
   ++open_reads_;
   if ((open_reads_ % kSdReadsCheckpoint) == 0) {
-    // Cumulative checkpoint (code bit 7): a watchdog reset mid-trial would otherwise
-    // lose the read count of exactly the trial worth analysing (Codex round 2).
+    // Cumulative checkpoint (STATE kind 14, own kind so kind 13 keeps its meaning): a
+    // watchdog reset mid-trial would otherwise lose the read count of exactly the
+    // trial worth analysing (Codex rounds 2/3).
     uint8_t shift = 0;
     uint32_t v = open_reads_;
     while (v > 0xFFFF) { v >>= 1; ++shift; }

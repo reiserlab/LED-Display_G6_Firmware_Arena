@@ -80,7 +80,7 @@ from tests.commands import (  # noqa: E402
     TRIAL_PARAMS_CMD,
 )
 from tests import telemetry_codec as tc  # noqa: E402
-from tests.transport import SerialTransport, build_frame  # noqa: E402
+from tests.transport import SerialTransport, build_frame, parse_response  # noqa: E402
 
 CAP_HEALTH = 0x80
 FW_FLAG_TELEMETRY = 0x04
@@ -231,8 +231,11 @@ class Stats:
         self.reads_fw_ckpt = 0          # last STATE sd_reads_ckpt (kind 14) of the current open (lower bound)
         self.opens = 0
         self.slow_reads = 0             # every sd_slow record (firmware threshold)
-        self.stalls: list = []          # bounded detail (STALL_KEEP) — counters below are exact
+        self.stalls: list = []          # bounded detail (STALL_KEEP) — everything the summary reports is exact
         self.stall_count = 0
+        self.worst_ms = 0.0             # exact running max (not from the bounded detail)
+        self._clusters: list = []       # exact online clustering: one dict per cluster (t_s, seg, cmds, idx, n, ms[≤8], worst)
+        self._last_stall = None         # (t_s, seg) of the previous over-gap stall
         self.age_over_gap = 0           # exact counter (the reservoir is for percentiles only)
         self.arm_seen: set = set()      # (legacy_seek, no_skip) tuples from sd_layout records
         self.step = {k: Reservoir() for k in ("+1", "-1", "small", "jump")}
@@ -302,9 +305,25 @@ class Stats:
                 self.slow_reads += 1
                 if ms > self.gap_ms:
                     self.stall_count += 1
+                    if ms > self.worst_ms:
+                        self.worst_ms = ms
+                    last = self._last_stall
+                    if last is not None and last[1] == self.segment and (t_s - last[0]) < CLUSTER_GAP_S:
+                        c = self._clusters[-1]
+                        c["n"] += 1
+                        if len(c["ms"]) < 8:
+                            c["ms"].append(ms)
+                            c["phases"].append(f.get("phase", "unknown"))
+                        c["worst"] = max(c["worst"], ms)
+                    else:
+                        self._clusters.append({"t_s": t_s, "seg": self.segment, "cmds": self.cmds70, "idx": self.index_changes,
+                                               "n": 1, "ms": [ms], "phases": [f.get("phase", "unknown")], "worst": ms})
+                    self._last_stall = (t_s, self.segment)
                     if len(self.stalls) < STALL_KEEP:
                         self.stalls.append({"t_s": t_s, "seg": self.segment, "ms": ms, "phase": f.get("phase", "unknown"),
                                             "err": bool(f.get("read_error")), "cmds": self.cmds70, "idx": self.index_changes})
+            elif k == tc.ST_SD_READS and f.get("checkpoint"):   # legacy checkpoint encoding (kind 13, code bit 7)
+                self.reads_fw_ckpt = max(self.reads_fw_ckpt, f.get("reads", f["arg"]))
             elif k == tc.ST_SD_READS:                       # final count for the open being left
                 self.reads_fw_final += f.get("reads", f["arg"])
                 self.reads_fw_ckpt = 0
@@ -320,20 +339,19 @@ class Stats:
                 self.arm_seen.add((self.layout["legacy_seek"], self.layout["no_same_index_skip"]))
             elif k == tc.ST_BOOT:
                 self.boots += 1
-                self.segment += 1
-                self.t_base = 0
-                self.t_last = None
+                self.segment += 1       # clusters / spacings never bridge a boot (the block clock re-anchors itself)
             elif k == tc.ST_RING_OVERRUN and f["code"] == tc.OVERRUN_CODE_HEAP_COLLISION:
                 self.ring_disabled = True
 
     def clusters(self) -> list:
-        out: list = []
-        for s in self.stalls:
-            if out and s["seg"] == out[-1][-1]["seg"] and (s["t_s"] - out[-1][-1]["t_s"]) < CLUSTER_GAP_S:
-                out[-1].append(s)
-            else:
-                out.append([s])
-        return out
+        """Exact cluster list (one dict per cluster; stall detail inside a cluster bounded to 8 durations)."""
+        return self._clusters
+
+    def arm_matches(self, expected) -> bool:
+        """True when every sd_layout record of the run reports the expected (legacy_seek, no_skip) arm."""
+        if not self.arm_seen:
+            return True     # no trial opened yet — capture() requires opens >= 1 separately
+        return self.arm_seen == {tuple(expected)}
 
     @property
     def reads_fw(self):
@@ -343,9 +361,9 @@ class Stats:
 
     def summary(self) -> dict:
         cl = self.clusters()
-        spacing_cmds = [c[0]["cmds"] - p[0]["cmds"] for p, c in zip(cl, cl[1:]) if c[0]["seg"] == p[0]["seg"]]
-        spacing_idx = [c[0]["idx"] - p[0]["idx"] for p, c in zip(cl, cl[1:]) if c[0]["seg"] == p[0]["seg"]]
-        spacing_s = [round(c[0]["t_s"] - p[0]["t_s"], 1) for p, c in zip(cl, cl[1:]) if c[0]["seg"] == p[0]["seg"]]
+        spacing_cmds = [c["cmds"] - p["cmds"] for p, c in zip(cl, cl[1:]) if c["seg"] == p["seg"]]
+        spacing_idx = [c["idx"] - p["idx"] for p, c in zip(cl, cl[1:]) if c["seg"] == p["seg"]]
+        spacing_s = [round(c["t_s"] - p["t_s"], 1) for p, c in zip(cl, cl[1:]) if c["seg"] == p["seg"]]
         return {
             "accepted_0x70": self.cmds70,
             "index_changes": self.index_changes,
@@ -361,14 +379,15 @@ class Stats:
             "stall_detail_truncated": self.stall_count > len(self.stalls),
             "clusters": len(cl),
             "clusters_per_1e5_cmds": round(len(cl) * 1e5 / self.cmds70, 2) if self.cmds70 else None,
-            "cluster_ms": [[round(s["ms"], 1) for s in c] for c in cl],
-            "cluster_phases": [[s["phase"] for s in c] for c in cl],
-            "cluster_t_s": [round(c[0]["t_s"], 1) for c in cl],
-            "spacing_cmds": spacing_cmds,
+            "cluster_ms": [[round(m, 1) for m in c["ms"]] + (["…"] if c["n"] > len(c["ms"]) else []) for c in cl[:200]],
+            "cluster_sizes": [c["n"] for c in cl[:200]],
+            "cluster_phases": [c["phases"] for c in cl[:200]],
+            "cluster_t_s": [round(c["t_s"], 1) for c in cl[:200]],
+            "spacing_cmds": spacing_cmds[:200],
             "spacing_cmds_median": statistics.median(spacing_cmds) if spacing_cmds else None,
             "spacing_index_changes_median": statistics.median(spacing_idx) if spacing_idx else None,
             "spacing_s_median": statistics.median(spacing_s) if spacing_s else None,
-            "worst_ms": max((s["ms"] for s in self.stalls), default=0.0),
+            "worst_ms": self.worst_ms,
             "step_cost_us": {k: v.summary() for k, v in self.step.items() if v.n},
             "req_age_us": dict(self.ages.summary(), over_gap=self.age_over_gap) if self.v2_frames else None,
             "superseded_share": round(self.superseded_frames / self.v2_frames, 3) if self.v2_frames else None,
@@ -457,22 +476,26 @@ class Drainer:
     def set_boundary(self) -> None:
         self.boundary = self.ack if self.ack != tc.NO_ACK else 0
 
-    def capture(self, accepted: int = 0, expect_final_reads: bool = False) -> dict:
+    def capture(self, accepted: int = 0, expect_final_reads: bool = False, expected_arm=None) -> dict:
         """Measurement completeness, not just transport health: records after the boundary, a trial that
         opened and closed (sd_open + final sd_reads), controller command count consistent with the host's
-        accepted count, no ring loss, no reboot / re-initialisation, no events-off / heap-disabled block."""
+        accepted count (final capture only — mid-run the ring drain lags by up to one poll), the whole run
+        under ONE arm equal to the requested one, no ring loss, no reboot / re-initialisation, no
+        events-off / heap-disabled block."""
         gaps_after = [g for g in self.tracker.gaps if self.boundary is None or ((g[1] - self.boundary) & 0xFFFFFFFF) < 0x80000000]
         st = self.stats
         cmds_ok = accepted == 0 or abs(st.cmds70 - accepted) <= 2       # ≤ the in-flight command
         complete = (st.opens >= 1 and st.frames > 0 and (st.reads_fw_final > 0 or not expect_final_reads))
+        arm_ok = len(st.arm_seen) <= 1 and (expected_arm is None or st.arm_matches(expected_arm))
         valid = (self.errors == 0 and not self.disabled_seen and not self.events_off_seen
                  and self.dropped_delta == 0 and not gaps_after and self.blocks > 0
-                 and self.post_boundary_records > 0 and self.incarnations == 0 and cmds_ok and complete)
+                 and self.post_boundary_records > 0 and self.incarnations == 0 and cmds_ok and complete and arm_ok)
         return {"valid": valid, "drain_errors": self.errors, "blocks": self.blocks, "rows": dict(self.rows),
                 "records_after_boundary": self.post_boundary_records, "ring_disabled": self.disabled_seen,
                 "events_off": self.events_off_seen, "dropped_during_run": self.dropped_delta, "seq_gaps": len(gaps_after),
                 "incarnations": self.incarnations, "controller_cmds_vs_accepted": [st.cmds70, accepted],
-                "trial_opened": st.opens >= 1, "final_reads_seen": st.reads_fw_final > 0,
+                "trial_opened": st.opens >= 1, "final_reads_seen": st.reads_fw_final > 0, "arm_consistent": arm_ok,
+                "cmds_reconciled": accepted > 0,
                 "boot_count": self.last_header.boot_count if self.last_header else None}
 
 
@@ -526,7 +549,26 @@ def main(argv=None) -> int:
     drainer = None
     exit_code = 0
     shutdown_verified = False
-    sent = accepted = missed_slots = echo_mismatch = long_intervals = resyncs = 0
+    sent = accepted = missed_slots = echo_mismatch = long_intervals = resyncs = resync_failures = 0
+    prev_diag = None          # SET_SD_DIAG flags found on the controller before this run (restored in finally)
+    diag_set = False
+    expected_arm = (bool(args.sd_diag & 1), bool(args.sd_diag & 2))
+
+    def resync() -> bool:
+        """After a timeout a late reply to the timed-out 0x70 may still arrive; opcode-only matching would hand it
+        to the NEXT request. Send ONE probe of a different opcode and read replies until ITS echo comes back."""
+        try:
+            t._send(build_frame(GET_CONTROLLER_INFO_CMD))
+        except Exception:
+            return False
+        for _ in range(4):
+            try:
+                _, echo_r, _, _ = parse_response(t._recv_raw(0.3))
+            except Exception:
+                return False
+            if echo_r == GET_CONTROLLER_INFO_CMD:
+                return True
+        return False
     period = 1.0 / args.hz
     try:
         st, _, _, _ = t.command(STOP_DISPLAY_CMD, timeout=2.0)
@@ -552,16 +594,23 @@ def main(argv=None) -> int:
         if args.sd_diag and not (fw["flags"] & FW_FLAG_SD_DIAG):
             print(f"firmware {fw['label']} has no SET_SD_DIAG (0xCB bit 6): cannot run arm {args.sd_diag}", file=sys.stderr)
             return 1
-        if fw["flags"] & FW_FLAG_SD_DIAG:
-            st, echo, dp, _ = t.command(SET_SD_DIAG_CMD, bytes([args.sd_diag]), timeout=2.0)
-            if st != 0 or echo != SET_SD_DIAG_CMD or bytes(dp)[:1] != bytes([args.sd_diag]):
-                print(f"SET_SD_DIAG({args.sd_diag}) not applied (status {st})", file=sys.stderr)
-                return 1
         sd_card = None
         if fw["flags"] & FW_FLAG_SD_FASTPATH:
             st, _, sdp, _ = t.command(GET_SD_INFO_CMD, timeout=2.0)
             if len(sdp) >= 30:
                 sd_card = decode_sd_info(bytes(sdp))
+        if fw["flags"] & FW_FLAG_SD_DIAG:
+            # The legacy-seek arm only reproduces the FAT-chain walk on FAT16/32: on exFAT the library flags
+            # the file contiguous at open, so arms 1/3 would silently equal arms 0/2 (Codex rounds 3/4).
+            if (args.sd_diag & 1) and sd_card and sd_card["fat"] == "exFAT":
+                print(f"card is exFAT: the legacy-seek arm has no effect there — arm {args.sd_diag} refused", file=sys.stderr)
+                return 1
+            prev_diag = sd_card["sd_diag"] & 0x03 if sd_card else None
+            st, echo, dp, _ = t.command(SET_SD_DIAG_CMD, bytes([args.sd_diag]), timeout=2.0)
+            if st != 0 or echo != SET_SD_DIAG_CMD or bytes(dp)[:1] != bytes([args.sd_diag]):
+                print(f"SET_SD_DIAG({args.sd_diag}) not applied (status {st})", file=sys.stderr)
+                return 1
+            diag_set = True
         # runtime settings that change the timing (Codex: identical CLI args ≠ identical controller)
         settings = {}
         for name, cmd, fmt in (("refresh_hz", GET_REFRESH_RATE_CMD, "<H"), ("spi_mhz", GET_SPI_CLOCK_CMD, "<H"),
@@ -668,16 +717,14 @@ def main(argv=None) -> int:
                 log.write(["a", round(t_off, 3), round(dt, 3), hexstr(req), None, round(now_ms() - log.t0, 3), str(e)[:40]])
                 ok = False
             if not ok:
-                # A late reply to THIS request would otherwise be taken for the next one's (opcode-only matching):
-                # resynchronise on a different opcode until its echo comes back, discarding stale replies.
-                for _ in range(3):
-                    try:
-                        st_r, echo_r, _, _ = t.command(GET_CONTROLLER_INFO_CMD, timeout=0.3)
-                        if echo_r == GET_CONTROLLER_INFO_CMD:
-                            break
-                    except Exception:
-                        pass
-                    resyncs += 1
+                resyncs += 1
+                if not resync():
+                    resync_failures += 1
+                    log.event("runner", phase="resync_failed", count=resync_failures)
+                    if resync_failures >= 3:
+                        print("link out of sync after 3 failed resyncs — aborting the run", file=sys.stderr)
+                        exit_code = 3
+                        break
             sent += 1
             if ok:
                 accepted += 1
@@ -698,13 +745,18 @@ def main(argv=None) -> int:
                 ncl = len(stats.clusters())
                 log.event("soak_progress", sent=sent, accepted=accepted, achieved_hz=round(sent / el, 1) if el else None,
                           missed_slots=missed_slots, stalls=stats.stall_count, clusters=ncl,
-                          worst_ms=max((s["ms"] for s in stats.stalls), default=0.0),
-                          reads_fw=stats.reads_fw, capture=drainer.capture(accepted))
+                          worst_ms=stats.worst_ms, resyncs=resyncs,
+                          reads_fw=stats.reads_fw, capture=drainer.capture(expected_arm=expected_arm))
                 print(f"  {el:6.0f}s {sent} sent / {accepted} ok · {sent / el:.1f} Hz achieved · missed slots {missed_slots} · "
                       f"reads≈{stats.index_changes} (fw {stats.reads_fw}) · stalls>{args.gap_ms}ms {stats.stall_count} in {ncl} clusters · "
-                      f"worst {max((s['ms'] for s in stats.stalls), default=0.0)} ms · seq gaps {len(drainer.tracker.gaps)} · drain errors {drainer.errors}")
+                      f"worst {stats.worst_ms} ms · seq gaps {len(drainer.tracker.gaps)} · drain errors {drainer.errors}")
     except KeyboardInterrupt:
         print("interrupted")
+    except Exception as e:                       # anything outside the per-command handler: the run is not usable
+        exit_code = 3
+        print(f"run aborted: {e!r}", file=sys.stderr)
+        if 'log' in dir():
+            log.event("runner", phase="error", error=repr(e)[:200])
     finally:
         try:
             st, echo, _, _ = t.command(STOP_DISPLAY_CMD, timeout=2.0)
@@ -712,6 +764,16 @@ def main(argv=None) -> int:
             log.event("runner", phase="trial_stop", verified=shutdown_verified)
         except Exception:
             log.event("runner", phase="trial_stop", verified=False)
+        if diag_set and prev_diag is not None and prev_diag != args.sd_diag:
+            # Do not leave the arm on the controller for whoever connects next (Codex round 4).
+            try:
+                st_d, echo_d, _, _ = t.command(SET_SD_DIAG_CMD, bytes([prev_diag]), timeout=2.0)
+                restored = st_d == 0 and echo_d == SET_SD_DIAG_CMD
+            except Exception:
+                restored = False
+            log.event("runner", phase="sd_diag_restore", flags=prev_diag, ok=restored)
+            if not restored:
+                print(f"WARNING: could not restore SET_SD_DIAG({prev_diag}) — the controller keeps arm {args.sd_diag}", file=sys.stderr)
         if drainer is not None:
             try:
                 time.sleep(0.2)
@@ -719,11 +781,13 @@ def main(argv=None) -> int:
             except Exception:
                 pass
             elapsed = time.perf_counter() - t_start if 't_start' in dir() else None
-            cap = drainer.capture(accepted, expect_final_reads=shutdown_verified)
+            cap = drainer.capture(accepted, expect_final_reads=shutdown_verified and bool(fw["flags"] & FW_FLAG_SD_FASTPATH),
+                                  expected_arm=expected_arm)
             s = stats.summary()
             s.update({"sent": sent, "accepted": accepted, "achieved_hz": round(sent / elapsed, 1) if elapsed else None,
                       "missed_slots": missed_slots, "long_send_intervals": long_intervals, "echo_mismatch": echo_mismatch,
-                      "resyncs": resyncs, "sd_diag_arm": args.sd_diag, "capture": cap, "shutdown_verified": shutdown_verified,
+                      "resyncs": resyncs, "resync_failures": resync_failures, "sd_diag_arm": args.sd_diag,
+                      "sd_diag_restored_to": prev_diag if diag_set else None, "capture": cap, "shutdown_verified": shutdown_verified,
                       "coverage_note": coverage_note, "response_paced": True,
                       "measurement_usable": cap["valid"] and shutdown_verified and exit_code == 0})
             log.event("sd_stall_summary", **s)

@@ -224,8 +224,10 @@ def _decode_payload(rtype: int, body: bytes) -> dict[str, Any]:
             d["irqstat_hi"] = arg          # USDHC IRQSTAT bits 16-31 at the driver's last error (sticky)
             d["driver_saw_error"] = code != 0
         if kind == ST_SD_READS:
-            d["reads"] = arg << code            # final count for that open; code = binary shift
-            d["checkpoint"] = False
+            # code bits 0-6 = binary shift. Bit 7 = the LEGACY checkpoint encoding of the (never flashed)
+            # f6c11d2 build; ring v2 is unchanged, so decode it rather than let it read as arg << 128.
+            d["reads"] = arg << (code & 0x7F)
+            d["checkpoint"] = bool(code & 0x80)
         if kind == ST_SD_READS_CKPT:
             d["reads"] = arg << code            # cumulative so far (lower bound if the run dies before sd_reads)
             d["checkpoint"] = True

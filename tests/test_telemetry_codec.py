@@ -143,3 +143,5 @@ def test_sd_layout_slow_ctx_and_reads():
     assert d.fields["reads"] == 360_000
     (e,) = _block(_state(17, ST_SD_READS_CKPT, 0, 30_000))
     assert e.fields["kind_name"] == "sd_reads_ckpt" and e.fields["reads"] == 30_000 and e.fields["checkpoint"] is True
+    (f,) = _block(_state(18, ST_SD_READS, 0x80, 30_000))   # legacy encoding (kind 13, code bit 7) still a checkpoint
+    assert f.fields["kind_name"] == "sd_reads" and f.fields["reads"] == 30_000 and f.fields["checkpoint"] is True
