@@ -314,6 +314,12 @@ class CommandProcessor {
 
   // State transitions.
   void enterAllOff();
+ public:
+  // Boot: push a dark frame so panels that HELD a stimulus through a watchdog /
+  // software reset go dark with the controller's ALL_OFF state (persistent panels
+  // keep their last frame; a power-on starts dark anyway, so this is harmless then).
+  void blankPanelsAtBoot() { enterAllOff(); }
+ private:
   void enterAllOn();
   void enterStreamingFrame(uint16_t block_byte_count);
   bool enterPatternMode(ArenaState mode, uint16_t pattern_id,

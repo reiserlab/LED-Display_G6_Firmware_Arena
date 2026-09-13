@@ -131,6 +131,11 @@ void setup() {
   spi.begin();
   sd.begin();  // mounts BUILTIN_SDCARD for Modes 2/3/4; safe with no card
 
+  // A watchdog or software reset restarts the controller in ALL_OFF, but the
+  // panels are persistent and still show the last frame of the interrupted
+  // trial — blank them now so "controller idle" also means "arena dark".
+  cmdProc.blankPanelsAtBoot();
+
   setupInterruptPriorities();
 
   // LAST: measure the RTWDOG tick rate and program the real 2 s timeout

@@ -1314,6 +1314,12 @@ void CommandProcessor::handleSetSdDiag(const ParsedCommand &cmd) {
     current_source_->sendResponse(SET_SD_DIAG_CMD, 1, "SET_SD_DIAG: bits 2-7 reserved");
     return;
   }
+  if ((flags & 0x01) && sd_.fatType() == 64) {
+    // exFAT: the library flags every file contiguous at open, so the legacy arm
+    // would silently equal the fast path — refuse rather than mislabel a run.
+    current_source_->sendResponse(SET_SD_DIAG_CMD, 1, "SET_SD_DIAG: legacy seek has no effect on exFAT");
+    return;
+  }
   sd_.setLegacySeek(flags & 0x01);
   sd_skip_same_index_ = !(flags & 0x02);
   if (!sd_skip_same_index_) sd_cache_ok_ = false;  // the next 0x70 reads even if it repeats the index
@@ -2186,22 +2192,26 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + (uint32_t)sd_.info().num_panels * block_byte_count_);
   frame_buf_is_frame_ = true;
-  sd_cache_ok_ = true;
   frame_src_flags_ = (uint8_t)(Telemetry::kFrameFlagSdRead
                                | (sd_.contiguous() ? Telemetry::kFrameFlagContiguous : 0));
   patchDispMode();
   patchTrialDuty();
+  bool outputs_ok = true;
   if (ao_mode_ == 1) {
     // frame_number AO (#135): DAC tracks the frame position, 0 V = frame 0 ..
     // 5 V = last frame. loadFrame only runs when the index CHANGES, so the
     // ~100 µs blocking I2C write costs nothing while a frame is held.
-    writeDacMv(frame_count_ > 1
-                   ? (uint16_t)((uint32_t)frame_index * 5000 / (frame_count_ - 1))
-                   : (uint16_t)0);
+    outputs_ok = writeDacMv(frame_count_ > 1
+                                ? (uint16_t)((uint32_t)frame_index * 5000 / (frame_count_ - 1))
+                                : (uint16_t)0);
   } else if (ao_lut_len_ > 0 && ao_lut_mode_ == 0) {
     ao_lut_idx_ = (uint16_t)(frame_index % ao_lut_len_);
-    applyAoLut(ao_lut_idx_);
+    outputs_ok = applyAoLut(ao_lut_idx_);
   }
+  // The same-index skip may reuse this frame only if its derived outputs were
+  // actually applied: after an I²C failure the next 0x70 for the same index must
+  // come back through here and retry (whole-stack review, 2026-09-13).
+  sd_cache_ok_ = outputs_ok;
   return true;
 }
 

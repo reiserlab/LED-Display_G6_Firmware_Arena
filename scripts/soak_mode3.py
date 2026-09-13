@@ -680,6 +680,14 @@ class Soak:
             if track:
                 self.timeouts += 1
                 self._win["timeouts"] += 1
+            # A late reply to THIS command would be taken for the next same-opcode command's
+            # (replies match by opcode only). One probe of a different opcode: Link.command
+            # discards every frame that is not its echo, so a stale reply is consumed here.
+            if cmd != GET_CONTROLLER_INFO_CMD:
+                try:
+                    self.link.command(GET_CONTROLLER_INFO_CMD, b"", 0.3)
+                except Exception:
+                    pass
         except Exception as e:  # SerialException, OSError, ...
             err = f"transport error: {e.__class__.__name__}: {e}"
             if track:

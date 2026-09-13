@@ -650,9 +650,18 @@ def main(argv=None) -> int:
             print("SET_TELEMETRY refused", file=sys.stderr)
             return 1
         drainer = Drainer(t, log, args.timeout, stats)
-        drainer.drain(max_chunks=400)  # pre-run backlog: kept in the log, excluded from the summary
+        # Pre-run backlog: kept in the log, excluded from the summary. A full 64 KiB ring of 26 B FRAMEs is
+        # > 400 blocks, so drain until the header says nothing is left — a boundary set with records still
+        # queued would count the previous run's reads as this one's (whole-stack review, 2026-09-13).
+        for _ in range(40):
+            drainer.drain(max_chunks=400)
+            if drainer.errors or (drainer.last_header is not None and not drainer.last_header.more):
+                break
         if drainer.errors or drainer.blocks == 0:
             print("telemetry ring did not answer at start — refusing to run a blind measurement", file=sys.stderr)
+            return 1
+        if drainer.last_header is not None and drainer.last_header.more:
+            print("telemetry backlog did not drain (ring still reports more) — refusing to set a boundary", file=sys.stderr)
             return 1
         drainer.set_boundary()
         log.event("telemetry_backlog_drained", boundary_seq=drainer.boundary, blocks=drainer.blocks)
