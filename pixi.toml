@@ -18,6 +18,12 @@ deploy-12-18 = "pio run -e teensy41-12-18 -t upload"
 deploy-12-18-performance = "pio run -e teensy41-12-18-performance -t upload"
 build-12-18 = "pio run -e teensy41-12-18"
 monitor-12-18 = "mkdir -p log && bash -c 'pio device monitor -e teensy41-12-18 2>&1 | tee \"log/$(date +%Y%m%d_%H%M%S)_12-18.log\"'"
+# G6_2x10 (arena_10-10 board populated with 2 panel rows -- the CSHL course
+# controllers). ARENA_HW_2_10 build flag; same quartet, keep in sync.
+deploy-2-10 = "pio run -e teensy41-2-10 -t upload"
+deploy-2-10-performance = "pio run -e teensy41-2-10-performance -t upload"
+build-2-10 = "pio run -e teensy41-2-10"
+monitor-2-10 = "mkdir -p log && bash -c 'pio device monitor -e teensy41-2-10 2>&1 | tee \"log/$(date +%Y%m%d_%H%M%S)_2-10.log\"'"
 # Serve scripts/web-serial on http://localhost:8000 AND open a Chromium-based
 # browser in parallel. The previous one-liner used `;`, which is sequential:
 # http.server blocks, so the browser only launched after the server was killed.

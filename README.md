@@ -54,10 +54,14 @@ pixi run monitor-10-10   # USB serial monitor (logs to log/)
 pixi run build-12-18     # compile (arena_12-18)
 pixi run deploy-12-18    # compile and upload (arena_12-18)
 pixi run monitor-12-18   # USB serial monitor (logs to log/)
+
+pixi run build-2-10      # compile (G6_2x10 -- the CSHL course controllers)
+pixi run deploy-2-10     # compile and upload (G6_2x10)
+pixi run monitor-2-10    # USB serial monitor (logs to log/)
 ```
 
 Each hardware target also has a `-performance` variant (`deploy-10-10-performance`,
-`deploy-12-18-performance`) that builds without `DEBUG_SERIAL`.
+`deploy-12-18-performance`, `deploy-2-10-performance`) that builds without `DEBUG_SERIAL`.
 
 ## Source files
 
