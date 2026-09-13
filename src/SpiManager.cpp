@@ -1,6 +1,7 @@
 #include "SpiManager.h"
 #include "G6PanelProtocol.h"
 #include "Health.h"
+#include "Telemetry.h"
 
 using namespace AC;
 using namespace AC::constants;
@@ -9,18 +10,18 @@ SpiManager   *SpiManager::instance_     = nullptr;
 volatile bool SpiManager::dmaComplete_  = false;
 
 void SpiManager::dmaISR(EventResponderRef) {
-  Health::isrEnter(Health::ISR_DMA);
+  uint8_t p = Health::isrEnter(Health::ISR_DMA);
   dmaComplete_ = true;
-  Health::isrExit();
+  Health::isrExit(p);
 }
 
 void SpiManager::refreshISR() {
-  Health::isrEnter(Health::ISR_REFRESH);
+  uint8_t p = Health::isrEnter(Health::ISR_REFRESH);  // restores the PIT trampoline's marker on exit
   if (instance_) {
     instance_->refreshFlag = true;
     instance_->isr_count_++;
   }
-  Health::isrExit();
+  Health::isrExit(p);
 }
 
 void SpiManager::begin() {
@@ -63,12 +64,45 @@ void SpiManager::armRefreshTimer(uint32_t frequency_hz) {
   if (frequency_hz == 0) return;
   if (armed_hz_ == frequency_hz) return;  // free-running: already ticking at this rate, leave the PIT alone
   uint32_t period_us = microseconds_per_second / frequency_hz;
-  refreshTimer_.begin(refreshISR, period_us);  // (re)starts the channel at the new period
+  if (!refreshTimer_.begin(refreshISR, period_us)) {   // (re)starts the channel at the new period
+    // No free PIT channel (should be impossible with one timer, but a failed
+    // allocation must not become a sticky "already armed at this rate" — D5).
+    armed_hz_ = 0;
+    Telemetry::state(Telemetry::ST_TIMER_FAIL, 0, (uint16_t)(frequency_hz > 0xFFFF ? 0xFFFF : frequency_hz));
+    return;
+  }
+  // begin() re-attached the core's pit_isr: put the ISR_PIT breadcrumb trampoline back.
+  Health::wrapPitVector();
   armed_hz_ = frequency_hz;
 }
 
+// SAFE SHUTDOWN of the refresh timer — the leading mechanism candidate for the
+// #50 wedge (2026-09-13, wedge #5 wdog_pc at IntervalTimer::end()'s TCTRL store).
+// framework-arduinoteensy 1.160.0, cores/teensy4/IntervalTimer.cpp:
+//   end():    funct_table[index] = nullptr;   // FIRST
+//             channel->TCTRL = 0; channel->TFLG = 1;   // THEN
+//   pit_isr(): if (funct_table[n] != nullptr && channel->TFLG) { channel->TFLG = 1; funct_table[n](); }
+// If the PIT interrupt is taken between the nullptr store and the TCTRL store,
+// pit_isr runs with a null callback, never clears TFLG, and re-enters forever
+// at priority 128 — the main context is starved with its stacked PC exactly
+// at the TCTRL store (what the watchdog captured). SDHC (priority 96, see
+// main.cpp) preempts the storm outright; USB (128, IRQ 113 < 122) wins the
+// equal-priority NVIC tie-break between iterations — so USB stays enumerated
+// and the bootloader route works. Fix: mask ONLY the PIT at the NVIC around
+// end() — NOT PRIMASK, which would also mask the watchdog IRQ and, if the
+// alternative reading (a genuinely stalled peripheral store) were true, lose
+// the PC capture exactly where it matters. A PIT interrupt that pends during
+// the window runs pit_isr afterwards with a null callback AND an already-
+// cleared TFLG -> no storm. begin() re-enables IRQ_PIT itself (and the core's
+// TODO leaves it enabled after end()). Nothing else inside (no SD, no SPI).
 void SpiManager::disarmRefreshTimer() {
-  if (armed_hz_ != 0) refreshTimer_.end();
+  if (armed_hz_ != 0) {
+    NVIC_DISABLE_IRQ(IRQ_PIT);
+    asm volatile("dsb\n\tisb" ::: "memory");
+    refreshTimer_.end();
+    asm volatile("dsb" ::: "memory");
+    NVIC_ENABLE_IRQ(IRQ_PIT);
+  }
   armed_hz_   = 0;
   refreshFlag = false;
 }

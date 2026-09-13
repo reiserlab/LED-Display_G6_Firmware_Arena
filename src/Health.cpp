@@ -9,14 +9,14 @@ namespace {
 constexpr uint32_t kMagic    = 0x48364C54;  // "H6LT" — main-loop breadcrumb
 constexpr uint32_t kIsrMagic = 0x48364952;  // "H6IR" — ISR / watchdog record
 
-// Two cache lines below PJRC's CrashReport fault record (0x2027FF80) at the
-// top of OCRAM: breadcrumb at 0x2027FF40, ISR/watchdog record at 0x2027FF20.
+// Below PJRC's CrashReport fault record (0x2027FF80) at the top of OCRAM:
+// breadcrumb at 0x2027FF40 (1 line), ISR/watchdog record at 0x2027FEC0 (3 lines).
 // Not in any linker section, so neither startup.c's .bss clear nor the .data
 // copy touches them; the telemetry ring ends at 0x2027F000 below them.
 volatile Breadcrumb *const crumb =
     reinterpret_cast<volatile Breadcrumb *>(0x2027FF40);
 volatile IsrRecord *const isr =
-    reinterpret_cast<volatile IsrRecord *>(0x2027FF20);
+    reinterpret_cast<volatile IsrRecord *>(0x2027FEC0);
 
 inline uint32_t computeCheck(uint32_t magic, uint8_t last_op, uint8_t op_arg,
                              uint8_t slow_op, uint32_t stamp_us, uint32_t slow_us) {
@@ -32,9 +32,21 @@ inline void seal() {
   arm_dcache_flush(const_cast<Breadcrumb *>(crumb), sizeof(Breadcrumb));
 }
 
-inline uint32_t computeIsrCheck(uint32_t magic, uint8_t isr_last, uint8_t fired,
-                                uint32_t count, uint32_t pc, uint32_t lr, uint32_t stamp) {
-  return ~(magic ^ ((uint32_t)isr_last | ((uint32_t)fired << 8)) ^ count ^ pc ^ lr ^ stamp);
+// Two XOR checksums (XOR so the lite hooks can update them incrementally:
+// check ^= old_word ^ new_word): check0 over line 0's context words 0..6,
+// check_all over every word except the two checksums (words 0..6, 8..22).
+inline uint32_t computeIsrCheck0(const volatile IsrRecord *r) {
+  const volatile uint32_t *w = reinterpret_cast<const volatile uint32_t *>(r);
+  uint32_t x = 0;
+  for (uint32_t i = 0; i < 7; ++i) x ^= w[i];
+  return ~x;
+}
+inline uint32_t computeIsrCheckAll(const volatile IsrRecord *r) {
+  const volatile uint32_t *w = reinterpret_cast<const volatile uint32_t *>(r);
+  uint32_t x = 0;
+  for (uint32_t i = 0; i < 7; ++i) x ^= w[i];
+  for (uint32_t i = 8; i < sizeof(IsrRecord) / 4 - 1; ++i) x ^= w[i];
+  return ~x;
 }
 
 inline uint32_t readPrimask() {
@@ -49,8 +61,8 @@ inline uint32_t readPrimask() {
 inline void sealIsr() {
   uint32_t pm = readPrimask();
   __disable_irq();
-  isr->check = computeIsrCheck(isr->magic, isr->isr_last, isr->wdog_fired, isr->isr_count,
-                               isr->wdog_pc, isr->wdog_lr, isr->wdog_stamp_us);
+  isr->check0    = computeIsrCheck0(isr);
+  isr->check_all = computeIsrCheckAll(isr);
   arm_dcache_flush(const_cast<IsrRecord *>(isr), sizeof(IsrRecord));
   if (!pm) __enable_irq();
 }
@@ -230,19 +242,27 @@ void rtwdogEarlyArm() {
 // happens and isr_last says which ISR was entered last). The reset follows
 // within 128 bus clocks; spin so a stray return can never re-enter. Writes
 // ONLY the ISR record — the breadcrumb may be mid-mark() and stays untouched.
-extern "C" void health_rtwdog_isr_c(uint32_t *frame) {
+extern "C" void health_rtwdog_isr_c(uint32_t *frame, uint32_t exc_return) {
+  // ~128 bus clocks until the reset: context into line 0, seal + flush THAT
+  // line first, then the count lines. A partial flush still yields the context.
+  isr->wdog_prev_isr = isr->isr_last;  // keep the identity of what was active (D4): ISR_WDOG overwrites isr_last below
   isr->wdog_pc       = frame[6];
   isr->wdog_lr       = frame[5];
+  isr->wdog_xpsr     = frame[7];      // IPSR bits 0-8: 0 = thread, else the interrupted exception number
+  isr->wdog_excret   = exc_return;    // bit 3 set = thread mode preempted, clear = another handler
   isr->wdog_stamp_us = micros();
   isr->wdog_fired    = 1;
   isr->isr_last      = ISR_WDOG;
-  sealIsr();
+  isr->check0        = computeIsrCheck0(isr);
+  arm_dcache_flush(const_cast<IsrRecord *>(isr), 32);                       // line 0: context
+  isr->check_all     = computeIsrCheckAll(isr);
+  arm_dcache_flush(const_cast<uint32_t *>(isr->cnt), sizeof(IsrRecord) - 32);  // lines 1-2: counts
   for (;;) {}
 }
 
 namespace {
 __attribute__((naked)) void rtwdogISR() {
-  asm volatile("mrs r0, msp\n\tb health_rtwdog_isr_c");
+  asm volatile("mrs r0, msp\n\tmov r1, lr\n\tb health_rtwdog_isr_c");  // r1 = EXC_RETURN
 }
 void installWdogIrq() {
   if (wd_irq_installed_) return;
@@ -281,24 +301,30 @@ void begin() {
   }
 
   // Harvest the previous boot's ISR / watchdog record — independently.
-  IsrRecord pi;
-  pi.magic         = isr->magic;
-  pi.isr_last      = isr->isr_last;
-  pi.wdog_fired    = isr->wdog_fired;
-  pi.isr_count     = isr->isr_count;
-  pi.wdog_pc       = isr->wdog_pc;
-  pi.wdog_lr       = isr->wdog_lr;
-  pi.wdog_stamp_us = isr->wdog_stamp_us;
-  pi.check         = isr->check;
-  if (pi.magic == kIsrMagic &&
-      pi.check == computeIsrCheck(pi.magic, pi.isr_last, pi.wdog_fired, pi.isr_count,
-                                  pi.wdog_pc, pi.wdog_lr, pi.wdog_stamp_us)) {
-    stats.prev_isr_valid  = true;
-    stats.prev_isr_last   = pi.isr_last;
-    stats.prev_isr_count  = pi.isr_count;
-    stats.prev_wdog_fired = pi.wdog_fired != 0;
-    stats.prev_wdog_pc    = pi.wdog_pc;
-    stats.prev_wdog_lr    = pi.wdog_lr;
+  // Context (line 0) and counts (lines 1-2) validate independently: the
+  // watchdog ISR flushes line 0 first, so a reset that cut the capture short
+  // still yields pc/lr/xpsr/excret with the counts reported as zero.
+  if (isr->magic == kIsrMagic && isr->check0 == computeIsrCheck0(isr)) {
+    stats.prev_isr_valid     = true;
+    stats.prev_isr_last      = isr->isr_last;
+    stats.prev_wdog_fired    = isr->wdog_fired != 0;
+    stats.prev_wdog_pc       = isr->wdog_pc;
+    stats.prev_wdog_lr       = isr->wdog_lr;
+    stats.prev_wdog_xpsr     = isr->wdog_xpsr;
+    stats.prev_wdog_excret   = isr->wdog_excret;
+    stats.prev_wdog_prev_isr = isr->wdog_prev_isr;
+    if (isr->check_all == computeIsrCheckAll(isr)) {
+      stats.prev_isr_count = isr->isr_count;
+      for (uint32_t i = 0; i < ISR_ID_COUNT; ++i) stats.prev_isr_cnt[i] = isr->cnt[i];
+    }
+  }
+  // Rollback safety: builds fb11681..eca07f6 kept a 32 B ISR record at
+  // 0x2027FF20 with the same magic. Invalidate it so a rolled-back firmware
+  // never harvests that stale record as "the previous boot".
+  {
+    volatile uint32_t *old_magic = reinterpret_cast<volatile uint32_t *>(0x2027FF20);
+    *old_magic = 0;
+    arm_dcache_flush(const_cast<uint32_t *>(old_magic), 32);
   }
 
   // Fresh live records for this boot.
@@ -317,12 +343,16 @@ void begin() {
   isr->magic         = kIsrMagic;
   isr->isr_last      = ISR_NONE;
   isr->wdog_fired    = 0;
+  isr->wdog_prev_isr = 0;
   isr->pad_          = 0;
-  isr->isr_count     = 0;
   isr->wdog_pc       = 0;
   isr->wdog_lr       = 0;
   isr->wdog_stamp_us = 0;
-  isr->reserved_     = 0;
+  isr->wdog_xpsr     = 0;
+  isr->wdog_excret   = 0;
+  isr->isr_count     = 0;
+  for (uint32_t i = 0; i < ISR_ID_COUNT; ++i) isr->cnt[i] = 0;
+  for (uint32_t i = 0; i < 6; ++i) isr->reserved_[i] = 0;
   sealIsr();
 
   stats.loop_win_start_us = micros();
@@ -371,37 +401,92 @@ void clear() {
   }
 }
 
-void isrEnter(uint8_t id) {
+uint8_t isrEnter(uint8_t id) {
+  uint32_t pm = readPrimask();
+  __disable_irq();                      // whole update + seal masked (E1): SDHC at 96 preempts these hooks
+  uint8_t prev   = isr->isr_last;
   isr->isr_last  = id;
   isr->isr_count = isr->isr_count + 1;
+  if (id < ISR_ID_COUNT) isr->cnt[id] = isr->cnt[id] + 1;
   sealIsr();
+  if (!pm) __enable_irq();
+  return prev;
 }
 
-void isrExit() {
-  isr->isr_last = ISR_NONE;
+void isrExit(uint8_t prev) {
+  uint32_t pm = readPrimask();
+  __disable_irq();
+  isr->isr_last = prev;                 // restore, don't clear: the PIT trampoline's marker survives the callback
   sealIsr();
+  if (!pm) __enable_irq();
 }
 
 // XOR checksum => a field change updates `check` by XOR-ing old^new of that
 // word. Keeps the cached copy self-consistent without a flush; a natural
 // eviction mid-update or a nested seal can leave the MEMORY copy stale for a
 // moment, fixed by the next sealIsr(). Good enough for a diagnostic marker.
+// Both lite hooks are read-modify-write sequences on a record shared by nested
+// ISRs of different priorities (USB 113 / SDHC 110 / PIT 122 all at 128, the
+// refresh callback sealing inside the PIT wrapper): a higher-priority wrapped
+// ISR landing between the read and the store would lose a count and leave the
+// checksum inconsistent with the fields (Codex D1). So the whole update runs
+// under a PRIMASK-preserving critical section — a handful of instructions,
+// still no cache flush.
 uint8_t isrEnterLite(uint8_t id) {
+  uint32_t pm = readPrimask();
+  __disable_irq();
   uint8_t  prev  = isr->isr_last;
-  uint32_t w_old = (uint32_t)prev | ((uint32_t)isr->wdog_fired << 8);
-  uint32_t w_new = (uint32_t)id   | ((uint32_t)isr->wdog_fired << 8);
+  uint32_t w0    = (uint32_t)prev | ((uint32_t)isr->wdog_fired << 8) | ((uint32_t)isr->wdog_prev_isr << 16) | ((uint32_t)isr->pad_ << 24);
+  uint32_t w1    = (uint32_t)id   | ((uint32_t)isr->wdog_fired << 8) | ((uint32_t)isr->wdog_prev_isr << 16) | ((uint32_t)isr->pad_ << 24);
   uint32_t c_old = isr->isr_count;
+  uint32_t d0    = w0 ^ w1;                          // line-0 word 1 changed: both checksums
+  uint32_t dall  = d0 ^ (c_old ^ (c_old + 1));
   isr->isr_last  = id;
   isr->isr_count = c_old + 1;
-  isr->check     = isr->check ^ (w_old ^ w_new) ^ (c_old ^ (c_old + 1));
+  if (id < ISR_ID_COUNT) {
+    uint32_t p_old = isr->cnt[id];
+    isr->cnt[id]   = p_old + 1;
+    dall ^= (p_old ^ (p_old + 1));
+  }
+  isr->check0    = isr->check0 ^ d0;
+  isr->check_all = isr->check_all ^ dall;
+  if (!pm) __enable_irq();
   return prev;
 }
 
 void isrExitLite(uint8_t prev) {
-  uint32_t w_old = (uint32_t)isr->isr_last | ((uint32_t)isr->wdog_fired << 8);
-  uint32_t w_new = (uint32_t)prev          | ((uint32_t)isr->wdog_fired << 8);
+  uint32_t pm = readPrimask();
+  __disable_irq();
+  uint32_t hi = ((uint32_t)isr->wdog_fired << 8) | ((uint32_t)isr->wdog_prev_isr << 16) | ((uint32_t)isr->pad_ << 24);
+  uint32_t w0 = (uint32_t)isr->isr_last | hi;
+  uint32_t w1 = (uint32_t)prev          | hi;
   isr->isr_last  = prev;
-  isr->check     = isr->check ^ (w_old ^ w_new);
+  isr->check0    = isr->check0 ^ (w0 ^ w1);
+  isr->check_all = isr->check_all ^ (w0 ^ w1);
+  if (!pm) __enable_irq();
+}
+
+// ---- PIT vector trampoline (ISR_PIT) ---------------------------------------------
+// IntervalTimer::begin() re-attaches the core's pit_isr on every call, so the
+// wrapper has to be (re)installed after each (re)arm; wrapPitVector() is
+// idempotent and skips a vector that is already the trampoline or is the
+// core's unused_interrupt_vector (nothing to measure).
+namespace {
+void (*saved_pit_isr)(void) = nullptr;
+void pitTramp() {
+  uint8_t p = isrEnterLite(ISR_PIT);
+  saved_pit_isr();
+  isrExitLite(p);
+}
+}  // namespace
+
+extern "C" void unused_interrupt_vector(void);
+
+void wrapPitVector() {
+  void (*cur)(void) = _VectorsRam[IRQ_PIT + 16];
+  if (cur == pitTramp || cur == nullptr || cur == unused_interrupt_vector) return;
+  saved_pit_isr = cur;
+  attachInterruptVector(IRQ_PIT, pitTramp);
 }
 
 uint8_t  slowOp()   { return crumb->slow_op; }

@@ -277,7 +277,7 @@ core and are not hooked.
 
 | Off | Type | Field | Meaning |
 |---|---|---|---|
-| 66 | u8 | `prev_isr_last` | ISR the previous boot was inside when it died (0 none, 1 refresh, 2 dma, 3 wdog, 4 usb, 5 sdhc, 6 lpspi, 7 other) |
+| 66 | u8 | `prev_isr_last` | ISR the previous boot was inside when it died (0 none, 1 refresh, 2 dma, 3 wdog, 4 usb, 5 sdhc, 6 lpspi, 7 pit) |
 | 67 | u32 | `prev_isr_count` | ISR entries in the previous boot |
 | 71 | u32 | `prev_wdog_pc` | stacked PC captured by the watchdog pre-reset IRQ (valid when `wdog_flags` bit2) |
 | 75 | u32 | `prev_wdog_lr` | stacked LR at that moment |
@@ -323,35 +323,37 @@ performance env carries no `build_flags`.
 **Evidence.** Wedge #5 (23:51, build 4860fef) was the first one caught by the watchdog:
 `prev_breadcrumb = OP_CMD_DISARM / 0x70`, `prev_isr_last = 3` (the core was preemptible),
 `prev_wdog_pc = 0x212F4` = `IntervalTimer::end()` at `str r1, [r3, #8]` — the `channel->TCTRL = 0`
-store into the PIT — `lr = 0x212EB`. Reading: the main loop blocked on a **peripheral-bus write** to
-the PIT; USB and SD fall silent because everything else on that bus queues behind it, and there is
-no fault because nothing faults — the core just never gets the bus back. Independently, at 286 Hz
+store into the PIT — `lr = 0x212EB`. Two readings fit: the **leading mechanism** is the core's `IntervalTimer::end()` race (see "The core
+race" below — a null-callback PIT interrupt storm starving the main context exactly at that store);
+the **alternative** is a peripheral-bus hang on the PIT write itself (USB and SD queue behind it, no
+fault because nothing faults). The kind 8/9 ring records at the next capture decide between them. Independently, at 286 Hz
 `SET_FRAME_POSITION` the display was starving: every 0x70 disarmed and re-armed the refresh timer,
 which **restarts the refresh period** on each command, so with a 3.5 ms command interval against a
 3.33 ms period the tick rarely fired before the next restart (~20 displayed frames/s).
 
 **Change.** `SpiManager::armRefreshTimer` is now **idempotent** — it tracks the rate the PIT channel is
 running at and does nothing when asked for the same rate; a different rate re-begins the channel.
-`handleSetFramePosition` no longer touches the PIT at all: it validates, `loadFrame`s into
-`frame_buf_`, sets `state_ = SHOW_FRAME`, arms only when entering SHOW_FRAME from another state or
-when the refresh rate differs, and replies. FRAME telemetry is unchanged (it is emitted at the
+A **valid, steady-state 0x70 never touches the PIT**: `handleSetFramePosition` validates,
+`loadFrame`s into `frame_buf_`, sets `state_ = SHOW_FRAME`, arms only when entering SHOW_FRAME from
+another state or when the refresh rate differs, and replies. `showError()` (a rejected 0x70), rate
+changes and state transitions still program the PIT — now through the guarded disarm below. FRAME telemetry is unchanged (it is emitted at the
 transfer). **Audit of disarm/arm sites:**
 
 | Site | Before | Now | Why |
 |---|---|---|---|
-| `handleSetFramePosition` (0x70, per command) | disarm + arm | **none** (idempotent arm at state entry / rate change only) | the hot path; the churn that wedges #2–#5 sat in |
+| `handleSetFramePosition` (0x70, per command) | disarm + arm | **none in steady state** (idempotent arm at state entry / rate change only; a rejected 0x70 still goes through `showError`) | the hot path; the churn that wedges #2–#5 sat in |
 | `handleDisplayPsramIndex` (0x3A, per index) | disarm + arm | idempotent arm only | same per-command churn on the PSRAM path |
 | `handlePsramPlay` (0x3B, per play start) | disarm + arm | idempotent arm only | buffer built synchronously in `loop()` |
 | `SET_REFRESH_RATE` (0x16) | disarm + arm | arm (re-begins only if the rate changed) | rate change is the point |
-| `enterPatternMode` (trial start, 0x08/0x03) | disarm + arm | **kept** | `block_byte_count_` (GS2/GS16) changes before `frame_buf_` is refilled — a tick in between would push the old buffer with the new block size |
-| `enterStreamingFrame` (0x32 size/state change) | disarm + arm | kept (already gated on `need_rearm`) | geometry / rate change |
-| `enterAllOn`, `showError`, `enterAllOff` (STOP) | disarm (+ arm) | kept; STOP's disarm now carries the `OP_CMD_DISARM` crumb (arg 0) | geometry change / display off |
+| `enterPatternMode` (trial start, 0x08/0x03) | disarm + arm | **kept** (guarded) | explicit transition semantics — the display pauses while the pattern opens and the geometry (GS2/GS16) may change; not a concurrency guard (the PSRAM paths change `block_byte_count_` without disarming) |
+| `enterStreamingFrame` (0x32 size/state change) | disarm + arm | kept (guarded; already gated on `need_rearm`) | explicit transition: stream geometry / rate change |
+| `enterAllOn`, `showError`, `enterAllOff` (STOP) | disarm (+ arm) | kept (guarded); STOP's disarm carries the `OP_CMD_DISARM` crumb (arg 0) | explicit transitions: all-on / glyph / display off |
 
 **ISR breadcrumb coverage (same commit).** The one interpretation-killer for a watchdog PC is an
 interrupt storm at a priority the main loop cannot preempt — the core's `usb_isr` (USB-CDC), USDHC
 (SdFat's SDIO), or an LPSPI IRQ. At the end of `setup()`, `wrapDriverVectors()` saves the handler
 found in `_VectorsRam` for `IRQ_USB1` / `IRQ_SDHC1` / `IRQ_LPSPI3` / `IRQ_LPSPI4` and installs a thin
-trampoline that marks `isr_last` = **4 usb / 5 sdhc / 6 lpspi** on entry (nesting-safe: exit restores
+trampoline that marks `isr_last` = **4 usb / 5 sdhc / 6 lpspi** (and **7 pit** via `Health::wrapPitVector`, see below) on entry (nesting-safe: exit restores
 the previous id) and counts entries. These use `Health::isrEnterLite`: a byte store, a count, and an
 incremental XOR update of the record checksum — **no cache flush** per interrupt; the memory copy is
 refreshed by the sealing refresh/DMA hooks (≥ 300 Hz) and by the watchdog ISR. A vector still pointing
@@ -362,19 +364,68 @@ pins LPSPI3/4 to priority 0**: nothing attaches those vectors, so it was dead co
 priority 0 such an interrupt could not have been preempted by the watchdog IRQ (also 0) — they stay
 at the core default 128.
 
+**The core race — leading mechanism candidate (2026-09-13).** Verified in the installed core
+(framework-arduinoteensy 1.160.0, `cores/teensy4/IntervalTimer.cpp`): `end()` stores
+`funct_table[index] = nullptr` **before** `channel->TCTRL = 0; channel->TFLG = 1;`, and `pit_isr()`
+clears a channel's `TFLG` **only** when its `funct_table` entry is non-null. If the PIT interrupt is
+taken between the two stores, `pit_isr` runs with a null callback, never clears `TFLG`, and re-enters
+forever at priority 128 — the main context is starved with its stacked PC exactly at the `TCTRL`
+store (`0x212F4`, what wedge #5 captured). SDHC runs at priority 96 (`setupInterruptPriorities`) and
+preempts the storm outright; USB (IRQ 113, priority 128) wins the equal-priority NVIC tie-break
+against the PIT (IRQ 122, lower number first) between storm iterations — which is why USB stayed
+enumerated and the bootloader route worked. The free-running
+change above **reduces exposure** by removing the hot-path disarm (the 286 Hz × 3.3 ms lottery);
+`SpiManager::disarmRefreshTimer()` now **closes the remaining sites** (`enterPatternMode`,
+`enterStreamingFrame`, `enterAllOn`, `showError`, `enterAllOff`) by running `IntervalTimer::end()`
+with **only the PIT masked at the NVIC** (`NVIC_DISABLE_IRQ(IRQ_PIT)` → `dsb; isb` → `end()` → `dsb` →
+`NVIC_ENABLE_IRQ(IRQ_PIT)`), nothing else inside. Not PRIMASK: that would also mask the watchdog IRQ,
+and if the alternative reading (a genuinely stalled peripheral store) were true we would lose the PC
+capture exactly where it matters. A PIT interrupt that pends during the window runs `pit_isr`
+afterwards with a null callback and an already-cleared `TFLG` — no storm.
+`begin()`'s order (`funct_table` set before `TCTRL = 3`) has no such window. Two more probes make the
+next capture conclusive: **ISR id 7 = PIT** — the core's `pit_isr` vector (IRQ 122) is wrapped by an
+`isrEnterLite` trampoline via `Health::wrapPitVector()`, re-installed from `armRefreshTimer()` after
+every `IntervalTimer::begin()` (which re-attaches `pit_isr` and would otherwise remove the wrapper);
+the ISR record now keeps **per-id entry counts**, and after a watchdog reset the ring receives
+`STATE(9 prev_isr_count)` per busy id (arg in units of 4096 entries — 300 Hz × 60 s ≈ 4 units, a
+multi-MHz storm for 2 s ≈ 1000+). **Watchdog context** — the pre-reset IRQ also stores the stacked
+xPSR and its EXC_RETURN in the ISR record (grown to 96 B at `0x2027FEC0`; `GET_HEALTH` unchanged), and
+the ring receives `STATE(8 wdog_context)` with code = EXC_RETURN low byte (`0xF9` = thread mode was
+preempted, `0xF1` = a handler was) and arg = IPSR in bits 0–8 (0 = thread, `138` = the PIT interrupt)
+**| the `isr_last` that was active when the watchdog fired, in bits 9–15** (the watchdog IRQ itself
+writes `isr_last = 3`, so the prior value is captured first — wedge #5 only told us "watchdog"). A
+PIT storm would read `wdog_context code 0xF1, IPSR 138, prior isr 7` + `prev_isr_count id 7 ≫
+uptime × 300 Hz`. Both the lite hooks and the full refresh/DMA hooks update the record under a
+PRIMASK-preserving critical section and save/restore the previous id (SDHC at priority 96 preempts
+them; a callback inside the wrapped `pit_isr` must not clobber the PIT trampoline's marker). The
+record's **line 0 carries the context plus its own checksum** and is sealed and flushed **first** by
+the watchdog ISR, the count lines after — a capture cut short by the reset still yields
+pc/lr/xPSR/EXC_RETURN (counts then read 0). The old 32-byte record location (`0x2027FF20`, builds
+fb11681–eca07f6) has its magic cleared at boot so a rolled-back firmware never harvests it as "the
+previous boot"; kinds 8/9 are emitted only when **this boot's** `SRC_SRSR` says watchdog. A failed
+`IntervalTimer::begin()` (no free PIT channel) leaves the timer un-armed and appends
+`STATE(10 timer_fail, arg = rate)`. Decoders classify EXC_RETURN by **bit 3** (`0xF9/0xE9/0xFD/0xED`
+= thread preempted, `0xF1/0xE1` = a handler; the `E` forms mean FP state was stacked, normal on this
+floating-point firmware) — offline fixtures in `tests/test_telemetry_codec.py`.
+
 **Race analysis (why the disarm was never needed for buffer safety).** `SpiManager::refreshISR`
 only sets `refreshFlag`. The transfer (`transmitOnRefresh → transferFrame`, which spins for SPI-DMA
 completion) and `loadFrame` (SD → `frame_buf_`) both run in `loop()`, so they are strictly serialized
 by construction: a tick that lands during `loadFrame` merely defers the transfer to the next
-`serviceDisplay()`. The only thing the disarm protected is a **geometry change** — `block_byte_count_`
-updated before the buffer is refilled — and those paths (pattern open, ALL_ON, glyph, stream size
-change) keep their disarm+arm. No double buffer is required.
+`serviceDisplay()`. The disarm/arm pairs that remain are **explicit transition semantics** (pause the display while a
+pattern opens, switch to the glyph, go dark), not concurrency protection — the PSRAM paths already
+changed `block_byte_count_` without disarming and were never unsafe for that reason. No double
+buffer is required. Those remaining sites now run `IntervalTimer::end()` under the guarded critical
+section described under "The core race".
 
 **Expected bench effects.** At 286 Hz commands the displayed-frame rate should rise from ~20/s to
-≈ min(refresh 300 Hz, distinct requested frames ≈ 200/s); command→display latency ≤ one refresh
-period (3.3 ms at GS16) instead of a full restarted period; and at the next wedge the watchdog PC
-either **moves** (a bus hang from another master → PC lands in `loadFrame`/SD or the USB write) or
-the wedge **disappears** (the PIT churn was the trigger). Identity: 0xCB `flags` bit4.
+≈ min(refresh 300 Hz, distinct requested frames ≈ 200/s). Semantics are **latest-request-wins**: the
+next free-running tick transfers whatever `frame_buf_` holds; command→display latency is SD load +
+loop work + the wait for the next tick + the transfer — a quantity to be **measured** from the
+CMD/FRAME telemetry pairs, not a guaranteed bound. At the next wedge the watchdog PC either **moves**
+(→ the alternative bus-hang reading, PC in `loadFrame`/SD or the USB write) or the wedge
+**disappears** / the kind 8/9 records show the PIT storm (→ the core race). Identity: 0xCB `flags`
+bit4.
 
 ### Build identity (`GET_FIRMWARE_VERSION`, 0xCB)
 
@@ -391,7 +442,7 @@ the *panel* image on the SD card, not the controller). Request `[01 CB]`; framed
 | 0 | u8 | `ver` | payload schema version, `1` |
 | 1 | u8 | `rows` | `panel_count_per_frame_row` this build was compiled for |
 | 2 | u8 | `cols` | `panel_count_per_frame_col` |
-| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build), bit2 `telemetry` (telemetry ring compiled in — `SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9 answer; **hosts gate 0xA8 on this bit**, not on 0xC2 bit 7), bit3 `crashreport` (`GET_CRASHREPORT` 0xCC + `GET_HEALTH` ver ≥ 2 present; **hosts gate 0xCC on this bit** — a rollback to c47ee68 has bit2 but not bit3), bit4 `freerun_refresh` (free-running refresh timer: `SET_FRAME_POSITION` never disarms/re-arms the PIT — variant marker so run logs can tell which build ran) |
+| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build), bit2 `telemetry` (telemetry ring compiled in — `SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9 answer; **hosts gate 0xA8 on this bit**, not on 0xC2 bit 7), bit3 `crashreport` (`GET_CRASHREPORT` 0xCC + `GET_HEALTH` ver ≥ 2 present; **hosts gate 0xCC on this bit** — a rollback to c47ee68 has bit2 but not bit3), bit4 `freerun_refresh` (free-running refresh timer: a valid steady-state `SET_FRAME_POSITION` never disarms/re-arms the PIT; transitions/glyph/rate changes use the guarded disarm — variant marker so run logs can tell which build ran) |
 | 4 | char[8] | `sha` | short git SHA, lowercase hex (`git rev-parse --short=8`); `unknown ` when git was unavailable |
 | 12 | char[10] | `date` | build date, UTC, `YYYY-MM-DD` |
 | 22 | char[24] | `branch` | git branch, truncated to 24; `detached` for a detached HEAD; `unknown` when unavailable |
@@ -490,7 +541,11 @@ Record: len u8 (total incl. this byte), type u8, seq u32, t_us u32 (micros()), p
       kinds: 1 boot (code = reset_cause & 0xFF, arg = prev breadcrumb op<<8 | prev_valid), 2 state_change (code = new ArenaState, arg = pattern_id),
              3 error_glyph (code = CE code, arg = 0), 4 sd_slow (code=0, arg = read µs/100; when a readFrame > 20 ms),
              5 ring_overrun (code 0: arg = records evicted since the last marker; code 0xFF: ring disabled, heap collision, arg 0),
-             6 telemetry (code = SET_TELEMETRY flags, arg = synthetic rate), 7 sd_open (code = CE result, arg = pattern_id)
+             6 telemetry (code = SET_TELEMETRY flags, arg = synthetic rate), 7 sd_open (code = CE result, arg = pattern_id),
+             8 wdog_context (boot after a watchdog reset: code = EXC_RETURN & 0xFF — bit 3 set = thread preempted (F9/E9/FD/ED), clear = a handler (F1/E1);
+                             arg bits 0-8 = xPSR IPSR (0 = thread, else exception number — PIT = 138), arg bits 9-15 = isr_last when the watchdog fired),
+             9 prev_isr_count (boot after a watchdog reset, one per ISR id with entries: code = ISR id, arg = min(65535, entries >> 12)),
+             10 timer_fail (IntervalTimer::begin() failed, timer left un-armed: code = 0, arg = requested refresh Hz)
 ```
 
 | Off | Type | Header field | Meaning |

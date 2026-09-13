@@ -272,6 +272,23 @@ void begin() {
                | (Health::stats.prev_valid ? 1 : 0)
                | ((Health::stats.prev_isr_valid && Health::stats.prev_wdog_fired) ? 2 : 0);
   state(ST_BOOT, (uint8_t)(Health::stats.reset_cause & 0xFF), arg);
+
+  // After a watchdog reset: what the watchdog IRQ preempted (thread vs which
+  // handler) and how busy each ISR had been — distinguishes "300 Hz x uptime"
+  // from "a multi-MHz PIT storm for 2 s" (kind 9 units of 4096 entries).
+  const Health::Stats &hs = Health::stats;
+  if (hs.prev_isr_valid && (hs.reset_cause & SRC_SRSR_WDOG3_RST_B)) {  // THIS boot's cause, not a stale record
+    if (hs.prev_wdog_fired) {
+      uint16_t arg8 = (uint16_t)(hs.prev_wdog_xpsr & 0x1FF) | (uint16_t)((hs.prev_wdog_prev_isr & 0x7F) << 9);
+      state(ST_WDOG_CONTEXT, (uint8_t)(hs.prev_wdog_excret & 0xFF), arg8);
+    }
+    for (uint8_t id = 1; id < Health::ISR_ID_COUNT; ++id) {
+      uint32_t n = hs.prev_isr_cnt[id];
+      if (n == 0) continue;
+      uint32_t u = n >> 12;
+      state(ST_PREV_ISR_COUNT, id, (uint16_t)(u > 0xFFFF ? 0xFFFF : u));
+    }
+  }
 }
 
 void service() {

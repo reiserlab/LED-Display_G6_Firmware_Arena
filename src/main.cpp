@@ -261,6 +261,11 @@ void wrapDriverVectors() {
   bool spi3  = wrapVector(IRQ_LPSPI3, &saved_lpspi3_isr, lpspi3Tramp);
   bool spi4  = wrapVector(IRQ_LPSPI4, &saved_lpspi4_isr, lpspi4Tramp);
   (void)usb; (void)sdhc; (void)spi3; (void)spi4;
-  DBG_PRINTF("[isr] breadcrumb trampolines: usb=%d sdhc=%d lpspi3=%d lpspi4=%d (0 = vector unused, not wrapped)\n",
-             (int)usb, (int)sdhc, (int)spi3, (int)spi4);
+#ifdef DEBUG_SERIAL
+  // DBG_PRINTF is gated on g_dbg_on (false during setup) and could never print
+  // here; use the boot-banner path, which is sentinel-framed and never blocks.
+  SentinelPrint diag;
+  diag.printf("=== isr breadcrumb trampolines: usb=%d sdhc=%d lpspi3=%d lpspi4=%d (0 = vector unused, not wrapped) ===\n",
+              (int)usb, (int)sdhc, (int)spi3, (int)spi4);
+#endif
 }

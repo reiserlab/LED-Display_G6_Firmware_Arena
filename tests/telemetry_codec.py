@@ -42,7 +42,8 @@ STATE_RECORD_LEN = 14
 REC_PAD, REC_CMD, REC_FRAME, REC_STATE = 0, 1, 2, 3
 REC_NAMES = {REC_CMD: "cmd", REC_FRAME: "frame", REC_STATE: "state"}
 
-ST_BOOT, ST_STATE_CHANGE, ST_ERROR_GLYPH, ST_SD_SLOW, ST_RING_OVERRUN, ST_TELEMETRY, ST_SD_OPEN = range(1, 8)
+(ST_BOOT, ST_STATE_CHANGE, ST_ERROR_GLYPH, ST_SD_SLOW, ST_RING_OVERRUN, ST_TELEMETRY, ST_SD_OPEN,
+ ST_WDOG_CONTEXT, ST_PREV_ISR_COUNT, ST_TIMER_FAIL) = range(1, 11)
 STATE_KIND_NAMES = {
     ST_BOOT: "boot",
     ST_STATE_CHANGE: "state_change",
@@ -51,7 +52,25 @@ STATE_KIND_NAMES = {
     ST_RING_OVERRUN: "ring_overrun",
     ST_TELEMETRY: "telemetry",
     ST_SD_OPEN: "sd_open",
+    ST_WDOG_CONTEXT: "wdog_context",
+    ST_PREV_ISR_COUNT: "prev_isr_count",
+    ST_TIMER_FAIL: "timer_fail",
 }
+
+
+def classify_exc_return(low_byte: int) -> str:
+    """Cortex-M EXC_RETURN low byte -> 'thread' | 'handler' | 'unknown'.
+
+    Valid encodings are 0xFFFFFFxx with xx in {F1, F9, FD, E1, E9, ED} (bit 4 clear =
+    FP state stacked, so 0xE1/0xE9/0xED occur on this floating-point firmware). Bit 3
+    set = return to THREAD mode (the main loop was preempted); clear = return to a
+    HANDLER (another ISR was running).
+    """
+    lo = low_byte & 0xFF
+    if lo not in (0xF1, 0xF9, 0xFD, 0xE1, 0xE9, 0xED):
+        return "unknown"
+    return "thread" if lo & 0x08 else "handler"
+ISR_NAMES = ["none", "refresh", "dma", "wdog", "usb", "sdhc", "lpspi", "pit"]
 OVERRUN_CODE_EVICTED = 0x00
 OVERRUN_CODE_HEAP_COLLISION = 0xFF
 SYNTHETIC_CMD = 0xFE
@@ -153,6 +172,21 @@ def _decode_payload(rtype: int, body: bytes) -> dict[str, Any]:
             d["prev_breadcrumb_valid"] = arg & 1
         if kind == ST_RING_OVERRUN:
             d["heap_collision"] = code == OVERRUN_CODE_HEAP_COLLISION
+        if kind == ST_WDOG_CONTEXT:
+            d["exc_return_lo"] = code
+            d["preempted"] = classify_exc_return(code)
+            d["fp_stacked"] = not (code & 0x10)
+            ipsr = arg & 0x1FF
+            prior = (arg >> 9) & 0x7F
+            d["ipsr"] = ipsr
+            d["ipsr_irq"] = (ipsr - 16) if ipsr >= 16 else None   # 138 -> IRQ 122 = PIT
+            d["prior_isr"] = prior
+            d["prior_isr_name"] = ISR_NAMES[prior] if prior < len(ISR_NAMES) else f"isr{prior}"
+        if kind == ST_PREV_ISR_COUNT:
+            d["isr_name"] = ISR_NAMES[code] if code < len(ISR_NAMES) else f"isr{code}"
+            d["entries_approx"] = arg << 12
+        if kind == ST_TIMER_FAIL:
+            d["requested_hz"] = arg
         if kind == ST_TELEMETRY:
             d["events"] = bool(code & SET_FLAG_EVENTS)
             d["synthetic"] = bool(code & SET_FLAG_SYNTHETIC)

@@ -116,7 +116,17 @@ HEALTH_FIELDS_V2 = HEALTH_FIELDS + (
 HEALTH_FIELDS_V3 = HEALTH_FIELDS_V2 + ("wdog_cs_boot", "wdog_cs_now")
 HEALTH_FIELDS_V4 = HEALTH_FIELDS_V3 + ("wdog_tick_hz", "wdog_toval_now", "wdog_verify")
 HEALTH_FIELDS_V5 = HEALTH_FIELDS_V4 + ("wdog_cnt_before_max", "wdog_cnt_after_min", "wdog_cnt_after_max", "wdog_cnt_now")
-HEALTH_ISRS = ("none", "refresh", "dma", "wdog", "usb", "sdhc", "lpspi", "other")
+HEALTH_ISRS = ("none", "refresh", "dma", "wdog", "usb", "sdhc", "lpspi", "pit")
+
+
+def classify_exc_return(low_byte: int) -> str:
+    """Cortex-M EXC_RETURN low byte -> 'thread' | 'handler' | 'unknown' (mirrors
+    tests/telemetry_codec.py; used when decoding ring STATE kind 8 wdog_context).
+    Bit 3 set = thread mode preempted (0xF9/0xE9/0xFD/0xED), clear = a handler (0xF1/0xE1)."""
+    lo = low_byte & 0xFF
+    if lo not in (0xF1, 0xF9, 0xFD, 0xE1, 0xE9, 0xED):
+        return "unknown"
+    return "thread" if lo & 0x08 else "handler"
 HEALTH_FMT_55 = "<BBIIIIIIBIIIIBHIBI"  # the 55-byte prefix (fields up to prev_breadcrumb_us)
 HEALTH_LEN_55 = struct.calcsize(HEALTH_FMT_55)
 HEALTH_OPS = ("idle", "sd_read", "spi_transfer", "usb_write", "command", "sd_open",

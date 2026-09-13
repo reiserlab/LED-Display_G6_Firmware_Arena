@@ -79,7 +79,9 @@ enum IsrId : uint8_t {
   ISR_USB     = 4,  // usb_isr (IRQ_USB1) — USB-CDC
   ISR_SDHC    = 5,  // USDHC1 (IRQ_SDHC1) — SdFat SDIO
   ISR_LPSPI   = 6,  // LPSPI3/LPSPI4 (only if something attached them; the SPI DMA path uses DMA channel ISRs)
-  ISR_OTHER   = 7,  // reserved
+  ISR_PIT     = 7,  // the core's pit_isr (IRQ_PIT = 122) — wrapped from SpiManager::armRefreshTimer via
+                    // Health::wrapPitVector() after EVERY IntervalTimer::begin (begin re-attaches pit_isr)
+  ISR_ID_COUNT = 8,
 };
 
 // The main-loop reset-surviving record. Exactly one Cortex-M7 cache line
@@ -103,24 +105,38 @@ struct Breadcrumb {
 };
 static_assert(sizeof(Breadcrumb) == 32, "Breadcrumb must be one cache line");
 
-// The ISR / watchdog record: the cache line below the breadcrumb
-// (0x2027FF20). Written ONLY from interrupt context (isrEnter/isrExit and the
-// RTWDOG pre-reset ISR), each write sealed with its own checksum under a
-// brief IRQ mask so nested ISRs cannot leave a stale checksum. Independent
-// of the breadcrumb's validity by design (see header comment).
+// The ISR / watchdog record: three cache lines just below the breadcrumb
+// (0x2027FEC0..0x2027FF20). Written ONLY from interrupt context (isrEnter/
+// isrExit seal it; the *Lite hooks update it with an incremental XOR checksum
+// and no flush; the RTWDOG pre-reset ISR seals it), each seal under a brief
+// IRQ mask so nested ISRs cannot leave a stale checksum. Independent of the
+// breadcrumb's validity by design (see header comment). Grown from 32 B on
+// 2026-09-13 for per-ISR counts + the watchdog context capture.
+// Line 0 (@0..31) holds the CONTEXT plus its own checksum `check0`, so the
+// watchdog ISR can seal and flush that one line first inside its ~128-bus-
+// clock pre-reset window; even a partial flush yields pc/lr/xpsr/excret.
+// Lines 1-2 hold the counts, covered by `check_all` (over every word except
+// the two checksums, so the lite hooks can update both incrementally).
 struct IsrRecord {
-  uint32_t magic;         // kIsrMagic
-  uint8_t  isr_last;      // IsrId currently inside (0 = none)
-  uint8_t  wdog_fired;    // 1 once the RTWDOG pre-reset ISR ran (wdog_* valid)
-  uint16_t pad_;
-  uint32_t isr_count;     // ISR entries this boot
-  uint32_t wdog_pc;       // stacked PC of the context the watchdog IRQ preempted
-  uint32_t wdog_lr;       // stacked LR at that moment
-  uint32_t wdog_stamp_us; // micros() in the watchdog ISR
-  uint32_t reserved_;
-  uint32_t check;
+  uint32_t magic;             // kIsrMagic                                   @0
+  uint8_t  isr_last;          // IsrId currently inside (0 = none)            @4
+  uint8_t  wdog_fired;        // 1 once the RTWDOG pre-reset ISR ran (wdog_* valid)  @5
+  uint8_t  wdog_prev_isr;     // isr_last as it was when the watchdog IRQ fired (before it wrote ISR_WDOG)  @6
+  uint8_t  pad_;              //                                              @7
+  uint32_t wdog_pc;           // stacked PC of the context the watchdog IRQ preempted  @8
+  uint32_t wdog_lr;           // stacked LR at that moment                    @12
+  uint32_t wdog_xpsr;         // stacked xPSR: IPSR bits 0-8 = exception number of the
+                              // interrupted context (0 = thread; PIT = 16+122 = 138)  @16
+  uint32_t wdog_excret;       // EXC_RETURN (LR at handler entry): bit 3 set = thread mode
+                              // preempted (0xF9/0xE9/0xFD/0xED), clear = another handler (0xF1/0xE1)  @20
+  uint32_t wdog_stamp_us;     // micros() in the watchdog ISR                 @24
+  uint32_t check0;            // ~XOR of words 0..6 (line 0 context)          @28
+  uint32_t cnt[ISR_ID_COUNT]; // per-id entries this boot (index = IsrId)      @32..63  (line 1)
+  uint32_t isr_count;         // ISR entries this boot, all ids                @64      (line 2)
+  uint32_t reserved_[6];      //                                              @68..91
+  uint32_t check_all;         // ~XOR of every word except check0 / check_all @92
 };
-static_assert(sizeof(IsrRecord) == 32, "IsrRecord must be one cache line");
+static_assert(sizeof(IsrRecord) == 96, "IsrRecord must be three cache lines");
 
 // Live counters (ordinary .bss — reset every boot). All cumulative since boot
 // except loop_max_1s_us, which is a firmware-maintained rolling window.
@@ -148,9 +164,13 @@ struct Stats {
   bool     prev_isr_valid  = false;
   uint8_t  prev_isr_last   = 0;  // ISR the previous boot was inside when it died (0 = none)
   uint32_t prev_isr_count  = 0;
-  bool     prev_wdog_fired = false;  // wdog_pc/lr below are a real capture
+  uint32_t prev_isr_cnt[ISR_ID_COUNT] = {0};  // per-id entries in the previous boot
+  bool     prev_wdog_fired = false;  // wdog_pc/lr/xpsr/excret below are a real capture
   uint32_t prev_wdog_pc    = 0;
   uint32_t prev_wdog_lr    = 0;
+  uint32_t prev_wdog_xpsr  = 0;
+  uint32_t prev_wdog_excret = 0;
+  uint8_t  prev_wdog_prev_isr = 0;  // the ISR that was active when the watchdog fired (0 = none/main loop)
 
   // loop-timing accumulators (internal to loopTick()).
   uint32_t loop_last_entry_us = 0;
@@ -173,16 +193,22 @@ void loopTick();
 void mark(uint8_t op, uint8_t arg = 0);
 void clear();
 
-// ISR record: call at entry/exit of an ISR body. Byte store + increment +
-// sealed flush under a brief IRQ mask.
-void isrEnter(uint8_t id);
-void isrExit();
+// ISR record, FULL hooks (refresh / DMA callbacks): the whole field update +
+// seal + flush run under a PRIMASK critical section; returns the previous id,
+// which isrExit restores (nesting-safe — a callback inside the wrapped
+// pit_isr must not clobber the PIT trampoline's marker).
+uint8_t isrEnter(uint8_t id);
+void    isrExit(uint8_t prev);
 // Cheap variant for high-rate wrapped vectors (USB, SDHC): byte store + count +
 // an incremental XOR update of the record checksum, NO cache flush — the
 // memory copy is refreshed by the next sealing hook (refresh/dma ISR) or by the
 // watchdog ISR. Returns the previous id; pass it back to isrExitLite.
 uint8_t isrEnterLite(uint8_t id);
 void    isrExitLite(uint8_t prev);
+// Wrap the core's PIT vector (IRQ_PIT) with an ISR_PIT trampoline. Idempotent;
+// MUST be called right after every IntervalTimer::begin() because begin()
+// re-attaches pit_isr and thereby removes the wrapper (SpiManager does this).
+void wrapPitVector();
 
 // Read-only views of the live records (for GET_HEALTH).
 uint8_t  slowOp();

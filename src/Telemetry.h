@@ -57,8 +57,8 @@
 //                          malloc CAN in principle reach this region
 //   [~390 KiB unused]
 //   telemetry ring         0x2026F000 .. 0x2027F000    (this module)
-//   [3872 B gap]
-//   Health ISR/wdog record 0x2027FF20 .. 0x2027FF40
+//   [3776 B gap]
+//   Health ISR/wdog record 0x2027FEC0 .. 0x2027FF20 (3 lines)
 //   Health breadcrumb      0x2027FF40 .. 0x2027FF60
 //   PJRC CrashReport       0x2027FF80 .. 0x20280000
 // HEAP GUARD. The heap would need ~390 KiB of malloc to reach the ring and
@@ -114,6 +114,10 @@
 //                              code = 0xFF: ring disabled, heap collision (arg 0)
 //         kind 6 telemetry     code = SET_TELEMETRY flags, arg = rate (records/s)
 //         kind 7 sd_open       code = openPattern CE result, arg = pattern_id
+//         kind 8 wdog_context  (boot after a watchdog reset) code = EXC_RETURN & 0xFF,
+//                              arg = xPSR IPSR (bits 0-8) | prior isr_last << 9 (bits 9-15)
+//         kind 9 prev_isr_count (boot after a watchdog reset) code = ISR id, arg = min(65535, entries >> 12)
+//         kind 10 timer_fail   code = 0, arg = requested refresh rate (Hz); the timer stayed un-armed
 // ---------------------------------------------------------------------------
 
 namespace Telemetry {
@@ -152,6 +156,12 @@ enum StateKind : uint8_t {
   ST_RING_OVERRUN = 5,
   ST_TELEMETRY    = 6,
   ST_SD_OPEN      = 7,
+  ST_WDOG_CONTEXT = 8,  // after a watchdog reset: code = EXC_RETURN low byte (0xF9 thread / 0xF1 handler preempted),
+                        // arg = stacked xPSR IPSR (bits 0-8; 0 = thread, else exception number, PIT = 138)
+                        //     | (isr_last as it was when the watchdog fired) << 9   (7 bits; 0 = main loop)
+  ST_PREV_ISR_COUNT = 9,  // after a watchdog reset, one per ISR id with a non-zero count: code = ISR id,
+                          // arg = min(65535, count >> 12) (units of 4096 entries)
+  ST_TIMER_FAIL   = 10, // IntervalTimer::begin() failed (no free PIT channel): code = 0, arg = requested refresh Hz
 };
 constexpr uint8_t kOverrunCodeEvicted       = 0x00;
 constexpr uint8_t kOverrunCodeHeapCollision = 0xFF;
@@ -179,7 +189,7 @@ struct RingHeader {
 };
 static_assert(sizeof(RingHeader) == kHeaderSize, "RingHeader must be exactly 32 B");
 static_assert(kRingBase % 32 == 0, "ring base must be cache-line aligned");
-static_assert(kRingEnd <= 0x2027FF20UL, "ring must end below the Health ISR/watchdog record + breadcrumb");
+static_assert(kRingEnd <= 0x2027FEC0UL, "ring must end below the Health ISR/watchdog record (0x2027FEC0) + breadcrumb");
 static_assert(kRingEnd <= 0x2027FF80UL, "ring must end below PJRC CrashReport");
 
 // Call in setup() AFTER Health::begin() (the boot record carries the reset
