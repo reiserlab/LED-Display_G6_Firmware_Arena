@@ -63,6 +63,9 @@ constexpr bool fw_debug_build  = false;
 //                       bit3 GET_CRASHREPORT 0xCC + GET_HEALTH ver 2 (89 B) present —
 //                       hosts gate 0xCC on THIS bit (a rollback to c47ee68 has the
 //                       ring but neither).
+//                       bit4 free-running refresh timer: SET_FRAME_POSITION no longer
+//                       disarms/re-arms the PIT per command (wedge #5 fix candidate,
+//                       2026-09-13) — lets run logs tell the variants apart.
 //   off  4  char sha[8]      short git SHA, lowercase hex, right-padded with spaces
 //   off 12  char date[10]    build date UTC "YYYY-MM-DD"
 //   off 22  char branch[24]  git branch, right-padded with spaces, truncated to 24
@@ -78,6 +81,8 @@ constexpr uint8_t fw_flag_telemetry = 0x04;  // src/Telemetry.h is always compil
 constexpr bool    fw_has_telemetry  = true;  // the build condition for the ring (unconditional here)
 constexpr uint8_t fw_flag_crashreport = 0x08;  // GET_CRASHREPORT 0xCC + GET_HEALTH ver 2 compiled in
 constexpr bool    fw_has_crashreport  = true;
+constexpr uint8_t fw_flag_freerun_refresh = 0x10;  // free-running refresh timer variant (0x70 never touches the PIT)
+constexpr bool    fw_freerun_refresh      = true;
 
 }  // namespace version
 }  // namespace AC

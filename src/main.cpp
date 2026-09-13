@@ -56,6 +56,7 @@ class SentinelPrint : public Print {
 
 void blinkStartupPattern();
 void setupInterruptPriorities();
+void wrapDriverVectors();
 
 void setup() {
   // FIRST: capture + clear the reset cause and harvest the previous boot's
@@ -138,6 +139,12 @@ void setup() {
   // it every iteration or the controller resets WITH the breadcrumb +
   // telemetry ring intact (the #50 hang becomes a self-healing reboot).
   Health::watchdogBegin();
+
+  // ISR breadcrumb coverage for the core/driver vectors we cannot instrument
+  // from inside (USB-CDC, SDIO, LPSPI): thin trampolines around whatever is
+  // attached by now, so a wedge with an unpreemptable interrupt storm shows
+  // isr_last = 4/5/6 instead of "main loop at X, ISR none".
+  wrapDriverVectors();
 }
 
 // The external-trigger input path (BNC "Digital IO 2 (5V)"/J4 -> U3 SN74LVC1T45
@@ -201,10 +208,59 @@ void blinkStartupPattern() {
 }
 
 void setupInterruptPriorities() {
-  // SPI first, then Ethernet, then SDIO last. SD reads happen in the main
-  // loop (Modes 2/3/4), so the SDHC IRQ stays below SPI and Ethernet.
-  NVIC_SET_PRIORITY(IRQ_LPSPI4, 0);   // Teensy 4.1 "SPI"  (B0)
-  NVIC_SET_PRIORITY(IRQ_LPSPI3, 0);   // Teensy 4.1 "SPI1" (B1)
+  // Ethernet, then SDIO last. SD reads happen in the main loop (Modes 2/3/4),
+  // so the SDHC IRQ stays below Ethernet.
+  //
+  // The LPSPI3/LPSPI4 lines used to be set to priority 0 here. Nothing in this
+  // firmware attaches an LPSPI vector (SpiManager's async path completes via
+  // the DMA channel ISRs / EventResponder), so that was dead configuration —
+  // but at priority 0 an LPSPI interrupt, if one ever fired, could not be
+  // preempted by the RTWDOG pre-reset IRQ (also 0) and we would lose the PC
+  // capture. They now stay at the core default (128). (2026-09-13)
+  NVIC_SET_PRIORITY(IRQ_LPSPI4, 128);
+  NVIC_SET_PRIORITY(IRQ_LPSPI3, 128);
   NVIC_SET_PRIORITY(IRQ_ENET,   64);
   NVIC_SET_PRIORITY(IRQ_SDHC1,  96);  // USDHC1 drives the built-in SD slot
+}
+
+// ---------------------------------------------------------------------------
+// ISR breadcrumb trampolines (Health.h ISR_USB / ISR_SDHC / ISR_LPSPI).
+// Installed AFTER every begin() so the saved handler is whatever the core and
+// drivers attached. A vector still pointing at the core's
+// unused_interrupt_vector is left alone (nothing to measure; wrapping it would
+// only hide a spurious-interrupt fault).
+// ---------------------------------------------------------------------------
+
+extern "C" void unused_interrupt_vector(void);
+
+namespace {
+
+void (*saved_usb_isr)(void)    = nullptr;
+void (*saved_sdhc_isr)(void)   = nullptr;
+void (*saved_lpspi3_isr)(void) = nullptr;
+void (*saved_lpspi4_isr)(void) = nullptr;
+
+void usbTramp()    { uint8_t p = Health::isrEnterLite(Health::ISR_USB);   saved_usb_isr();    Health::isrExitLite(p); }
+void sdhcTramp()   { uint8_t p = Health::isrEnterLite(Health::ISR_SDHC);  saved_sdhc_isr();   Health::isrExitLite(p); }
+void lpspi3Tramp() { uint8_t p = Health::isrEnterLite(Health::ISR_LPSPI); saved_lpspi3_isr(); Health::isrExitLite(p); }
+void lpspi4Tramp() { uint8_t p = Health::isrEnterLite(Health::ISR_LPSPI); saved_lpspi4_isr(); Health::isrExitLite(p); }
+
+bool wrapVector(IRQ_NUMBER_t irq, void (**saved)(void), void (*tramp)(void)) {
+  void (*cur)(void) = _VectorsRam[irq + 16];
+  if (cur == nullptr || cur == unused_interrupt_vector || cur == tramp) return false;
+  *saved = cur;
+  attachInterruptVector(irq, tramp);
+  return true;
+}
+
+}  // namespace
+
+void wrapDriverVectors() {
+  bool usb   = wrapVector(IRQ_USB1,   &saved_usb_isr,    usbTramp);
+  bool sdhc  = wrapVector(IRQ_SDHC1,  &saved_sdhc_isr,   sdhcTramp);
+  bool spi3  = wrapVector(IRQ_LPSPI3, &saved_lpspi3_isr, lpspi3Tramp);
+  bool spi4  = wrapVector(IRQ_LPSPI4, &saved_lpspi4_isr, lpspi4Tramp);
+  (void)usb; (void)sdhc; (void)spi3; (void)spi4;
+  DBG_PRINTF("[isr] breadcrumb trampolines: usb=%d sdhc=%d lpspi3=%d lpspi4=%d (0 = vector unused, not wrapped)\n",
+             (int)usb, (int)sdhc, (int)spi3, (int)spi4);
 }

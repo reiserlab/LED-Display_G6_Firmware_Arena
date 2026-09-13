@@ -149,6 +149,7 @@ def _decode_payload(rtype: int, body: bytes) -> dict[str, Any]:
             d["state_name"] = ARENA_STATE_NAMES[code]
         if kind == ST_BOOT:
             d["prev_breadcrumb_op"] = arg >> 8
+            d["prev_wdog_fired"] = bool(arg & 2)
             d["prev_breadcrumb_valid"] = arg & 1
         if kind == ST_RING_OVERRUN:
             d["heap_collision"] = code == OVERRUN_CODE_HEAP_COLLISION

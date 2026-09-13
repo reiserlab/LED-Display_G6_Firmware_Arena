@@ -382,6 +382,28 @@ void isrExit() {
   sealIsr();
 }
 
+// XOR checksum => a field change updates `check` by XOR-ing old^new of that
+// word. Keeps the cached copy self-consistent without a flush; a natural
+// eviction mid-update or a nested seal can leave the MEMORY copy stale for a
+// moment, fixed by the next sealIsr(). Good enough for a diagnostic marker.
+uint8_t isrEnterLite(uint8_t id) {
+  uint8_t  prev  = isr->isr_last;
+  uint32_t w_old = (uint32_t)prev | ((uint32_t)isr->wdog_fired << 8);
+  uint32_t w_new = (uint32_t)id   | ((uint32_t)isr->wdog_fired << 8);
+  uint32_t c_old = isr->isr_count;
+  isr->isr_last  = id;
+  isr->isr_count = c_old + 1;
+  isr->check     = isr->check ^ (w_old ^ w_new) ^ (c_old ^ (c_old + 1));
+  return prev;
+}
+
+void isrExitLite(uint8_t prev) {
+  uint32_t w_old = (uint32_t)isr->isr_last | ((uint32_t)isr->wdog_fired << 8);
+  uint32_t w_new = (uint32_t)prev          | ((uint32_t)isr->wdog_fired << 8);
+  isr->isr_last  = prev;
+  isr->check     = isr->check ^ (w_old ^ w_new);
+}
+
 uint8_t  slowOp()   { return crumb->slow_op; }
 uint32_t slowUs()   { return crumb->slow_us; }
 uint8_t  isrLast()  { return isr->isr_last; }

@@ -34,6 +34,7 @@ FLAG_DIRTY = 0x01
 FLAG_DEBUG = 0x02
 FLAG_TELEMETRY = 0x04  # telemetry ring compiled in (0xA8/0xA9 present) — hosts gate SET_TELEMETRY on this
 FLAG_CRASHREPORT = 0x08  # GET_CRASHREPORT 0xCC + GET_HEALTH ver >= 2 present — hosts gate 0xCC on this
+FLAG_FREERUN_REFRESH = 0x10  # free-running refresh timer variant (0x70 never disarms/re-arms the PIT)
 
 # Arena geometry compiled into this branch (constants.h
 # panel_count_per_frame_row / _col): G6_2x10.
@@ -64,9 +65,10 @@ def test_firmware_version_reply_shape(transport):
     assert v.ver == FW_VERSION_VER
     assert v.rows == EXPECTED_ROWS
     assert v.cols == EXPECTED_COLS
-    assert 0 <= v.flags <= (FLAG_DIRTY | FLAG_DEBUG | FLAG_TELEMETRY | FLAG_CRASHREPORT), f"undefined flag bits set: {v.flags:#04x}"
+    assert 0 <= v.flags <= (FLAG_DIRTY | FLAG_DEBUG | FLAG_TELEMETRY | FLAG_CRASHREPORT | FLAG_FREERUN_REFRESH), f"undefined flag bits set: {v.flags:#04x}"
     assert v.flags & FLAG_TELEMETRY, "this build compiles in the telemetry ring; bit2 must be set"
     assert v.flags & FLAG_CRASHREPORT, "this build has GET_CRASHREPORT + GET_HEALTH v2; bit3 must be set"
+    assert v.flags & FLAG_FREERUN_REFRESH, "this build has the free-running refresh timer; bit4 must be set"
 
 
 def test_firmware_version_sha(transport):

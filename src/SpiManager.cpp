@@ -61,12 +61,15 @@ void SpiManager::begin() {
 
 void SpiManager::armRefreshTimer(uint32_t frequency_hz) {
   if (frequency_hz == 0) return;
+  if (armed_hz_ == frequency_hz) return;  // free-running: already ticking at this rate, leave the PIT alone
   uint32_t period_us = microseconds_per_second / frequency_hz;
-  refreshTimer_.begin(refreshISR, period_us);
+  refreshTimer_.begin(refreshISR, period_us);  // (re)starts the channel at the new period
+  armed_hz_ = frequency_hz;
 }
 
 void SpiManager::disarmRefreshTimer() {
-  refreshTimer_.end();
+  if (armed_hz_ != 0) refreshTimer_.end();
+  armed_hz_   = 0;
   refreshFlag = false;
 }
 

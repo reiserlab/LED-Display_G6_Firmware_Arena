@@ -67,7 +67,8 @@ STATE_MAX = 7  # ERROR_DISPLAY
 (OP_IDLE, OP_SD_READ, OP_SPI_FRAME, OP_USB_WRITE, OP_CMD, OP_SD_OPEN,
  OP_CMD_DISARM, OP_CMD_PRELOAD, OP_CMD_ARM, OP_CMD_RESPOND) = range(10)
 OP_MAX = OP_CMD_RESPOND
-ISR_NONE, ISR_REFRESH, ISR_DMA, ISR_WDOG = range(4)
+ISR_NONE, ISR_REFRESH, ISR_DMA, ISR_WDOG, ISR_USB, ISR_SDHC, ISR_LPSPI, ISR_OTHER = range(8)
+ISR_MAX = ISR_OTHER
 WDOG_ARMED, WDOG_PREV_RESET, WDOG_PREV_PC, WDOG_COMPILED, WDOG_SUSPENDED, WDOG_STARVING, WDOG_CONFIG_FAILED = (
     0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40)
 
@@ -93,7 +94,7 @@ def test_health_reply_shape(transport):
     assert h.slow_op <= OP_MAX
     assert h.prev_breadcrumb <= OP_MAX
     assert h.prev_slow_op <= OP_MAX
-    assert h.breadcrumb_isr_last <= ISR_WDOG and h.prev_isr_last <= ISR_WDOG
+    assert h.breadcrumb_isr_last <= ISR_MAX and h.prev_isr_last <= ISR_MAX
     # A live loop has measured at least one iteration by the time a host talks to it.
     assert h.loop_max_us > 0
 
@@ -176,6 +177,8 @@ def test_breadcrumb_consistency(transport):
         assert h.prev_slow_op <= OP_MAX
         if h.prev_breadcrumb not in (OP_CMD, OP_CMD_DISARM, OP_CMD_PRELOAD, OP_CMD_ARM, OP_CMD_RESPOND):
             assert h.prev_breadcrumb_arg == 0  # only dispatch + 0x70 sub-ops carry an opcode
+        if h.prev_breadcrumb == OP_CMD_DISARM:
+            assert h.prev_breadcrumb_arg == 0, "free-running refresh: a disarm only happens on the STOP/ALL_OFF path (arg 0), never inside 0x70"
     else:
         assert h.prev_breadcrumb == 0
         assert h.prev_breadcrumb_us == 0

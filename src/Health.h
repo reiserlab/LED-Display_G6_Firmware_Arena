@@ -59,9 +59,10 @@ enum LastOp : uint8_t {
   // 2026-09-12 wedges (#2 15:44, #3 16:27) sat in (breadcrumb OP_CMD/0x70,
   // ~3 ms after the last FRAME). arg = opcode. clear() after a nested op
   // leaves OP_IDLE, so each step re-marks.
-  OP_CMD_DISARM  = 6,  // spi_.disarmRefreshTimer() (IntervalTimer::end)
+  OP_CMD_DISARM  = 6,  // spi_.disarmRefreshTimer() (IntervalTimer::end) — since the free-running
+                       // refresh (2026-09-13) only on the STOP/ALL_OFF path (arg 0), never on 0x70
   OP_CMD_PRELOAD = 7,  // between disarm and loadFrame (index store, patternOpen check)
-  OP_CMD_ARM     = 8,  // spi_.armRefreshTimer() (IntervalTimer::begin -> PIT + NVIC)
+  OP_CMD_ARM     = 8,  // spi_.armRefreshTimer() (IntervalTimer::begin -> PIT + NVIC); on 0x70 only at SHOW_FRAME entry / rate change
   OP_CMD_RESPOND = 9,  // current_source_->sendResponse()
 };
 
@@ -71,6 +72,14 @@ enum IsrId : uint8_t {
   ISR_REFRESH = 1,  // SpiManager::refreshISR (PIT / IntervalTimer)
   ISR_DMA     = 2,  // SpiManager::dmaISR (EventResponder, SPI DMA completion)
   ISR_WDOG    = 3,  // RTWDOG pre-reset interrupt (wdog_pc/wdog_lr captured)
+  // Core/driver vectors wrapped by thin trampolines at the end of setup()
+  // (main.cpp wrapVector): entry marker + count, exit restores the previous
+  // id (nesting-safe), no flush (isrEnterLite). Only wrapped if the vector is
+  // not the core's unused_interrupt_vector.
+  ISR_USB     = 4,  // usb_isr (IRQ_USB1) — USB-CDC
+  ISR_SDHC    = 5,  // USDHC1 (IRQ_SDHC1) — SdFat SDIO
+  ISR_LPSPI   = 6,  // LPSPI3/LPSPI4 (only if something attached them; the SPI DMA path uses DMA channel ISRs)
+  ISR_OTHER   = 7,  // reserved
 };
 
 // The main-loop reset-surviving record. Exactly one Cortex-M7 cache line
@@ -168,6 +177,12 @@ void clear();
 // sealed flush under a brief IRQ mask.
 void isrEnter(uint8_t id);
 void isrExit();
+// Cheap variant for high-rate wrapped vectors (USB, SDHC): byte store + count +
+// an incremental XOR update of the record checksum, NO cache flush — the
+// memory copy is refreshed by the next sealing hook (refresh/dma ISR) or by the
+// watchdog ISR. Returns the previous id; pass it back to isrExitLite.
+uint8_t isrEnterLite(uint8_t id);
+void    isrExitLite(uint8_t prev);
 
 // Read-only views of the live records (for GET_HEALTH).
 uint8_t  slowOp();

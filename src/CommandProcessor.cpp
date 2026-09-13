@@ -205,8 +205,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         refresh_rate_hz_ = rate;
         refresh_rate_explicit_ = true;
         if (state_ != ArenaState::ALL_OFF) {
-          spi_.disarmRefreshTimer();
-          spi_.armRefreshTimer(refresh_rate_hz_);
+          spi_.armRefreshTimer(refresh_rate_hz_);  // re-begins the channel only if the rate actually changed
         }
       }
       current_source_->sendResponse(command_byte, 0, "");
@@ -1211,6 +1210,7 @@ void CommandProcessor::handleGetCrashReport() {
 //   off  3  u8   flags       bit0 dirty working tree at build, bit1 DEBUG_SERIAL build,
 //                            bit2 telemetry ring compiled in (0xA8/0xA9 present),
 //                            bit3 GET_CRASHREPORT 0xCC + GET_HEALTH ver >= 2 present
+//                            bit4 free-running refresh timer (SET_FRAME_POSITION never disarms/re-arms the PIT)
 //   off  4  char sha[8]      short git SHA, lowercase hex; "unknown " without git
 //   off 12  char date[10]    build date UTC "YYYY-MM-DD"
 //   off 22  char branch[24]  git branch; "detached" for detached HEAD; "unknown"
@@ -1236,6 +1236,7 @@ void CommandProcessor::handleGetFirmwareVersion() {
   if (fw_debug_build)   flags |= fw_flag_debug;
   if (fw_has_telemetry) flags |= fw_flag_telemetry;  // hosts gate SET_TELEMETRY on this, not on 0xC2 bit 7
   if (fw_has_crashreport) flags |= fw_flag_crashreport;  // hosts gate GET_CRASHREPORT 0xCC (+ HEALTH v2) on this
+  if (fw_freerun_refresh) flags |= fw_flag_freerun_refresh;  // variant marker for run logs: 0x70 no longer touches the PIT
 
   uint8_t payload[fw_version_payload_len];
   uint8_t *p = payload;
@@ -1475,11 +1476,28 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
     return;
   }
 
-  // Sub-op breadcrumbs (#50, 2026-09-12 wedge: OP_CMD/0x70 stamped 3.3 ms after
-  // the last FRAME, i.e. somewhere in this preamble). loadFrame's own clear()
-  // leaves OP_IDLE, so every step after it re-marks.
-  Health::mark(Health::OP_CMD_DISARM, SET_FRAME_POSITION_CMD);
-  spi_.disarmRefreshTimer();
+  // FREE-RUNNING REFRESH (2026-09-13). Wedges #2-#5 all died in this handler;
+  // #5 was caught by the watchdog at IntervalTimer::end()'s `channel->TCTRL = 0`
+  // (prev_breadcrumb OP_CMD_DISARM/0x70, wdog_pc 0x212f4): the main loop blocked
+  // on a peripheral-bus store to the PIT, and USB/SD went silent behind it.
+  // Every 0x70 used to disarm + re-arm the refresh timer, which also RESTARTED
+  // the refresh period on each command — at 286 Hz commands vs a 300 Hz
+  // refresh the tick rarely fired before the next restart (~20 displayed
+  // frames/s). The timer is now left running: this handler only validates,
+  // loads the frame, sets the state and replies. The PIT is touched once, on
+  // entering SHOW_FRAME from another state or when the refresh rate differs
+  // (armRefreshTimer is idempotent), and disarmed only by STOP/ALL_OFF/ALL_ON/
+  // glyph/trial-start paths as before.
+  //
+  // Buffer-safety race analysis: SpiManager::refreshISR only sets refreshFlag.
+  // The transfer (transmitOnRefresh -> transferFrame, which spins for DMA
+  // completion) and loadFrame (SD -> frame_buf_) both run in loop(), so they
+  // are strictly serialized by construction; a tick that lands during
+  // loadFrame just defers the transfer to the next serviceDisplay(). The
+  // disarm never protected frame_buf_. What it did protect is a GEOMETRY
+  // change (block_byte_count_ updated before the buffer is refilled) — that
+  // only happens on pattern open / ALL_ON / glyph / stream size change, and
+  // those paths keep their disarm+arm. No double buffer is needed.
   Health::mark(Health::OP_CMD_PRELOAD, SET_FRAME_POSITION_CMD);
   cur_frame_index_ = index;
   if (!loadFrame(cur_frame_index_)) {
@@ -1488,13 +1506,15 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
                       "SET_FRAME_POSITION: frame read failed");
     return;
   }
-  Health::mark(Health::OP_CMD_ARM, SET_FRAME_POSITION_CMD);
   if (state_ != ArenaState::SHOW_FRAME) {
     Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::SHOW_FRAME, pattern_id_);
   }
   state_ = ArenaState::SHOW_FRAME;
   if (!refresh_rate_explicit_) refresh_rate_hz_ = defaultRefreshFor(block_byte_count_);
-  spi_.armRefreshTimer(refresh_rate_hz_);
+  if (!spi_.refreshArmedAt(refresh_rate_hz_)) {   // state entry or rate change only
+    Health::mark(Health::OP_CMD_ARM, SET_FRAME_POSITION_CMD);
+    spi_.armRefreshTimer(refresh_rate_hz_);
+  }
   Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
   current_source_->sendResponse(SET_FRAME_POSITION_CMD, 0, "");
 }
@@ -1542,7 +1562,7 @@ void CommandProcessor::handleDisplayPsramIndex(const ParsedCommand &cmd) {
   }
   uint16_t index = (uint16_t)cmd.data[2] | ((uint16_t)cmd.data[3] << 8);
 
-  spi_.disarmRefreshTimer();
+  // free-running refresh: no disarm per command; the arm below is idempotent
   psram_start_index_ = index;
   psram_play_count_  = 1;          // static single index
   psram_play_offset_ = 0;
@@ -1570,7 +1590,7 @@ void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
   uint16_t fps   = (uint16_t)p[4] | ((uint16_t)p[5] << 8);
   if (count == 0) count = 1;
 
-  spi_.disarmRefreshTimer();
+  // free-running refresh: no disarm per command; the arm below is idempotent
   psram_start_index_ = start;
   psram_play_count_  = count;
   psram_play_offset_ = 0;
@@ -1992,7 +2012,9 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::enterAllOff() {
+  Health::mark(Health::OP_CMD_DISARM, 0);  // the STOP-path PIT access (IntervalTimer::end)
   spi_.disarmRefreshTimer();
+  Health::clear();
   // Panels run in Persistent mode and HOLD their last received frame, so simply
   // stopping transmission leaves them lit. Push an all-dark frame so they
   // actually blank, then go quiet. Sent a few times for reliability on the
