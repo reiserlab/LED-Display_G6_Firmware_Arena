@@ -205,8 +205,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       if (rate > 0) {
         refresh_rate_hz_ = rate;
         refresh_rate_explicit_ = true;
-        if (state_ != ArenaState::ALL_OFF) {
-          spi_.armRefreshTimer(refresh_rate_hz_);  // re-begins the channel only if the rate actually changed
+        if (state_ != ArenaState::ALL_OFF &&
+            !spi_.armRefreshTimer(refresh_rate_hz_)) {  // running timer: LDVAL update only
+          current_source_->sendResponse(command_byte, 1, "refresh timer unavailable");
+          break;
         }
       }
       current_source_->sendResponse(command_byte, 0, "");
@@ -1571,7 +1573,14 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
   if (!refresh_rate_explicit_) refresh_rate_hz_ = defaultRefreshFor(block_byte_count_);
   if (!spi_.refreshArmedAt(refresh_rate_hz_)) {   // state entry or rate change only
     Health::mark(Health::OP_CMD_ARM, SET_FRAME_POSITION_CMD);
-    spi_.armRefreshTimer(refresh_rate_hz_);
+    if (!spi_.armRefreshTimer(refresh_rate_hz_)) {
+      // No timer → the frame would never be transferred; do not acknowledge a
+      // display state that cannot display (Codex E8). STATE(timer_fail) recorded.
+      Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
+      current_source_->sendResponse(SET_FRAME_POSITION_CMD, 1,
+                        "SET_FRAME_POSITION: refresh timer unavailable");
+      return;
+    }
   }
   Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
   current_source_->sendResponse(SET_FRAME_POSITION_CMD, 0, "");
@@ -2201,7 +2210,13 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
       ? millis() + (uint32_t)duration_ticks * AC::constants::duration_tick_ms
       : 0;
   state_ = mode;
-  spi_.armRefreshTimer(refresh_rate_hz_);
+  if (!spi_.armRefreshTimer(refresh_rate_hz_)) {
+    // No refresh timer → nothing would ever reach the panels. Park in ALL_OFF
+    // and fail the trial start (TRIAL_PARAMS replies "load failed") instead of
+    // acknowledging a display state that cannot display (Codex E8).
+    enterAllOff();
+    return false;
+  }
   Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)mode, pattern_id_);
   tel_last_frame_ = tel_last_pattern_ = 0xFFFF;  // first refresh of the trial records a FRAME
   DBG_PRINTF("[cmd] enterPatternMode state=%u id=%u frames=%u rate=%u gain=%d\n",

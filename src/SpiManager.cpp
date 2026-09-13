@@ -60,20 +60,30 @@ void SpiManager::begin() {
   }
 }
 
-void SpiManager::armRefreshTimer(uint32_t frequency_hz) {
-  if (frequency_hz == 0) return;
-  if (armed_hz_ == frequency_hz) return;  // free-running: already ticking at this rate, leave the PIT alone
+bool SpiManager::armRefreshTimer(uint32_t frequency_hz) {
+  if (frequency_hz == 0) return false;
+  if (armed_hz_ == frequency_hz) return true;  // free-running: already ticking at this rate, leave the PIT alone
   uint32_t period_us = microseconds_per_second / frequency_hz;
-  if (!refreshTimer_.begin(refreshISR, period_us)) {   // (re)starts the channel at the new period
+  if (armed_hz_ != 0) {
+    // Rate change on a running timer: IntervalTimer::update() rewrites LDVAL
+    // only — the current period completes, the next one uses the new length.
+    // No end()/begin() pair, so no PIT disable, no vector re-attach, no phase
+    // restart (Codex D7, 2026-09-13).
+    refreshTimer_.update(period_us);
+    armed_hz_ = frequency_hz;
+    return true;
+  }
+  if (!refreshTimer_.begin(refreshISR, period_us)) {   // starts the channel at the new period
     // No free PIT channel (should be impossible with one timer, but a failed
     // allocation must not become a sticky "already armed at this rate" — D5).
     armed_hz_ = 0;
     Telemetry::state(Telemetry::ST_TIMER_FAIL, 0, (uint16_t)(frequency_hz > 0xFFFF ? 0xFFFF : frequency_hz));
-    return;
+    return false;
   }
   // begin() re-attached the core's pit_isr: put the ISR_PIT breadcrumb trampoline back.
   Health::wrapPitVector();
   armed_hz_ = frequency_hz;
+  return true;
 }
 
 // SAFE SHUTDOWN of the refresh timer — the leading mechanism candidate for the
@@ -97,11 +107,15 @@ void SpiManager::armRefreshTimer(uint32_t frequency_hz) {
 // TODO leaves it enabled after end()). Nothing else inside (no SD, no SPI).
 void SpiManager::disarmRefreshTimer() {
   if (armed_hz_ != 0) {
+    // Preserve the NVIC enable state rather than unconditionally re-enabling:
+    // the PIT IRQ is shared by all four channels, and the owner of that line
+    // is the core, not this driver (Codex round-3 F6 / hygiene item, 2026-09-13).
+    const bool was_enabled = NVIC_IS_ENABLED(IRQ_PIT);
     NVIC_DISABLE_IRQ(IRQ_PIT);
     asm volatile("dsb\n\tisb" ::: "memory");
     refreshTimer_.end();
     asm volatile("dsb" ::: "memory");
-    NVIC_ENABLE_IRQ(IRQ_PIT);
+    if (was_enabled) NVIC_ENABLE_IRQ(IRQ_PIT);
   }
   armed_hz_   = 0;
   refreshFlag = false;

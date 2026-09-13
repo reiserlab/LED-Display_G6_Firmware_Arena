@@ -57,7 +57,8 @@ inline uint32_t readPrimask() {
 
 // Seal the ISR record under a brief IRQ mask: a higher-priority ISR landing
 // between the checksum computation and its store would otherwise leave the
-// record inconsistent. ~20 cycles masked; the RTWDOG IRQ simply pends.
+// record inconsistent. Masked for two checksums + a cache flush (a few hundred
+// cycles); the RTWDOG IRQ simply pends for that long.
 inline void sealIsr() {
   uint32_t pm = readPrimask();
   __disable_irq();

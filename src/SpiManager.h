@@ -35,7 +35,11 @@ class SpiManager {
   // arm is IDEMPOTENT — already running at this rate = no PIT access at all;
   // a different rate re-begins the channel. Callers on the per-command hot
   // path (0x70, 0x3A) never disarm; only geometry/mode changes do.
-  void armRefreshTimer(uint32_t frequency_hz);
+  // Returns false only when the timer could not be started (no free PIT
+  // channel — STATE(timer_fail) is recorded); callers that enter a display
+  // state must not acknowledge it in that case. A rate change on a running
+  // timer uses IntervalTimer::update() (LDVAL only, phase-preserving, no end()).
+  bool armRefreshTimer(uint32_t frequency_hz);
   void disarmRefreshTimer();
   bool     refreshArmed() const            { return armed_hz_ != 0; }
   bool     refreshArmedAt(uint32_t hz) const { return armed_hz_ == hz && hz != 0; }
