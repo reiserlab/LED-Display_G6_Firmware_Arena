@@ -100,11 +100,20 @@
 //         [len, cmd]; t_us = receipt time before dispatch; status = the
 //         reply's status byte (0xFF if none was queued). The synthetic
 //         producer uses cmd 0xFE, status 0, plen 4, payload = counter u32.
-//   FRAME (type 2, 20 B): idx u16 @10, pattern u16 @12, sd_load_us u32 @14,
-//         spi_us u16 @18 — appended from transmitOnRefresh when the displayed
-//         frame index or pattern differs from the last FRAME record; t_us =
-//         start of the SPI push; sd_load_us = the most recent readFrame
-//         duration (u32: 129 ms SD reads have been observed, u16 would clip)
+//   FRAME (type 2, 26 B): idx u16 @10, pattern u16 @12, sd_load_us u32 @14,
+//         spi_us u16 @18, req_age_us u32 @20, superseded u8 @24, flags u8 @25 —
+//         appended from transmitOnRefresh when the displayed frame index or
+//         pattern differs from the last FRAME record; t_us = start of the SPI
+//         push; sd_load_us = the readFrame that produced this frame (u32: 129 ms
+//         SD reads have been observed, u16 would clip); req_age_us = dispatch of
+//         the SET_FRAME_POSITION that requested this frame (loadFrame entry for
+//         Mode 2/4) → SPI start, u32 so a 30–90 ms card stall is representable
+//         (dispatch→SPI latency: excludes USB/host queueing); superseded = frames
+//         loaded into frame_buf_ but replaced before any transfer since the last
+//         FRAME record (0 = every load was shown); flags bit0 = frame came from
+//         an SD read, bit1 = the pattern file is contiguous (O(1) seek path).
+//         Ring layout version 2 (kVersion): a ring written by a 20 B-FRAME build
+//         is re-initialised at boot instead of being truncated by repairChain.
 //   STATE (type 3, 14 B): kind u8 @10, code u8 @11, arg u16 @12
 //         kind 1 boot          code = reset_cause & 0xFF, arg = prev breadcrumb op << 8 | prev_valid
 //         kind 2 state_change  code = new ArenaState, arg = pattern_id
@@ -118,6 +127,15 @@
 //                              arg = xPSR IPSR (bits 0-8) | prior isr_last << 9 (bits 9-15)
 //         kind 9 prev_isr_count (boot after a watchdog reset) code = ISR id, arg = min(65535, entries >> 12)
 //         kind 10 timer_fail   code = 0, arg = requested refresh rate (Hz); the timer stayed un-armed
+//         kind 11 sd_layout    after every sd_open: code bit0 = pattern file contiguous (FILE_FLAG_CONTIGUOUS
+//                              set by contiguousRange → O(1) seeks), bit1 = exFAT volume; arg = sectors per cluster
+//         kind 12 sd_slow_ctx  follows every sd_slow: code = SdFat card errorCode(), arg = errorData() & 0xFFFF
+//                              (USDHC IRQSTAT at the last driver error) — did the driver see an error/retry?
+//         kind 13 sd_reads     at pattern close / re-open: code = 0, arg = min(65535, readFrame calls while
+//                              that pattern was open) — the read count the host cannot derive once
+//                              same-index SET_FRAME_POSITIONs skip the SD read
+//         sd_slow (kind 4) code byte, since ring v2: bits 0-1 = slowest phase of the read (1 seek,
+//                              2 body read, 3 CRC-trailer read), bit7 = the read returned an error
 // ---------------------------------------------------------------------------
 
 namespace Telemetry {
@@ -128,7 +146,7 @@ constexpr uint32_t kRingEnd    = kRingBase + kRingSize;    // 0x2027F000
 constexpr uint32_t kHeaderSize = 32;
 constexpr uint32_t kDataSize   = kRingSize - kHeaderSize;  // 65,504 B of records
 constexpr uint32_t kMagic      = 0x47365452UL;             // 'G6TR'
-constexpr uint8_t  kVersion    = 1;
+constexpr uint8_t  kVersion    = 2;  // 2: FRAME 26 B (req_age_us/superseded/flags), STATE kinds 11-13
 constexpr uint32_t kHeapGuardBytes = 4096;                 // disable when __brkval >= base - this
 
 // SET_TELEMETRY request flags (also the header flags bit0).
@@ -162,7 +180,18 @@ enum StateKind : uint8_t {
   ST_PREV_ISR_COUNT = 9,  // after a watchdog reset, one per ISR id with a non-zero count: code = ISR id,
                           // arg = min(65535, count >> 12) (units of 4096 entries)
   ST_TIMER_FAIL   = 10, // IntervalTimer::begin() failed (no free PIT channel): code = 0, arg = requested refresh Hz
+  ST_SD_LAYOUT    = 11, // after sd_open: code bit0 contiguous file, bit1 exFAT; arg = sectors per cluster
+  ST_SD_SLOW_CTX  = 12, // follows sd_slow: code = card errorCode(), arg = errorData() & 0xFFFF
+  ST_SD_READS     = 13, // at pattern close/re-open: arg = readFrame calls during that open (saturating)
 };
+// sd_slow (kind 4) code byte: which phase of readFrame was slowest, + error flag.
+constexpr uint8_t kSdSlowPhaseSeek  = 1;
+constexpr uint8_t kSdSlowPhaseBody  = 2;
+constexpr uint8_t kSdSlowPhaseTail  = 3;
+constexpr uint8_t kSdSlowErrorFlag  = 0x80;
+// FRAME flags byte.
+constexpr uint8_t kFrameFlagSdRead     = 0x01;  // frame_buf_ was filled by readFrame
+constexpr uint8_t kFrameFlagContiguous = 0x02;  // the open pattern file is contiguous (O(1) seek path)
 constexpr uint8_t kOverrunCodeEvicted       = 0x00;
 constexpr uint8_t kOverrunCodeHeapCollision = 0xFF;
 constexpr uint8_t kSyntheticCmd             = 0xFE;
@@ -170,10 +199,11 @@ constexpr uint8_t kSyntheticCmd             = 0xFE;
 constexpr uint8_t  kRecordHeaderLen = 10;  // len, type, seq, t_us
 constexpr uint8_t  kCmdPayloadMax   = 8;
 constexpr uint8_t  kCmdRecordLenMax = kRecordHeaderLen + 3 + kCmdPayloadMax;  // 21
-constexpr uint8_t  kFrameRecordLen  = kRecordHeaderLen + 10;                  // 20
+constexpr uint8_t  kFrameRecordLen  = kRecordHeaderLen + 16;                  // 26 (ring v2; 20 in v1)
 constexpr uint8_t  kStateRecordLen  = kRecordHeaderLen + 4;                   // 14
-constexpr uint8_t  kRecordLenMax    = kCmdRecordLenMax;
-constexpr uint32_t kSdSlowThresholdUs = 20000;  // readFrame slower than this → STATE(sd_slow)
+constexpr uint8_t  kRecordLenMax    = kFrameRecordLen > kCmdRecordLenMax ? kFrameRecordLen : kCmdRecordLenMax;
+constexpr uint32_t kSdSlowThresholdUs = 10000;  // readFrame slower than this → STATE(sd_slow); 10 ms = the worst-case
+                                                 // acceptable display freeze (Michael, 2026-09-13; 5 ms target); was 20 ms in ring v1
 
 struct RingHeader {
   uint32_t magic;
@@ -215,7 +245,8 @@ bool heapCollision();   // the guard tripped this boot
 void cmd(uint32_t t_rx_us, uint8_t cmd_byte, uint8_t status,
          const uint8_t *req, uint8_t req_len);
 void frame(uint32_t t_us, uint16_t idx, uint16_t pattern,
-           uint32_t sd_load_us, uint32_t spi_us);
+           uint32_t sd_load_us, uint32_t spi_us,
+           uint32_t req_age_us, uint8_t superseded, uint8_t flags);
 void state(uint8_t kind, uint8_t code, uint16_t arg);
 
 // Drain (GET_TELEMETRY_BLOCK). ack() frees every record with seq <= ack_seq

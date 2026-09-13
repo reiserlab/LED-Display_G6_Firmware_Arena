@@ -1,4 +1,4 @@
-"""Offline (no hardware) fixtures for the telemetry ring codec — STATE kinds 8/9/10.
+"""Offline (no hardware) fixtures for the telemetry ring codec — STATE kinds 8/9/10, FRAME v1/v2, kinds 11-13.
 
 Runs inside the HIL suite but needs no transport. Builds records byte-for-byte per
 src/Telemetry.h and checks the decoder's derived fields.
@@ -6,9 +6,16 @@ src/Telemetry.h and checks the decoder's derived fields.
 
 import struct
 
+import pytest
+
 from .telemetry_codec import (
+    FRAME_RECORD_LEN,
     ISR_NAMES,
     ST_PREV_ISR_COUNT,
+    ST_SD_LAYOUT,
+    ST_SD_READS,
+    ST_SD_SLOW,
+    ST_SD_SLOW_CTX,
     ST_TIMER_FAIL,
     ST_WDOG_CONTEXT,
     classify_exc_return,
@@ -18,6 +25,13 @@ from .telemetry_codec import (
 
 def _state(seq, kind, code, arg, t_us=1234):
     return bytes([14, 3]) + struct.pack("<II", seq, t_us) + struct.pack("<BBH", kind, code, arg)
+
+
+def _frame(seq, idx, pattern, sd_load_us, spi_us, req_age_us=None, superseded=0, flags=0, t_us=5678):
+    body = struct.pack("<HHIH", idx, pattern, sd_load_us, spi_us)
+    if req_age_us is not None:
+        body += struct.pack("<IBB", req_age_us, superseded, flags)
+    return bytes([10 + len(body), 2]) + struct.pack("<II", seq, t_us) + body
 
 
 def _block(*recs):
@@ -67,3 +81,56 @@ def test_timer_fail_is_not_a_telemetry_config():
     (r,) = _block(_state(5, ST_TIMER_FAIL, 0, 300))
     assert r.fields["kind_name"] == "timer_fail" and r.fields["requested_hz"] == 300
     assert "events" not in r.fields  # must not be mistaken for STATE(telemetry, flags)
+
+
+# ── FRAME v1 (20 B) / v2 (26 B) ─────────────────────────────────────────────
+
+def test_frame_v1_record_decodes_without_extras():
+    (r,) = _block(_frame(6, 78, 36, 1961, 812))
+    assert len(r.raw) == 20
+    assert r.fields == {"idx": 78, "pattern": 36, "sd_load_us": 1961, "spi_us": 812}
+
+
+def test_frame_v2_record_carries_request_age_and_flags():
+    (r,) = _block(_frame(7, 152, 36, 88_700, 771, req_age_us=91_200, superseded=3, flags=0x03))
+    assert len(r.raw) == FRAME_RECORD_LEN == 26
+    f = r.fields
+    assert f["req_age_us"] == 91_200, "u32: a 30–90 ms card stall must be representable (u16 clips at 65 ms)"
+    assert f["superseded"] == 3 and f["flags"] == 3
+    assert f["sd_read"] is True and f["contiguous"] is True
+    assert "extra" not in f
+
+
+def test_frame_longer_than_v2_keeps_the_tail_raw():
+    rec = _frame(8, 1, 5, 620, 770, req_age_us=4700, superseded=0, flags=1)
+    rec = bytes([rec[0] + 2]) + rec[1:] + b"\xaa\xbb"
+    (r,) = _block(rec)
+    assert r.fields["req_age_us"] == 4700 and r.fields["extra"] == "aabb"
+
+
+def test_frame_shorter_than_v1_is_rejected():
+    rec = bytes([18, 2]) + struct.pack("<II", 9, 1) + struct.pack("<HHI", 1, 5, 620)
+    with pytest.raises(ValueError):
+        _block(rec)
+
+
+# ── STATE kinds 11-13 + sd_slow phase byte (ring v2) ────────────────────────
+
+def test_sd_slow_phase_and_error_flag():
+    (r,) = _block(_state(10, ST_SD_SLOW, 0x02, 887))          # body phase, no error, 88.7 ms
+    assert r.fields["kind_name"] == "sd_slow" and r.fields["read_us"] == 88_700
+    assert r.fields["phase"] == "body" and r.fields["read_error"] is False
+    (r,) = _block(_state(11, ST_SD_SLOW, 0x81, 12))            # seek phase, read returned an error
+    assert r.fields["phase"] == "seek" and r.fields["read_error"] is True
+    (r,) = _block(_state(12, ST_SD_SLOW, 0x00, 330))           # ring-v1 firmware: code 0
+    assert r.fields["phase"] == "unknown" and r.fields["read_us"] == 33_000
+
+
+def test_sd_layout_slow_ctx_and_reads():
+    (a, b, c) = _block(_state(13, ST_SD_LAYOUT, 0x01, 8),
+                       _state(14, ST_SD_SLOW_CTX, 0, 0x0001),
+                       _state(15, ST_SD_READS, 0, 24_573))
+    assert a.fields["kind_name"] == "sd_layout" and a.fields["contiguous"] is True
+    assert a.fields["exfat"] is False and a.fields["sectors_per_cluster"] == 8
+    assert b.fields["kind_name"] == "sd_slow_ctx" and b.fields["card_error_code"] == 0 and b.fields["irqstat_lo"] == 1
+    assert c.fields["kind_name"] == "sd_reads" and c.fields["reads"] == 24_573

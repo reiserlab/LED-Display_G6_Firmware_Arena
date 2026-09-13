@@ -262,16 +262,28 @@ def test_cmd70_count_increments_per_set_frame_position(transport, pat):
         assert before.flags & FLAG_DISPLAY_ACTIVE
 
         n = 20
+        # Start at index 1: the trial parked on frame 0, and a 0x70 for the index
+        # already in the frame buffer skips the SD read (SD fast path B, 2026-09-13).
         for i in range(n):
             st, _, _, _ = transport.command(SET_FRAME_POSITION_CMD,
-                                            struct.pack("<H", i % frame_count))
+                                            struct.pack("<H", (i + 1) % frame_count))
             assert st == 0, f"SET_FRAME_POSITION #{i} failed"
 
         after = read_health(transport)
         assert after.cmd70_count - before.cmd70_count == n
-        assert after.sd_reads - before.sd_reads >= n, "each 0x70 reads one frame from SD"
+        assert after.sd_reads - before.sd_reads >= n, "each index-changing 0x70 reads one frame from SD"
         assert after.sd_read_max_us > 0
-        assert after.cur_frame == (n - 1) % frame_count
+        assert after.cur_frame == n % frame_count
         assert after.sd_err == 0
+
+        # Same index again, three times: counted as commands, but no SD read.
+        for _ in range(3):
+            st, _, _, _ = transport.command(SET_FRAME_POSITION_CMD,
+                                            struct.pack("<H", n % frame_count))
+            assert st == 0
+        again = read_health(transport)
+        assert again.cmd70_count - after.cmd70_count == 3
+        assert again.sd_reads == after.sd_reads, "a repeated index must not touch the SD card"
+        assert again.cur_frame == n % frame_count
     finally:
         transport.command(STOP_DISPLAY_CMD)

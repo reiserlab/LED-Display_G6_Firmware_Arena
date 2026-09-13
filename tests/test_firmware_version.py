@@ -17,7 +17,7 @@ import re
 import struct
 from collections import namedtuple
 
-from .commands import GET_CONTROLLER_INFO_CMD, GET_FIRMWARE_VERSION_CMD
+from .commands import GET_CONTROLLER_INFO_CMD, GET_FIRMWARE_VERSION_CMD, GET_SD_INFO_CMD
 
 # Payload layout — mirrors CommandProcessor::handleGetFirmwareVersion() /
 # src/Version.h. ASCII fields are right-padded with spaces (no NUL).
@@ -35,6 +35,7 @@ FLAG_DEBUG = 0x02
 FLAG_TELEMETRY = 0x04  # telemetry ring compiled in (0xA8/0xA9 present) — hosts gate SET_TELEMETRY on this
 FLAG_CRASHREPORT = 0x08  # GET_CRASHREPORT 0xCC + GET_HEALTH ver >= 2 present — hosts gate 0xCC on this
 FLAG_FREERUN_REFRESH = 0x10  # free-running refresh timer variant (0x70 never disarms/re-arms the PIT)
+FLAG_SD_FASTPATH = 0x20  # contiguous O(1) seeks + same-index read skip + FRAME 26 B + GET_SD_INFO 0xCD — hosts gate 0xCD on this
 
 # Arena geometry compiled into this branch (constants.h
 # panel_count_per_frame_row / _col): G6_2x10.
@@ -65,10 +66,11 @@ def test_firmware_version_reply_shape(transport):
     assert v.ver == FW_VERSION_VER
     assert v.rows == EXPECTED_ROWS
     assert v.cols == EXPECTED_COLS
-    assert 0 <= v.flags <= (FLAG_DIRTY | FLAG_DEBUG | FLAG_TELEMETRY | FLAG_CRASHREPORT | FLAG_FREERUN_REFRESH), f"undefined flag bits set: {v.flags:#04x}"
+    assert 0 <= v.flags <= (FLAG_DIRTY | FLAG_DEBUG | FLAG_TELEMETRY | FLAG_CRASHREPORT | FLAG_FREERUN_REFRESH | FLAG_SD_FASTPATH), f"undefined flag bits set: {v.flags:#04x}"
     assert v.flags & FLAG_TELEMETRY, "this build compiles in the telemetry ring; bit2 must be set"
     assert v.flags & FLAG_CRASHREPORT, "this build has GET_CRASHREPORT + GET_HEALTH v2; bit3 must be set"
     assert v.flags & FLAG_FREERUN_REFRESH, "this build has the free-running refresh timer; bit4 must be set"
+    assert v.flags & FLAG_SD_FASTPATH, "this build has the SD fast path + GET_SD_INFO; bit5 must be set"
 
 
 def test_firmware_version_sha(transport):
@@ -103,3 +105,30 @@ def test_controller_info_advertises_firmware_version(transport):
     assert st == 0 and echo == GET_CONTROLLER_INFO_CMD
     assert len(payload) >= 2
     assert payload[1] & CAP_HEALTH, "capability bit 7 (health) must be set when 0xCB exists"
+
+
+# ── GET_SD_INFO (0xCD): card identity for stall attribution ─────────────────
+
+SD_INFO_FMT = "<BBBBII16sBB"
+SD_INFO_LEN = struct.calcsize(SD_INFO_FMT)  # 30
+
+
+def test_sd_info_reply_shape_and_identity(transport):
+    v = read_firmware_version(transport)
+    assert v.flags & FLAG_SD_FASTPATH
+    st, echo, payload, _ = transport.command(GET_SD_INFO_CMD)
+    assert echo == GET_SD_INFO_CMD and len(payload) == SD_INFO_LEN
+    ver, flags, card_type, fat_type, sectors, bpc, cid, maint, _res = struct.unpack(SD_INFO_FMT, bytes(payload))
+    assert ver == 1
+    if st == 0:
+        assert flags & 0x01, "status 0 means a card is mounted"
+        assert flags & 0x02 and flags & 0x04, "CID and CSD are cached by SdFat at mount"
+        assert card_type in (1, 2, 3)
+        assert fat_type in (12, 16, 32, 64)
+        assert sectors > 0 and bpc in (512 << n for n in range(8))
+        assert cid[0] != 0, "CID manufacturer id"
+        assert maint == 0xFF  # SD_STATUS maintenance bits are not read by SdFat 2.1.2
+    else:
+        assert not (flags & 0x01)
+    # O(1) and constant: two reads are byte-identical.
+    assert transport.command(GET_SD_INFO_CMD)[2] == payload

@@ -19,7 +19,8 @@ GET_TELEMETRY_BLOCK reply payload:   18-byte header, then records verbatim
 
 Record: len u8, type u8, seq u32, t_us u32, payload
     type 1 CMD   : cmd u8, status u8, plen u8, payload[plen <= 8]         (13..21 B)
-    type 2 FRAME : idx u16, pattern u16, sd_load_us u32, spi_us u16        (20 B)
+    type 2 FRAME : idx u16, pattern u16, sd_load_us u32, spi_us u16        (20 B, ring v1)
+                   + req_age_us u32, superseded u8, flags u8              (26 B, ring v2, fw sd_fastpath)
     type 3 STATE : kind u8, code u8, arg u16                               (14 B)
 PAD records (type 0) are internal to the ring and never returned.
 """
@@ -36,14 +37,20 @@ BLOCK_HEADER_FMT = "<IIHIBBH"
 RECORD_HEADER_LEN = 10
 RECORD_BYTES_MAX = 178  # firmware cap: 196-byte max framed payload minus the 18-byte header
 
-FRAME_RECORD_LEN = 20
+FRAME_RECORD_LEN = 26          # ring v2 (fw 0xCB flags bit 5); v1 records were 20 B
+FRAME_RECORD_LEN_V1 = 20
+FRAME_MIN_BODY = FRAME_RECORD_LEN_V1 - RECORD_HEADER_LEN   # 10: idx, pattern, sd_load_us, spi_us
 STATE_RECORD_LEN = 14
 
 REC_PAD, REC_CMD, REC_FRAME, REC_STATE = 0, 1, 2, 3
 REC_NAMES = {REC_CMD: "cmd", REC_FRAME: "frame", REC_STATE: "state"}
 
 (ST_BOOT, ST_STATE_CHANGE, ST_ERROR_GLYPH, ST_SD_SLOW, ST_RING_OVERRUN, ST_TELEMETRY, ST_SD_OPEN,
- ST_WDOG_CONTEXT, ST_PREV_ISR_COUNT, ST_TIMER_FAIL) = range(1, 11)
+ ST_WDOG_CONTEXT, ST_PREV_ISR_COUNT, ST_TIMER_FAIL, ST_SD_LAYOUT, ST_SD_SLOW_CTX, ST_SD_READS) = range(1, 14)
+SD_SLOW_PHASE_NAMES = {0: "unknown", 1: "seek", 2: "body", 3: "tail"}   # sd_slow code bits 0-1 (ring v2)
+SD_SLOW_ERROR_FLAG = 0x80
+FRAME_FLAG_SD_READ = 0x01
+FRAME_FLAG_CONTIGUOUS = 0x02
 STATE_KIND_NAMES = {
     ST_BOOT: "boot",
     ST_STATE_CHANGE: "state_change",
@@ -55,6 +62,9 @@ STATE_KIND_NAMES = {
     ST_WDOG_CONTEXT: "wdog_context",
     ST_PREV_ISR_COUNT: "prev_isr_count",
     ST_TIMER_FAIL: "timer_fail",
+    ST_SD_LAYOUT: "sd_layout",
+    ST_SD_SLOW_CTX: "sd_slow_ctx",
+    ST_SD_READS: "sd_reads",
 }
 
 
@@ -155,10 +165,20 @@ def _decode_payload(rtype: int, body: bytes) -> dict[str, Any]:
             d["counter"] = struct.unpack("<I", body[3:7])[0]
         return d
     if rtype == REC_FRAME:
-        if len(body) != FRAME_RECORD_LEN - RECORD_HEADER_LEN:
-            raise ValueError(f"FRAME record payload is {len(body)} B, expected 10")
-        idx, pattern, sd_load_us, spi_us = struct.unpack("<HHIH", body)
-        return {"idx": idx, "pattern": pattern, "sd_load_us": sd_load_us, "spi_us": spi_us}
+        # Tolerant both ways: a v1 (10 B body) record decodes without the extras, a
+        # v2 (16 B) record decodes them, anything longer is accepted and the tail kept raw.
+        if len(body) < FRAME_MIN_BODY:
+            raise ValueError(f"FRAME record payload is {len(body)} B, expected >= {FRAME_MIN_BODY}")
+        idx, pattern, sd_load_us, spi_us = struct.unpack_from("<HHIH", body, 0)
+        d = {"idx": idx, "pattern": pattern, "sd_load_us": sd_load_us, "spi_us": spi_us}
+        if len(body) >= 16:
+            req_age_us, superseded, flags = struct.unpack_from("<IBB", body, 10)
+            d.update({"req_age_us": req_age_us, "superseded": superseded, "flags": flags,
+                      "sd_read": bool(flags & FRAME_FLAG_SD_READ),
+                      "contiguous": bool(flags & FRAME_FLAG_CONTIGUOUS)})
+        if len(body) > 16:
+            d["extra"] = body[16:].hex()
+        return d
     if rtype == REC_STATE:
         if len(body) != STATE_RECORD_LEN - RECORD_HEADER_LEN:
             raise ValueError(f"STATE record payload is {len(body)} B, expected 4")
@@ -187,6 +207,19 @@ def _decode_payload(rtype: int, body: bytes) -> dict[str, Any]:
             d["entries_approx"] = arg << 12
         if kind == ST_TIMER_FAIL:
             d["requested_hz"] = arg
+        if kind == ST_SD_SLOW:
+            d["read_us"] = arg * 100
+            d["phase"] = SD_SLOW_PHASE_NAMES.get(code & 0x03, "unknown")   # 0 on ring-v1 firmware
+            d["read_error"] = bool(code & SD_SLOW_ERROR_FLAG)
+        if kind == ST_SD_LAYOUT:
+            d["contiguous"] = bool(code & 1)
+            d["exfat"] = bool(code & 2)
+            d["sectors_per_cluster"] = arg
+        if kind == ST_SD_SLOW_CTX:
+            d["card_error_code"] = code
+            d["irqstat_lo"] = arg
+        if kind == ST_SD_READS:
+            d["reads"] = arg
         if kind == ST_TELEMETRY:
             d["events"] = bool(code & SET_FLAG_EVENTS)
             d["synthetic"] = bool(code & SET_FLAG_SYNTHETIC)

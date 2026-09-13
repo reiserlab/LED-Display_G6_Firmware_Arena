@@ -363,7 +363,8 @@ void cmd(uint32_t t_rx_us, uint8_t cmd_byte, uint8_t status,
 }
 
 void frame(uint32_t t_us, uint16_t idx, uint16_t pattern,
-           uint32_t sd_load_us, uint32_t spi_us) {
+           uint32_t sd_load_us, uint32_t spi_us,
+           uint32_t req_age_us, uint8_t superseded, uint8_t flags) {
   if (!enabled_) return;
   uint8_t rec[kFrameRecordLen];
   rec[0] = kFrameRecordLen;
@@ -373,6 +374,9 @@ void frame(uint32_t t_us, uint16_t idx, uint16_t pattern,
   put16(rec + 12, pattern);
   put32(rec + 14, sd_load_us);
   put16(rec + 18, spi_us > 0xFFFF ? 0xFFFF : (uint16_t)spi_us);
+  put32(rec + 20, req_age_us);
+  rec[24] = superseded;
+  rec[25] = flags;
   append(rec, kFrameRecordLen);
 }
 

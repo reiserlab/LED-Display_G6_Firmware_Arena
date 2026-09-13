@@ -427,6 +427,53 @@ CMD/FRAME telemetry pairs, not a guaranteed bound. At the next wedge the watchdo
 **disappears** / the kind 8/9 records show the PIT storm (→ the core race). Identity: 0xCB `flags`
 bit4.
 
+### SD fast path + stall attribution (2026-09-13, 0xCB flags bit 5)
+
+**Why.** A night of Mode-3 soak logs (fw #50 campaign, 9.9 M `SET_FRAME_POSITION`s) split the SD read
+cost by index step: a sequential +1 frame costs ~620 µs (the card's open multi-block stream), any other
+step ~1.18 ms on an 81 KB pattern but 1.46–2.0 ms on an 813 KB one — the extra is SdFat's
+`FatFile::seekSet` re-walking the FAT chain from the first cluster on backward seeks (an extra FAT-sector
+read whenever the chain spans more than one FAT sector; the ARM build keeps a separate FAT cache, so
+this is a chain-length effect, not data-read eviction). Separately, the card itself stalls for
+quantised 23/33/41/67/89 ms every ~24.5k reads of the large file (clusters of 3–4, card-internal
+read-count maintenance; not firmware-addressable — see `webDisplayTools/docs/development/sd-read-jitter-2026-09-13.md`).
+
+**What changed.**
+- `SdManager` holds the pattern as an SdFat `FsFile` and calls `contiguousRange()` once at open: on a
+  contiguous file SdFat sets `FILE_FLAG_CONTIGUOUS` and every later seek is arithmetic. A fragmented
+  file keeps the old path; `STATE(sd_layout)` says which (code bit0) plus the cluster size.
+- A `SET_FRAME_POSITION` for the index already in `frame_buf_` (loaded by a successful `loadFrame`,
+  not overwritten since — glyph / all-on / dark / stream / PSRAM / AO-mode / AO-LUT changes invalidate
+  it) is answered **without an SD read** (`Health::stats.cmd70_same_index`, RAM only). ~24 % of
+  closed-loop commands repeat the index.
+- `readFrame` times seek / body / CRC-trailer separately; a read over **10 ms** records `sd_slow` with
+  the slowest phase in the code byte and an `sd_slow_ctx` record (SdFat `errorCode()`, `errorData()`)
+  so a card hold can be told from a driver error/retry.
+- FRAME records grow to **26 B** (`req_age_us`, `superseded`, `flags`; ring layout **v2** — a kept
+  ring of the other version is re-initialised at boot rather than truncated). `STATE(sd_reads)` at
+  STOP / the next trial start reports the read count of the pattern being left (the host cannot
+  derive it once same-index commands skip the read).
+
+### SD card identity (`GET_SD_INFO`, 0xCD)
+
+Every stall measurement and card comparison must be attributable to a specific card. Request `[01 CD]`;
+framed reply status 0 (1 when no card is mounted — the payload is still sent) + a **30-byte** payload,
+O(1) (SdFat caches CID/CSD at mount; no card traffic). Gated on 0xCB flags bit 5.
+
+| Off | Type | Field | Meaning |
+|---|---|---|---|
+| 0 | u8 | `ver` | payload schema version, `1` |
+| 1 | u8 | `flags` | bit0 mounted, bit1 CID valid, bit2 CSD valid |
+| 2 | u8 | `card_type` | SdFat `type()`: 0 none, 1 SD1, 2 SD2, 3 SDHC/SDXC |
+| 3 | u8 | `fat_type` | 12 / 16 / 32, 64 = exFAT, 0 unknown |
+| 4 | u32 | `sectors` | capacity in 512 B sectors (CSD) |
+| 8 | u32 | `bytes_per_cluster` | volume cluster size |
+| 12 | u8[16] | `cid` | raw CID register: MID @0, OID @1–2, PNM @3–7, PRV @8, PSN @9–12 (BE), MDT @13–14, CRC @15 |
+| 28 | u8 | `sd_status_maint` | SD 6.0 §4.18 maintenance-support bits (SD_STATUS b328/329); `0xFF` = not read (SdFat 2.1.2 has no ACMD13 reader) |
+| 29 | u8 | reserved | 0 |
+
+Arena Studio reads it at link-up into `run_metadata.sd_card`; `tests/test_firmware_version.py` decodes it.
+
 ### Build identity (`GET_FIRMWARE_VERSION`, 0xCB)
 
 Every build embeds the git identity of the checkout it was compiled from, so a controller in the
@@ -442,7 +489,7 @@ the *panel* image on the SD card, not the controller). Request `[01 CB]`; framed
 | 0 | u8 | `ver` | payload schema version, `1` |
 | 1 | u8 | `rows` | `panel_count_per_frame_row` this build was compiled for |
 | 2 | u8 | `cols` | `panel_count_per_frame_col` |
-| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build), bit2 `telemetry` (telemetry ring compiled in — `SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9 answer; **hosts gate 0xA8 on this bit**, not on 0xC2 bit 7), bit3 `crashreport` (`GET_CRASHREPORT` 0xCC + `GET_HEALTH` ver ≥ 2 present; **hosts gate 0xCC on this bit** — a rollback to c47ee68 has bit2 but not bit3), bit4 `freerun_refresh` (free-running refresh timer: a valid steady-state `SET_FRAME_POSITION` never disarms/re-arms the PIT; transitions/glyph/rate changes use the guarded disarm — variant marker so run logs can tell which build ran) |
+| 3 | u8 | `flags` | bit0 `dirty` (tracked files modified at build time), bit1 `debug` (`DEBUG_SERIAL` build), bit2 `telemetry` (telemetry ring compiled in — `SET_TELEMETRY` 0xA8 / `GET_TELEMETRY_BLOCK` 0xA9 answer; **hosts gate 0xA8 on this bit**, not on 0xC2 bit 7), bit3 `crashreport` (`GET_CRASHREPORT` 0xCC + `GET_HEALTH` ver ≥ 2 present; **hosts gate 0xCC on this bit** — a rollback to c47ee68 has bit2 but not bit3), bit4 `freerun_refresh` (free-running refresh timer: a valid steady-state `SET_FRAME_POSITION` never disarms/re-arms the PIT; transitions/glyph/rate changes use the guarded disarm — variant marker so run logs can tell which build ran), bit5 `sd_fastpath` (contiguous-file O(1) seeks, same-index `SET_FRAME_POSITION` skips the SD read, FRAME records 26 B = ring v2, STATE kinds 11–13, `GET_SD_INFO` 0xCD answers — **hosts gate 0xCD on this bit**) |
 | 4 | char[8] | `sha` | short git SHA, lowercase hex (`git rev-parse --short=8`); `unknown ` when git was unavailable |
 | 12 | char[10] | `date` | build date, UTC, `YYYY-MM-DD` |
 | 22 | char[24] | `branch` | git branch, truncated to 24; `detached` for a detached HEAD; `unknown` when unavailable |
@@ -530,13 +577,13 @@ rejected (the base is not 64 KiB-aligned, and the drain reads faster cached).
 **Layout** (all little-endian). Header, 32 B at the ring base:
 
 ```
-RingHeader (at base, 32 B): magic u32 = 0x47365452 ('G6TR'), ver u8 = 1, flags u8 (bit0 events_enabled), reserved u16,
+RingHeader (at base, 32 B): magic u32 = 0x47365452 ('G6TR'), ver u8 = 2 (1 = 20 B FRAME builds; a kept ring of another version is re-initialised at boot), flags u8 (bit0 events_enabled), reserved u16,
   write_off u32, read_off u32 (host ack cursor), next_seq u32, dropped u32, boot_count u32, checksum u32 (sum of the other fields)
 Records (from base+32 to base+0x10000, byte ring, wrap-around; a record never splits: if the tail can't fit
   the next record a PAD record `len=remaining, type=0` fills it and writing wraps to 0)
 Record: len u8 (total incl. this byte), type u8, seq u32, t_us u32 (micros()), payload
   type 1 CMD   : cmd u8, status u8, plen u8, payload[plen ≤ 8]      (recorded after dispatch; t_us = receipt time before dispatch)
-  type 2 FRAME : idx u16, pattern u16, sd_load_us u32, spi_us u16   (recorded in transmitOnRefresh when cur_frame_index_ or pattern changed since the last FRAME record)
+  type 2 FRAME : idx u16, pattern u16, sd_load_us u32, spi_us u16, req_age_us u32, superseded u8, flags u8   (26 B; recorded in transmitOnRefresh when cur_frame_index_ or pattern changed since the last FRAME record)
   type 3 STATE : kind u8, code u8, arg u16
       kinds: 1 boot (code = reset_cause & 0xFF, arg = prev breadcrumb op<<8 | prev_valid), 2 state_change (code = new ArenaState, arg = pattern_id),
              3 error_glyph (code = CE code, arg = 0), 4 sd_slow (code=0, arg = read µs/100; when a readFrame > 20 ms),
@@ -545,13 +592,17 @@ Record: len u8 (total incl. this byte), type u8, seq u32, t_us u32 (micros()), p
              8 wdog_context (boot after a watchdog reset: code = EXC_RETURN & 0xFF — bit 3 set = thread preempted (F9/E9/FD/ED), clear = a handler (F1/E1);
                              arg bits 0-8 = xPSR IPSR (0 = thread, else exception number — PIT = 138), arg bits 9-15 = isr_last when the watchdog fired),
              9 prev_isr_count (boot after a watchdog reset, one per ISR id with entries: code = ISR id, arg = min(65535, entries >> 12)),
-             10 timer_fail (IntervalTimer::begin() failed, timer left un-armed: code = 0, arg = requested refresh Hz)
+             10 timer_fail (IntervalTimer::begin() failed, timer left un-armed: code = 0, arg = requested refresh Hz),
+             11 sd_layout (after every sd_open: code bit0 = pattern file contiguous, bit1 = exFAT; arg = sectors per cluster),
+             12 sd_slow_ctx (follows every sd_slow: code = SdFat card errorCode(), arg = errorData() & 0xFFFF = USDHC IRQSTAT at the last driver error),
+             13 sd_reads (at STOP / next trial start: arg = readFrame calls while that pattern was open, saturating)
+      sd_slow code byte (ring v2): bits 0-1 = slowest phase of the read (1 seek, 2 body, 3 CRC trailer), bit7 = the read returned an error; threshold 10 ms (was 20 ms)
 ```
 
 | Off | Type | Header field | Meaning |
 |---|---|---|---|
 | 0 | u32 | `magic` | `0x47365452` (`'G6TR'`) |
-| 4 | u8 | `ver` | `1` |
+| 4 | u8 | `ver` | `2` (ring v2, 26 B FRAME; `1` = 20 B FRAME builds) |
 | 5 | u8 | `flags` | bit0 `events_enabled` (forced on at every boot) |
 | 6 | u16 | `reserved` | 0 |
 | 8 | u32 | `write_off` | next byte to write, offset into the 65,504-byte record area |
@@ -565,8 +616,13 @@ Record offsets: `len` @0, `type` @1, `seq` @2 (u32), `t_us` @6 (u32), payload @1
 CMD payload: `cmd` @10, `status` @11, `plen` @12, request bytes @13.. (the first ≤ 8 bytes after
 `[len, cmd]`); CMD records are 13–21 B. FRAME payload: `idx` @10 (u16), `pattern` @12 (u16),
 `sd_load_us` @14 (**u32** — 129 ms SD reads have been observed; u16 would clip at 65 ms),
-`spi_us` @18 (u16); **20 B total**. STATE payload: `kind` @10, `code` @11, `arg` @12 (u16); 14 B
-total. `t_us` is raw `micros()` (wraps every 71.6 min; the host unwraps using `seq` and the block's
+`spi_us` @18 (u16), `req_age_us` @20 (**u32**: dispatch of the `SET_FRAME_POSITION` that requested this
+frame — `loadFrame` entry for Mode 2/4 — to the SPI start; excludes USB/host queueing; u32 so a 30–90 ms
+card stall is representable), `superseded` @24 (u8: frames loaded into `frame_buf_` but replaced before
+any transfer since the last FRAME record), `flags` @25 (bit0 frame came from an SD read, bit1 the
+pattern file is contiguous = O(1) seek path); **26 B total** (ring v2; 20 B in v1 — decoders read the
+first 10 payload bytes and treat the rest as optional). STATE payload: `kind` @10, `code` @11, `arg`
+@12 (u16); 14 B total. `t_us` is raw `micros()` (wraps every 71.6 min; the host unwraps using `seq` and the block's
 `t_now_us`).
 
 **What gets recorded** (producer hooks, all in `CommandProcessor.cpp`):
@@ -581,13 +637,16 @@ total. `t_us` is raw `micros()` (wraps every 71.6 min; the host unwraps using `s
 - `FRAME` — in `transmitOnRefresh`, when `cur_frame_index_` or `pattern_id_` differs from the last
   FRAME recorded (reset at every `enterPatternMode`, so the first frame of a trial is always
   recorded). `t_us` = start of `SpiManager::transferFrame` (what the panels latch), `spi_us` = its
-  duration, `sd_load_us` = the most recent `readFrame` duration (`Health::stats.last_sd_read_us`).
-  A held frame re-sent every refresh tick costs nothing.
+  duration, `sd_load_us` = the most recent `readFrame` duration (`Health::stats.last_sd_read_us`),
+  `req_age_us` = SPI start − the request's dispatch time (`superseded` counts loads that never reached
+  the panels). A held frame re-sent every refresh tick costs nothing.
 - `STATE` — `boot` in `Telemetry::begin()`; `sd_open` (+ `state_change` on success) in
   `enterPatternMode`; `state_change` in `enterAllOff` (STOP / ALL_OFF / trial timer / glyph
   timeout), `enterAllOn`, `enterStreamingFrame`, and on an actual change in `handleSetFramePosition`
-  / the PSRAM handlers; `error_glyph` in `showError`; `sd_slow` in `loadFrame` when a `readFrame`
-  exceeds 20 ms; `telemetry` in `SET_TELEMETRY`; `ring_overrun` from the ring itself.
+  / the PSRAM handlers; `error_glyph` in `showError`; `sd_slow` (+ `sd_slow_ctx`) in `loadFrame` when
+  a `readFrame` exceeds 10 ms; `sd_layout` after a successful `sd_open`; `sd_reads` in `enterAllOff` /
+  the next `enterPatternMode` for the pattern being left; `telemetry` in `SET_TELEMETRY`;
+  `ring_overrun` from the ring itself.
 - **Synthetic producer** (bench test T1, drain throughput): `SET_TELEMETRY` flags **bit7** turns on
   a dummy CMD-type record — `cmd 0xFE, status 0, plen 4, payload = counter u32` (restarts at 0 on
   each enable) — generated from `loop()` (`Telemetry::service()`) at `rate` records/s, paced by

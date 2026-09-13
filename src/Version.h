@@ -66,6 +66,9 @@ constexpr bool fw_debug_build  = false;
 //                       bit4 free-running refresh timer: SET_FRAME_POSITION no longer
 //                       disarms/re-arms the PIT per command (wedge #5 fix candidate,
 //                       2026-09-13) — lets run logs tell the variants apart.
+//                       bit5 SD fast path (2026-09-13): O(1) contiguous-file seeks, same-index
+//                       SET_FRAME_POSITION skips the SD read, FRAME records are 26 B (ring v2),
+//                       STATE kinds 11-13, GET_SD_INFO 0xCD answers — hosts gate 0xCD on THIS bit.
 //   off  4  char sha[8]      short git SHA, lowercase hex, right-padded with spaces
 //   off 12  char date[10]    build date UTC "YYYY-MM-DD"
 //   off 22  char branch[24]  git branch, right-padded with spaces, truncated to 24
@@ -83,6 +86,8 @@ constexpr uint8_t fw_flag_crashreport = 0x08;  // GET_CRASHREPORT 0xCC + GET_HEA
 constexpr bool    fw_has_crashreport  = true;
 constexpr uint8_t fw_flag_freerun_refresh = 0x10;  // free-running refresh timer variant (0x70 never touches the PIT)
 constexpr bool    fw_freerun_refresh      = true;
+constexpr uint8_t fw_flag_sd_fastpath = 0x20;  // contiguous O(1) seeks + same-index read skip + FRAME 26 B + GET_SD_INFO 0xCD
+constexpr bool    fw_sd_fastpath      = true;
 
 }  // namespace version
 }  // namespace AC

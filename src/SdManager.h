@@ -101,9 +101,44 @@ class SdManager {
   // Open and validate the pattern with the given 1-based ID. Returns
   // AC::constants::CE_NONE on success, or a ControllerError code on failure.
   // On success info() describes the open pattern.
+  //
+  // SD fast path (2026-09-13): the file is held as an SdFat FsFile (not the
+  // Teensy File wrapper) and contiguousRange() is called once after the header
+  // validates. For a contiguous file that sets FILE_FLAG_CONTIGUOUS, which makes
+  // every later seekSet() arithmetic — the Mode-3 random-access path used to
+  // re-walk the FAT chain from the first cluster on every backward seek
+  // (FatFile::seekSet), an extra FAT-sector read whenever the chain spans more
+  // than one FAT sector. A fragmented file keeps today's behaviour; contiguous()
+  // reports which, and enterPatternMode logs it (STATE sd_layout).
   uint8_t openPattern(uint16_t pattern_id);
   const PatternInfo &info() const { return info_; }
   bool patternOpen() const { return file_open_; }
+  bool contiguous() const { return contiguous_; }
+
+  // Volume geometry for the sd_layout record / GET_SD_INFO (0xCD). 0 when unmounted.
+  uint8_t  fatType() const;            // 12 / 16 / 32, 64 = exFAT
+  uint32_t sectorsPerCluster() const;
+  uint32_t bytesPerCluster() const;
+
+  // Per-phase timing of the most recent readFrame() (µs): seek, body read,
+  // CRC-trailer read. Lets loadFrame attribute a slow read to the SD
+  // transaction that stalled instead of the whole call.
+  uint32_t lastSeekUs() const { return last_seek_us_; }
+  uint32_t lastBodyUs() const { return last_body_us_; }
+  uint32_t lastTailUs() const { return last_tail_us_; }
+
+  // Card identity for GET_SD_INFO (0xCD). SdFat caches CID/CSD at mount, so
+  // this is O(1) with no card traffic. Returns false when no card is mounted.
+  struct CardInfo {
+    uint8_t  card_type   = 0;   // SdFat type(): 0 none, 1 SD1, 2 SD2, 3 SDHC/SDXC
+    uint8_t  fat_type    = 0;
+    uint32_t sectors     = 0;   // capacity in 512 B sectors (CSD)
+    uint32_t bytes_per_cluster = 0;
+    uint8_t  cid[16]     = {};  // raw CID register (MID, OID, PNM, PRV, PSN, MDT, CRC)
+    bool     cid_valid   = false;
+    bool     csd_valid   = false;
+  };
+  bool cardInfo(CardInfo &out) const;
 
   // Read the given 0-based frame of the open pattern into `dest`, laid out as
   // [4-byte "FR"+index prefix][panel blocks] — exactly what
@@ -134,9 +169,11 @@ class SdManager {
   char origin_names_[AC::constants::pattern_max_count]
                     [AC::constants::pattern_name_byte_count];
 
-  File     file_;
+  FsFile   file_;              // SdFat handle (not the Teensy File wrapper): contiguousRange/seekSet
   bool     file_open_ = false;
+  bool     contiguous_ = false;  // FILE_FLAG_CONTIGUOUS set by contiguousRange() at open
   uint16_t open_id_   = 0;
+  uint32_t last_seek_us_ = 0, last_body_us_ = 0, last_tail_us_ = 0;
   PatternInfo info_;
 
   void scanPatterns();

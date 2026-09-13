@@ -282,11 +282,14 @@ uint8_t SdManager::openPattern(uint16_t pattern_id) {
     file_.close();
     file_open_ = false;
   }
+  contiguous_ = false;
 
   char path[sizeof(pattern_dir) + pattern_name_byte_count + 1];
   snprintf(path, sizeof(path), "%s/%s", pattern_dir, names_[pattern_id - 1]);
 
-  file_ = SD.open(path, FILE_READ);
+  // SdFat FsFile directly (SD.sdfs is the SdFs the Teensy SD wrapper sits on):
+  // exposes contiguousRange() / seekSet(), which the File wrapper hides.
+  file_ = SD.sdfs.open(path, O_RDONLY);
   if (!file_) {
     DBG_PRINTF("[sd] open failed: %s\n", path);
     return CE_SD_FILE_ERROR;
@@ -305,12 +308,59 @@ uint8_t SdManager::openPattern(uint16_t pattern_id) {
     return err;
   }
 
+  // One FAT-chain walk now (contiguousRange), so that no seek walks it later.
+  // On a contiguous file SdFat sets FILE_FLAG_CONTIGUOUS as a side effect and
+  // FatFile::seekSet() becomes m_firstCluster + n. A fragmented file returns
+  // false and keeps the chain-walking seek; the caller logs which (sd_layout).
+  {
+    uint32_t bgn = 0, end = 0;
+    contiguous_ = file_.contiguousRange(&bgn, &end);
+    (void)bgn; (void)end;
+  }
+  file_.seekSet(pattern_header_byte_count);  // contiguousRange leaves the position alone; be explicit
+
   file_open_ = true;
   open_id_   = pattern_id;
-  DBG_PRINTF("[sd] opened id=%u %s frames=%u gs=%u block=%u\n",
+  DBG_PRINTF("[sd] opened id=%u %s frames=%u gs=%u block=%u contiguous=%u\n",
              (unsigned)pattern_id, path, (unsigned)info_.frame_count,
-             (unsigned)info_.gs_val, (unsigned)info_.block_size);
+             (unsigned)info_.gs_val, (unsigned)info_.block_size, (unsigned)contiguous_);
   return CE_NONE;
+}
+
+uint8_t SdManager::fatType() const {
+  if (!mounted_ || SD.sdfs.vol() == nullptr) return 0;
+  return SD.sdfs.vol()->fatType();
+}
+
+uint32_t SdManager::sectorsPerCluster() const {
+  if (!mounted_ || SD.sdfs.vol() == nullptr) return 0;
+  return SD.sdfs.vol()->sectorsPerCluster();
+}
+
+uint32_t SdManager::bytesPerCluster() const {
+  if (!mounted_ || SD.sdfs.vol() == nullptr) return 0;
+  return SD.sdfs.vol()->bytesPerCluster();
+}
+
+bool SdManager::cardInfo(CardInfo &out) const {
+  out = CardInfo{};
+  if (!mounted_) return false;
+  SdCard *c = SD.sdfs.card();
+  if (c == nullptr) return false;
+  out.card_type         = c->type();
+  out.fat_type          = fatType();
+  out.bytes_per_cluster = bytesPerCluster();
+  cid_t cid;
+  if (c->readCID(&cid)) {          // memcpy of the CID cached at SD.begin() — no card traffic
+    memcpy(out.cid, &cid, sizeof(out.cid));
+    out.cid_valid = true;
+  }
+  csd_t csd;
+  if (c->readCSD(&csd)) {
+    out.sectors   = sdCardCapacity(&csd);
+    out.csd_valid = true;
+  }
+  return true;
 }
 
 uint8_t SdManager::readFrame(uint16_t frame_index, uint8_t *dest,
@@ -326,15 +376,24 @@ uint8_t SdManager::readFrame(uint16_t frame_index, uint8_t *dest,
 
   uint32_t offset = pattern_header_byte_count
                     + (uint32_t)frame_index * info_.frame_size;
-  if (!file_.seek(offset)) return CE_SD_FILE_ERROR;
+  // Per-phase timing (sd_slow attribution): seek = FAT-chain walk or O(1) on a
+  // contiguous file; body = the multi-sector data read (one CMD18 restart when
+  // non-sequential); tail = the 2-byte CRC trailer (usually the cached sector).
+  uint32_t t = micros();
+  bool ok = file_.seekSet(offset);
+  last_seek_us_ = micros() - t;
+  if (!ok) { last_body_us_ = last_tail_us_ = 0; return CE_SD_FILE_ERROR; }
 
-  if ((size_t)file_.read(dest, body_len) != body_len) return CE_SD_FILE_ERROR;
+  t = micros();
+  ok = (size_t)file_.read(dest, body_len) == body_len;
+  last_body_us_ = micros() - t;
+  if (!ok) { last_tail_us_ = 0; return CE_SD_FILE_ERROR; }
 
   uint8_t crc_bytes[pattern_frame_crc_byte_count];
-  if ((size_t)file_.read(crc_bytes, pattern_frame_crc_byte_count) !=
-      pattern_frame_crc_byte_count) {
-    return CE_SD_FILE_ERROR;
-  }
+  t = micros();
+  ok = (size_t)file_.read(crc_bytes, pattern_frame_crc_byte_count) == pattern_frame_crc_byte_count;
+  last_tail_us_ = micros() - t;
+  if (!ok) return CE_SD_FILE_ERROR;
 
   // Frame magic "FR".
   if (dest[0] != 'F' || dest[1] != 'R') return CE_FRAME_CRC;

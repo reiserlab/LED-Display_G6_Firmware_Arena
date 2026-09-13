@@ -47,4 +47,5 @@ GET_SPI_CLOCK_CMD           = 0xC6   # returns uint16 LE MHz
 GET_HEALTH_CMD              = 0xCA   # [01 CA] read-only health telemetry + reset-surviving breadcrumb (issue #50); 66-byte LE payload, see test_health.py
 GET_CRASHREPORT_CMD         = 0xCC   # [01 CC] raw 128 B PJRC CrashReport region (0x2027FF80..); gate on 0xCB flags bit 2
 GET_FIRMWARE_VERSION_CMD    = 0xCB   # [01 CB] build identity {ver, rows, cols, flags, sha[8], date[10], branch[24]} = 46 bytes; see test_firmware_version.py
+GET_SD_INFO_CMD             = 0xCD   # [01 CD] SD card identity + geometry {ver, flags, card_type, fat_type, sectors u32, bytes_per_cluster u32, cid[16], maint, res} = 30 bytes; gate on 0xCB flags bit 5
 ALL_ON_CMD                  = 0xFF

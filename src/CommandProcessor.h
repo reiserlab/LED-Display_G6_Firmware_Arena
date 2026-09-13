@@ -90,6 +90,21 @@ class CommandProcessor {
   // refresh of every trial is recorded even if it repeats the previous one).
   uint16_t tel_last_frame_   = 0xFFFF;
   uint16_t tel_last_pattern_ = 0xFFFF;
+  // SD fast path (2026-09-13). frame_buf_is_frame_: frame_buf_ holds the frame
+  // cur_frame_index_ of the open pattern, loaded by a successful loadFrame and
+  // not overwritten since (every other writer of frame_buf_ — glyph, all-on,
+  // dark, stream, PSRAM index — clears it; AO mode/LUT changes clear it too so
+  // the next 0x70 re-derives the outputs). A SET_FRAME_POSITION for that same
+  // index is then answered without touching the SD card.
+  bool     frame_buf_is_frame_ = false;
+  // Request→presentation instrumentation (FRAME.req_age_us / superseded).
+  uint32_t last_cmd_rx_us_   = 0;      // dispatch entry of the command being handled
+  uint32_t pending_req_us_   = 0;      // set by handleSetFramePosition before loadFrame
+  bool     pending_req_valid_ = false;
+  uint32_t frame_req_us_     = 0;      // request/decision time of the frame now in frame_buf_
+  uint8_t  frame_src_flags_  = 0;      // Telemetry::kFrameFlag*
+  uint16_t loads_since_frame_rec_ = 0; // loadFrame successes since the last FRAME record
+  uint32_t open_reads_       = 0;      // readFrame calls since the pattern was opened (STATE sd_reads)
 
   // Digital IO roles (#135, SET_DIO_ROLE 0xAC). Ports are 1-based on the wire
   // (== the board's "Digital IO 1/2 (5V)" BNC silkscreen == 0xAA channel);
@@ -275,6 +290,7 @@ class CommandProcessor {
   void handleGetFirmwareVersion();                       // get-firmware-version (0xCB) — compiled-in git identity (src/Version.h)
   void handleSetTelemetry(const ParsedCommand &cmd);     // set-telemetry (0xA8) — events on/off (src/Telemetry.h); bits 5/6 = watchdog starve/off (Health.h)
   void handleGetCrashReport();                           // get-crashreport (0xCC) — raw 128 B PJRC CrashReport region, not cleared
+  void handleGetSdInfo();                                // get-sd-info (0xCD) — card CID/CSD identity + volume geometry, O(1)
   void handleGetTelemetryBlock(const ParsedCommand &cmd);// get-telemetry-block (0xA9) — ack cursor + framed chunk of ring records
   void handleDisplayPsramIndex(const ParsedCommand &cmd);
   void handlePsramPlay(const ParsedCommand &cmd);
@@ -305,6 +321,7 @@ class CommandProcessor {
   void serviceClosedLoop();
   void servicePsramPlay();               // V2 auto-advance (LAB-41/42)
   bool loadFrame(uint16_t frame_index);  // false on SD/CRC error (shows glyph)
+  void flushOpenReads();                 // STATE(sd_reads) for the pattern being left
 
   // Helpers.
   void fillFrameBufferAllOn(uint16_t block_byte_count);

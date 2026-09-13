@@ -148,6 +148,7 @@ struct Stats {
   uint32_t sd_read_max_us  = 0;  // longest readFrame() since boot
   uint32_t last_sd_read_us = 0;  // most recent readFrame() duration (telemetry FRAME.sd_load_us)
   uint32_t cmd70_count     = 0;  // SET_FRAME_POSITION (0x70) commands received
+  uint32_t cmd70_same_index = 0; // 0x70s answered without an SD read (index already in frame_buf_; SD fast path B). RAM only, not in GET_HEALTH
   uint32_t reset_cause     = 0;  // SRC_SRSR captured once at boot, then cleared
   uint32_t wdog_kicks      = 0;  // watchdog refreshes this boot
 

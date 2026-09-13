@@ -71,6 +71,8 @@ from .telemetry_codec import (
     ST_BOOT,
     ST_RING_OVERRUN,
     ST_SD_OPEN,
+    ST_SD_LAYOUT,
+    ST_SD_READS,
     ST_STATE_CHANGE,
     ST_TELEMETRY,
     SYNTHETIC_CMD,
@@ -440,7 +442,14 @@ def test_frame_storm_yields_frame_records_in_index_order(transport, pat):
 
     frames = [r for r in recs if r.type == REC_FRAME]
     assert len(frames) >= 150, f"expected ~{n} FRAME records at a 5 ms pace, got {len(frames)}"
-    assert all(len(r.raw) == 20 for r in frames), "FRAME record is 20 B (sd_load_us is u32)"
+    assert all(len(r.raw) == 26 for r in frames), "FRAME record is 26 B (ring v2: req_age_us u32, superseded, flags)"
+    assert all(r.fields["sd_read"] for r in frames), "Mode-3 frames come from SD reads (flags bit0)"
+    assert all(r.fields["req_age_us"] < 5_000_000 for r in frames), "dispatch→SPI age is well under 5 s"
+    layouts = [r for r in states if r.fields["kind"] == ST_SD_LAYOUT]
+    assert layouts, "trial start records STATE(sd_layout) after sd_open"
+    assert layouts[-1].fields["sectors_per_cluster"] > 0
+    reads = [r for r in states if r.fields["kind"] == ST_SD_READS]
+    assert reads and reads[-1].fields["reads"] >= 150, "STOP records STATE(sd_reads) for the closed pattern"
     got_idx = [r.fields["idx"] for r in frames]
     # The displayed sequence is an in-order subsequence of the commanded one
     # (two 0x70 inside one refresh period display only the second), and it ends

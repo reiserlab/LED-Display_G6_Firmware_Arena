@@ -155,6 +155,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
   // Health breadcrumb (issue #50): "dispatching opcode X". Handlers that hit
   // SD/SPI re-mark with their own op (innermost wins); cleared after the switch.
   Health::mark(Health::OP_CMD, command_byte);
+  last_cmd_rx_us_ = t_rx_us;  // FRAME.req_age_us origin for SET_FRAME_POSITION
 
   // Synchronous handlers that legitimately run longer than the 2 s watchdog
   // (SD format, panel ISP program/verify, ZIP entry collection over 258 files)
@@ -260,6 +261,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
 
     case GET_CRASHREPORT_CMD:
       handleGetCrashReport();
+      break;
+
+    case GET_SD_INFO_CMD:
+      handleGetSdInfo();
       break;
 
     case SET_DIAG_OUTPUT_CMD:
@@ -816,6 +821,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         break;
       }
       ao_mode_ = new_mode;
+      frame_buf_is_frame_ = false;  // next 0x70 re-runs loadFrame's output derivation (SD fast path B)
       if (ao_mode_ == 1) {
         ao_lut_len_ = 0;  // frame_number owns the DAC — stop LUT playback
         // Reflect the current position immediately if a pattern is open.
@@ -879,6 +885,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case SET_AO_LUT_CMD: {
+      frame_buf_is_frame_ = false;  // a new LUT must be applied by the next loadFrame (SD fast path B)
       // [len, 0xA2, mode, step_hz_lo, step_hz_hi, count_lo, count_hi, mv[0..n-1]×2]
       //   mode     uint8:  0 = frame-locked, 1 = time-based
       //   step_hz  uint16 LE: step rate for mode 1 (ignored for mode 0; max 1000 Hz)
@@ -996,6 +1003,7 @@ void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
 
   // Copy the frame payload into our owned buffer so the network layer can
   // recycle its receive slot.
+  frame_buf_is_frame_ = false;  // streamed frame replaces the SD frame
   memcpy(frame_buf_, buf + stream_header_byte_count, frame_byte_count);
   frame_byte_count_  = (uint16_t)frame_byte_count;
   block_byte_count_  = block_size;
@@ -1237,6 +1245,7 @@ void CommandProcessor::handleGetFirmwareVersion() {
   if (fw_has_telemetry) flags |= fw_flag_telemetry;  // hosts gate SET_TELEMETRY on this, not on 0xC2 bit 7
   if (fw_has_crashreport) flags |= fw_flag_crashreport;  // hosts gate GET_CRASHREPORT 0xCC (+ HEALTH v2) on this
   if (fw_freerun_refresh) flags |= fw_flag_freerun_refresh;  // variant marker for run logs: 0x70 no longer touches the PIT
+  if (fw_sd_fastpath)     flags |= fw_flag_sd_fastpath;      // O(1) seeks + same-index skip + FRAME 26 B + GET_SD_INFO 0xCD
 
   uint8_t payload[fw_version_payload_len];
   uint8_t *p = payload;
@@ -1255,6 +1264,41 @@ void CommandProcessor::handleGetFirmwareVersion() {
              fw_git_sha, fw_git_dirty ? "-dirty" : "", fw_git_branch, fw_build_date,
              (unsigned)panel_count_per_frame_row, (unsigned)panel_count_per_frame_col,
              fw_debug_build ? " DEBUG_SERIAL" : "");
+}
+
+// ---------------------------------------------------------------------------
+// get-sd-info (0xCD): SD card identity + volume geometry, 30-byte payload.
+// Every card-comparison / stall measurement must be attributable to a specific
+// card: SdFat caches CID and CSD at mount, so this is O(1) with no card traffic.
+//   off  0  u8   ver = 1
+//   off  1  u8   flags  bit0 mounted, bit1 cid valid, bit2 csd valid
+//   off  2  u8   card_type  SdFat type(): 0 none, 1 SD1, 2 SD2, 3 SDHC/SDXC
+//   off  3  u8   fat_type   12 / 16 / 32, 64 = exFAT, 0 unknown
+//   off  4  u32  sectors    capacity in 512 B sectors (CSD)
+//   off  8  u32  bytes_per_cluster
+//   off 12  u8[16] cid      raw CID: MID @0, OID @1-2, PNM @3-7, PRV @8, PSN @9-12, MDT @13-14, CRC @15
+//   off 28  u8   sd_status_maint  SD 6.0 §4.18 maintenance support bits (SD_STATUS b328/329); 0xFF = not read
+//   off 29  u8   reserved
+// Status 1 (payload still sent, flags bit0 clear) when no card is mounted.
+// Gated on GET_FIRMWARE_VERSION flags bit 5 (fw_flag_sd_fastpath).
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::handleGetSdInfo() {
+  SdManager::CardInfo ci;
+  const bool mounted = sd_.cardInfo(ci);
+  uint8_t payload[30];
+  uint8_t *p = payload;
+  p = put8(p, 1);
+  p = put8(p, (uint8_t)((mounted ? 1 : 0) | (ci.cid_valid ? 2 : 0) | (ci.csd_valid ? 4 : 0)));
+  p = put8(p, ci.card_type);
+  p = put8(p, ci.fat_type);
+  p = put32(p, ci.sectors);
+  p = put32(p, ci.bytes_per_cluster);
+  memcpy(p, ci.cid, sizeof(ci.cid)); p += sizeof(ci.cid);
+  p = put8(p, 0xFF);  // SD_STATUS maintenance bits: SdFat 2.1.2 exposes no ACMD13 reader
+  p = put8(p, 0);
+  static_assert(sizeof(payload) == 30, "GET_SD_INFO payload is 30 bytes");
+  current_source_->sendResponse(GET_SD_INFO_CMD, mounted ? 0 : 1, payload, (size_t)(p - payload));
 }
 
 // ---------------------------------------------------------------------------
@@ -1499,7 +1543,21 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
   // only happens on pattern open / ALL_ON / glyph / stream size change, and
   // those paths keep their disarm+arm. No double buffer is needed.
   Health::mark(Health::OP_CMD_PRELOAD, SET_FRAME_POSITION_CMD);
+  // SD fast path B (2026-09-13): the requested frame is already in frame_buf_
+  // (same index, loaded by a successful loadFrame, not overwritten since) →
+  // answer without an SD read. ~24 % of Mode-3 commands repeat the index; each
+  // saved read is one fewer card operation feeding the card's read-count
+  // maintenance (the 30–90 ms stalls). The held buffer already carries this
+  // trial's duty, the live panel display mode and the AO outputs.
+  if (state_ == ArenaState::SHOW_FRAME && frame_buf_is_frame_ && index == cur_frame_index_) {
+    ++Health::stats.cmd70_same_index;
+    Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
+    current_source_->sendResponse(SET_FRAME_POSITION_CMD, 0, "");
+    return;
+  }
   cur_frame_index_ = index;
+  pending_req_us_    = last_cmd_rx_us_;  // FRAME.req_age_us: this command's dispatch time
+  pending_req_valid_ = true;
   if (!loadFrame(cur_frame_index_)) {
     Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
     current_source_->sendResponse(SET_FRAME_POSITION_CMD, 1,
@@ -1530,6 +1588,7 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::buildPsramFrame(uint16_t index) {
+  frame_buf_is_frame_ = false;
   memset(frame_buf_, 0, sizeof(frame_buf_));
   frame_buf_[0] = 'F';
   frame_buf_[1] = 'R';
@@ -1648,8 +1707,13 @@ void CommandProcessor::transmitOnRefresh() {
     if (cur_frame_index_ != tel_last_frame_ || pattern_id_ != tel_last_pattern_) {
       tel_last_frame_   = cur_frame_index_;
       tel_last_pattern_ = pattern_id_;
+      uint16_t superseded = loads_since_frame_rec_ > 0 ? (uint16_t)(loads_since_frame_rec_ - 1) : 0;
+      loads_since_frame_rec_ = 0;
       Telemetry::frame(t0, cur_frame_index_, pattern_id_,
-                       Health::stats.last_sd_read_us, micros() - t0);
+                       Health::stats.last_sd_read_us, micros() - t0,
+                       t0 - frame_req_us_,                       // dispatch/decision → SPI start
+                       superseded > 0xFF ? 0xFF : (uint8_t)superseded,
+                       frame_src_flags_);
     }
   }
 }
@@ -1969,7 +2033,24 @@ void CommandProcessor::serviceClosedLoop() {
   if (changed) loadFrame(cur_frame_index_);
 }
 
+// STATE(sd_reads): how many readFrame calls the pattern being closed / left
+// received — the host cannot derive it from FRAME records (replaced-before-
+// transfer frames are not FRAMEs) nor, since same-index 0x70s skip the read,
+// from accepted commands. Emitted from enterAllOff and enterPatternMode; the
+// counter restarts at 0 so a STOP followed by a new trial emits it once.
+void CommandProcessor::flushOpenReads() {
+  if (open_reads_ == 0) return;
+  Telemetry::state(Telemetry::ST_SD_READS, 0,
+                   open_reads_ > 0xFFFF ? 0xFFFF : (uint16_t)open_reads_);
+  open_reads_ = 0;
+}
+
 bool CommandProcessor::loadFrame(uint16_t frame_index) {
+  // Request/decision time of the frame about to be loaded: the 0x70 dispatch
+  // when handleSetFramePosition asked for it, else now (Mode 2/4 decided here).
+  frame_req_us_ = pending_req_valid_ ? pending_req_us_ : micros();
+  pending_req_valid_ = false;
+  frame_buf_is_frame_ = false;  // being overwritten; set again below on success
   // Health (#50): breadcrumb + readFrame timing. Only caller of readFrame.
   Health::mark(Health::OP_SD_READ);
   uint32_t t_sd = micros();
@@ -1977,11 +2058,23 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   t_sd = micros() - t_sd;
   Health::clear();
   ++Health::stats.sd_reads;
+  ++open_reads_;
   if (t_sd > Health::stats.sd_read_max_us) Health::stats.sd_read_max_us = t_sd;
   Health::stats.last_sd_read_us = t_sd;  // -> telemetry FRAME.sd_load_us
   if (t_sd > Telemetry::kSdSlowThresholdUs) {
+    // Attribute the stall to the slowest phase of the read (seek = FAT walk /
+    // O(1); body = data sectors incl. the CMD18 restart; tail = CRC trailer),
+    // then the card's error context: did SdFat see an error / retry, or did
+    // the card simply hold the bus (housekeeping)?
     uint32_t hundreds = t_sd / 100;
-    Telemetry::state(Telemetry::ST_SD_SLOW, 0, hundreds > 0xFFFF ? 0xFFFF : (uint16_t)hundreds);
+    uint32_t s = sd_.lastSeekUs(), b = sd_.lastBodyUs(), c = sd_.lastTailUs();
+    uint8_t phase = (s >= b && s >= c) ? Telemetry::kSdSlowPhaseSeek
+                  : (b >= c)           ? Telemetry::kSdSlowPhaseBody
+                                       : Telemetry::kSdSlowPhaseTail;
+    if (err != CE_NONE) phase |= Telemetry::kSdSlowErrorFlag;
+    Telemetry::state(Telemetry::ST_SD_SLOW, phase, hundreds > 0xFFFF ? 0xFFFF : (uint16_t)hundreds);
+    Telemetry::state(Telemetry::ST_SD_SLOW_CTX, sd_.cardErrorCode(),
+                     (uint16_t)(sd_.cardErrorData() & 0xFFFF));
   }
   if (err != CE_NONE) {
     DBG_PRINTF("[cmd] loadFrame %u failed err=%u\n",
@@ -1991,6 +2084,10 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   }
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + (uint32_t)sd_.info().num_panels * block_byte_count_);
+  frame_buf_is_frame_ = true;
+  frame_src_flags_ = (uint8_t)(Telemetry::kFrameFlagSdRead
+                               | (sd_.contiguous() ? Telemetry::kFrameFlagContiguous : 0));
+  if (loads_since_frame_rec_ < 0xFFFF) ++loads_since_frame_rec_;
   patchDispMode();
   patchTrialDuty();
   if (ao_mode_ == 1) {
@@ -2026,6 +2123,7 @@ void CommandProcessor::enterAllOff() {
   state_ = ArenaState::ALL_OFF;
   frame_byte_count_ = 0;
   Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::ALL_OFF, pattern_id_);
+  flushOpenReads();
   trial_duty_ = 0;  // trial over — per-trial duty does not outlive it (#33)
 }
 
@@ -2062,6 +2160,8 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
                                         int16_t frame_rate_hz, int16_t gain,
                                         uint16_t init_frame, uint16_t duration_ticks) {
   spi_.disarmRefreshTimer();
+  flushOpenReads();              // STATE(sd_reads) for the pattern being left, if any
+  frame_buf_is_frame_ = false;   // a new pattern: whatever is buffered is not its frame
 
   Health::mark(Health::OP_SD_OPEN);  // #50 breadcrumb: SD open + header validate
   uint8_t err = sd_.openPattern(pattern_id);
@@ -2072,6 +2172,14 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
                (unsigned)pattern_id, (unsigned)err);
     showError(err);
     return false;
+  }
+  // Layout of the file we will random-access: contiguous (O(1) seeks) or not,
+  // volume type, cluster size — the context for every sd_load_us in this trial.
+  {
+    uint32_t spc = sd_.sectorsPerCluster();
+    Telemetry::state(Telemetry::ST_SD_LAYOUT,
+                     (uint8_t)((sd_.contiguous() ? 1 : 0) | (sd_.fatType() == 64 ? 2 : 0)),
+                     spc > 0xFFFF ? 0xFFFF : (uint16_t)spc);
   }
 
   pattern_id_      = pattern_id;
@@ -2105,6 +2213,7 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
 void CommandProcessor::showError(uint8_t code) {
   spi_.disarmRefreshTimer();
   block_byte_count_ = G6::block_byte_count_gs16;
+  frame_buf_is_frame_ = false;
   frame_byte_count_ = G6Error::buildErrorFrame(frame_buf_, code, panel_count_per_frame);
   state_ = ArenaState::ERROR_DISPLAY;
   error_until_ms_ = millis() + error_display_hold_ms;
@@ -2190,6 +2299,7 @@ void CommandProcessor::fillFrameBufferAllOn(uint16_t block_byte_count) {
   // Synthesize an all-max-pixel frame using the current panel display mode.
   // Block layout: [header][cmd][200 pixel bytes = 0xFF][duty_cycle=0xFF].
   // Parity is recomputed per block.
+  frame_buf_is_frame_ = false;
   memset(frame_buf_, 0, sizeof(frame_buf_));
 
   // Frame prefix: "FR" + frame index 0 — informational only, matches the
@@ -2222,6 +2332,7 @@ void CommandProcessor::fillFrameBufferDark() {
   // HOLD dark after transmission stops. A fixed Persistent opcode (not
   // panel_disp_mode_) guarantees blanking even from Triggered/Gated modes,
   // mirroring how the error-glyph path uses a mode-independent opcode.
+  frame_buf_is_frame_ = false;
   memset(frame_buf_, 0, sizeof(frame_buf_));
   frame_buf_[0] = 'F';
   frame_buf_[1] = 'R';
