@@ -7,7 +7,8 @@ jumps) — while draining the controller's telemetry ring (0xA9, ack cursor) int
 NDJSON log with the SAME row shapes the Arena Studio + bridge write:
 
     {"type":"frame_schema","level":"behavior_v2",...,"t0":<epoch ms>}
-    {"type":"log","event":"run_metadata","tool":"sd_stall_test","firmware":"…","sd_card":{…},"args":{…}}
+    {"type":"log","event":"run_metadata","tool":"sd_stall_test","firmware":"…","sd_card":{…},
+     "controller_settings":{…},"args":{…}}
     {"event":"stream_schema","streams":{"cc":…,"cf":…,"cs":…}}
     ["a",  t_off_ms, dt_ms, "<request hex>", status|null, rx_off_ms]        host command echo
     ["cc", rx_ms, t_us, seq, cmd, status, "<req hex>"]                       controller CMD record
@@ -17,25 +18,33 @@ NDJSON log with the SAME row shapes the Arena Studio + bridge write:
 
 so one analyzer serves both: webDisplayTools/scripts/telemetry-report.py. The inline summary
 answers the card question on its own: stall clusters, their spacing in reads, durations and
-phases, SD read cost by index step, and the card identity (GET_SD_INFO 0xCD) they belong to.
+phases, SD read cost by index step, request→presentation age, and the card identity
+(GET_SD_INFO 0xCD) they belong to.
+
+Measurement discipline (Codex review 2026-09-13):
+  * the workload is RESPONSE-PACED (single-flight request/response): a missed send slot is skipped,
+    never caught up with a burst; missed slots, achieved rate and long send intervals are reported;
+  * only records with seq > the boundary taken after the pre-run backlog drain enter the summary
+    (the backlog stays in the log, tagged by seq);
+  * capture validity is tracked (drain errors, ring disabled/heap collision, seq gaps, dropped) and
+    an invalid capture is reported and exits 4 — a run with no telemetry is never "0 stalls";
+  * stall clusters are grouped on the CONTROLLER clock (unwrapped t_us), segmented at boot records;
+  * statistics are incremental (bounded reservoirs) — nothing grows with run length;
+  * reads are counted from the controller (STATE sd_reads) with index changes as the running proxy.
 
 Why: the card stalls 23–89 ms every ~24.5k reads of a large pattern (card-internal read-count
 maintenance, 2026-09-13). Acceptable display freeze: 5 ms target / 10 ms worst case. A 20-minute
 run at 200 Hz (≈ 5 baseline cycles) SCREENS a card; qualification needs hours and a second specimen.
 
 Usage:
-    # 20 min at 200 Hz on SD pattern 36 (the 200-frame bar), 90° jumps every 100 samples
     python3 scripts/sd_stall_test.py --port /dev/cu.usbmodem123456 --pattern 36 --label sandisk-32g
-
-    # working-set test on the same file: indices restricted to the first 50 frames
-    python3 scripts/sd_stall_test.py --port … --pattern 36 --window 50 --minutes 20
-
-    # stop after N accepted reads instead of a time budget
-    python3 scripts/sd_stall_test.py --port … --pattern 36 --reads 150000
+    python3 scripts/sd_stall_test.py --port … --pattern 36 --window 50 --minutes 20   # working-set test
+    python3 scripts/sd_stall_test.py --port … --pattern 36 --reads 150000              # stop after ~N reads
 
 Requires pyserial (system python3 has it; the pixi env may not). Exit codes: 0 normal end,
 1 startup failure (no controller / pattern / telemetry), 2 bad arguments, 3 controller stopped
-answering (fault) — the log is complete either way.
+answering (fault), 4 capture invalid (telemetry incomplete — the log is complete but the summary
+must not be used for a card comparison).
 """
 
 from __future__ import annotations
@@ -56,8 +65,11 @@ sys.path.insert(0, REPO_ROOT)
 from tests.commands import (  # noqa: E402
     GET_CONTROLLER_INFO_CMD,
     GET_FIRMWARE_VERSION_CMD,
+    GET_PANEL_DISPLAY_MODE_CMD,
     GET_PATTERN_INFO_CMD,
+    GET_REFRESH_RATE_CMD,
     GET_SD_INFO_CMD,
+    GET_SPI_CLOCK_CMD,
     GET_TELEMETRY_BLOCK_CMD,
     SET_FRAME_POSITION_CMD,
     SET_TELEMETRY_CMD,
@@ -70,7 +82,9 @@ from tests.transport import SerialTransport, build_frame  # noqa: E402
 CAP_HEALTH = 0x80
 FW_FLAG_TELEMETRY = 0x04
 FW_FLAG_SD_FASTPATH = 0x20
+FW_SD_SLOW_THRESHOLD_MS = 10.0     # ring v2 firmware emits sd_slow above this (20 ms on v1)
 CLUSTER_GAP_S = 5.0
+RESERVOIR = 20000                  # bounded per-class latency samples
 SD_MANUFACTURERS = {0x01: "Panasonic", 0x02: "Toshiba/Kioxia", 0x03: "SanDisk", 0x09: "ATP", 0x13: "KingMax",
                     0x1B: "Samsung", 0x1D: "ADATA", 0x27: "Phison", 0x28: "Lexar", 0x31: "Silicon Power",
                     0x41: "Kingston", 0x5D: "Swissbit", 0x6F: "STMicro", 0x74: "Transcend", 0x76: "Patriot",
@@ -84,6 +98,13 @@ def now_ms() -> float:
 
 def hexstr(b: bytes) -> str:
     return " ".join(f"{x:02x}" for x in b)
+
+
+def pct(values, p):
+    if not values:
+        return None
+    s = sorted(values)
+    return s[min(len(s) - 1, int(p * len(s)))]
 
 
 def decode_firmware_version(payload: bytes) -> dict:
@@ -162,18 +183,176 @@ class Log:
         self.f.close()
 
 
-class Drainer:
-    """Ack-cursor ring drain (lossless): records are freed only by the NEXT request's ack."""
+class Reservoir:
+    """Bounded uniform sample (Algorithm R) with exact count/max."""
 
-    def __init__(self, t: SerialTransport, log: Log, timeout: float):
+    def __init__(self, cap: int = RESERVOIR):
+        self.cap = cap
+        self.buf: list = []
+        self.n = 0
+        self.max = 0
+        self.rng = random.Random(7)
+
+    def add(self, v) -> None:
+        self.n += 1
+        if v > self.max:
+            self.max = v
+        if len(self.buf) < self.cap:
+            self.buf.append(v)
+        else:
+            j = self.rng.randrange(self.n)
+            if j < self.cap:
+                self.buf[j] = v
+
+    def summary(self) -> dict:
+        if not self.n:
+            return {"n": 0}
+        return {"n": self.n, "p50": statistics.median(self.buf), "p90": pct(self.buf, 0.9),
+                "p99": pct(self.buf, 0.99), "max": self.max}
+
+
+class Stats:
+    """Incremental analysis of the CURRENT run's ring records (seq > boundary)."""
+
+    def __init__(self, gap_ms: float):
+        self.gap_ms = gap_ms
+        self.cmds70 = 0
+        self.index_changes = 0
+        self.last_idx = None
+        self.frames = 0
+        self.reads_fw = None            # STATE sd_reads at STOP (arg << code)
+        self.slow_reads = 0             # every sd_slow record (firmware threshold)
+        self.stalls: list = []          # dicts over gap_ms: t_s (controller, unwrapped), ms, phase, err, cmds, idx
+        self.step = {k: Reservoir() for k in ("+1", "-1", "small", "jump")}
+        self.ages = Reservoir()
+        self.superseded_frames = 0
+        self.superseded_total = 0
+        self.contiguous_frames = 0
+        self.v2_frames = 0
+        self.prev_idx = None
+        self.layout = None
+        # controller clock: unwrap u32 micros; segment at boot records
+        self.t_base = 0
+        self.t_last = None
+        self.segment = 0
+        self.boots = 0
+        self.ring_disabled = False
+
+    def ctl_time_s(self, t_us: int) -> float:
+        if self.t_last is not None and t_us < self.t_last and (self.t_last - t_us) > 0x80000000:
+            self.t_base += 1 << 32
+        self.t_last = t_us
+        return (self.t_base + t_us) / 1e6
+
+    def feed(self, r) -> None:
+        f = r.fields
+        t_s = self.ctl_time_s(r.t_us)
+        if r.type == tc.REC_CMD:
+            if f["cmd"] == SET_FRAME_POSITION_CMD and f["status"] == 0:
+                self.cmds70 += 1
+                p = f["params"]
+                if len(p) >= 4:
+                    idx = int(p[0:2], 16) | (int(p[2:4], 16) << 8)
+                    if idx != self.last_idx:
+                        self.index_changes += 1
+                        self.last_idx = idx
+        elif r.type == tc.REC_FRAME:
+            self.frames += 1
+            if self.last_idx is None:
+                self.last_idx = f["idx"]
+            if self.prev_idx is not None:
+                d = f["idx"] - self.prev_idx
+                cls = "+1" if d == 1 else "-1" if d == -1 else "small" if abs(d) < 10 else "jump"
+                self.step[cls].add(f["sd_load_us"])
+            self.prev_idx = f["idx"]
+            if "req_age_us" in f:
+                self.v2_frames += 1
+                self.ages.add(f["req_age_us"])
+                if f["superseded"]:
+                    self.superseded_frames += 1
+                    self.superseded_total += f["superseded"]
+                if f["contiguous"]:
+                    self.contiguous_frames += 1
+        elif r.type == tc.REC_STATE:
+            k = f["kind"]
+            if k == tc.ST_SD_SLOW:
+                ms = f["arg"] / 10.0
+                self.slow_reads += 1
+                if ms > self.gap_ms:
+                    self.stalls.append({"t_s": t_s, "seg": self.segment, "ms": ms, "phase": f.get("phase", "unknown"),
+                                        "err": bool(f.get("read_error")), "cmds": self.cmds70, "idx": self.index_changes})
+            elif k == tc.ST_SD_READS:
+                self.reads_fw = f.get("reads", f["arg"])
+            elif k == tc.ST_SD_LAYOUT:
+                self.layout = {"contiguous": f["contiguous"], "exfat": f["exfat"], "sectors_per_cluster": f["sectors_per_cluster"]}
+            elif k == tc.ST_BOOT:
+                self.boots += 1
+                self.segment += 1
+                self.t_base = 0
+                self.t_last = None
+            elif k == tc.ST_RING_OVERRUN and f["code"] == tc.OVERRUN_CODE_HEAP_COLLISION:
+                self.ring_disabled = True
+
+    def clusters(self) -> list:
+        out: list = []
+        for s in self.stalls:
+            if out and s["seg"] == out[-1][-1]["seg"] and (s["t_s"] - out[-1][-1]["t_s"]) < CLUSTER_GAP_S:
+                out[-1].append(s)
+            else:
+                out.append([s])
+        return out
+
+    def summary(self) -> dict:
+        cl = self.clusters()
+        spacing_cmds = [c[0]["cmds"] - p[0]["cmds"] for p, c in zip(cl, cl[1:]) if c[0]["seg"] == p[0]["seg"]]
+        spacing_idx = [c[0]["idx"] - p[0]["idx"] for p, c in zip(cl, cl[1:]) if c[0]["seg"] == p[0]["seg"]]
+        spacing_s = [round(c[0]["t_s"] - p[0]["t_s"], 1) for p, c in zip(cl, cl[1:]) if c[0]["seg"] == p[0]["seg"]]
+        return {
+            "accepted_0x70": self.cmds70,
+            "index_changes": self.index_changes,
+            "reads_fw": self.reads_fw,
+            "frames": self.frames,
+            "reads_per_cmd": round((self.reads_fw or self.index_changes) / self.cmds70, 3) if self.cmds70 else None,
+            "layout": self.layout,
+            "slow_reads_fw_threshold": self.slow_reads,
+            "stalls_over_gap": len(self.stalls),
+            "clusters": len(cl),
+            "clusters_per_1e5_cmds": round(len(cl) * 1e5 / self.cmds70, 2) if self.cmds70 else None,
+            "cluster_ms": [[round(s["ms"], 1) for s in c] for c in cl],
+            "cluster_phases": [[s["phase"] for s in c] for c in cl],
+            "cluster_t_s": [round(c[0]["t_s"], 1) for c in cl],
+            "spacing_cmds": spacing_cmds,
+            "spacing_cmds_median": statistics.median(spacing_cmds) if spacing_cmds else None,
+            "spacing_index_changes_median": statistics.median(spacing_idx) if spacing_idx else None,
+            "spacing_s_median": statistics.median(spacing_s) if spacing_s else None,
+            "worst_ms": max((s["ms"] for s in self.stalls), default=0.0),
+            "step_cost_us": {k: v.summary() for k, v in self.step.items() if v.n},
+            "req_age_us": dict(self.ages.summary(), over_gap=sum(1 for a in self.ages.buf if a > self.gap_ms * 1000)) if self.v2_frames else None,
+            "superseded_share": round(self.superseded_frames / self.v2_frames, 3) if self.v2_frames else None,
+            "contiguous_share": round(self.contiguous_frames / self.v2_frames, 3) if self.v2_frames else None,
+            "controller_boots_during_run": self.boots,
+        }
+
+
+class Drainer:
+    """Ack-cursor ring drain: records are freed only by the NEXT request's ack (a lost reply is
+    re-served). Capture validity is tracked; records with seq <= boundary are logged but not analysed."""
+
+    def __init__(self, t: SerialTransport, log: Log, timeout: float, stats: Stats):
         self.t = t
         self.log = log
         self.timeout = timeout
+        self.stats = stats
         self.ack = tc.NO_ACK
         self.tracker = tc.SeqTracker()
         self.rows = {"cc": 0, "cf": 0, "cs": 0}
         self.errors = 0
-        self.records = []   # (rec, rx_ms) kept for the inline summary
+        self.blocks = 0
+        self.boundary = None            # seq of the last backlog record; analysis starts after it
+        self.last_header = None
+        self.dropped_delta = 0
+        self.disabled_seen = False
+        self.events_off_seen = False
 
     def drain(self, max_chunks: int = 10) -> int:
         n = 0
@@ -194,6 +373,14 @@ class Drainer:
             except ValueError:
                 self.errors += 1
                 return n
+            self.blocks += 1
+            if self.last_header is not None and hdr.dropped > self.last_header.dropped:
+                self.dropped_delta += hdr.dropped - self.last_header.dropped
+            self.last_header = hdr
+            if hdr.flags & tc.FLAG_HEAP_COLLISION:
+                self.disabled_seen = True
+            if not (hdr.flags & tc.FLAG_EVENTS_ENABLED):
+                self.events_off_seen = True
             self.tracker.feed(recs)
             for r in recs:
                 f = r.fields
@@ -209,7 +396,8 @@ class Drainer:
                 else:
                     self.log.write(["cs", rx, r.t_us, r.seq, f["kind"], f["code"], f["arg"]])
                     self.rows["cs"] += 1
-                self.records.append((r, rx))
+                if self.boundary is not None and ((r.seq - self.boundary) & 0xFFFFFFFF) < 0x80000000 and r.seq != self.boundary:
+                    self.stats.feed(r)
                 n += 1
             if recs:
                 self.ack = recs[-1].seq
@@ -217,57 +405,17 @@ class Drainer:
                 break
         return n
 
+    def set_boundary(self) -> None:
+        self.boundary = self.ack if self.ack != tc.NO_ACK else 0
 
-def summarize(records, gap_ms: float, accepted_reads: int) -> dict:
-    """Inline analysis (a subset of webDisplayTools/scripts/telemetry-report.py)."""
-    stalls = []
-    step = {}
-    prev_idx = None
-    cmds = 0
-    frames = 0
-    ages = []
-    for r, rx in records:
-        f = r.fields
-        if r.type == tc.REC_CMD and f["cmd"] == SET_FRAME_POSITION_CMD and f["status"] == 0:
-            cmds += 1
-        elif r.type == tc.REC_STATE and f["kind"] == tc.ST_SD_SLOW:
-            ms = f["arg"] / 10.0
-            if ms > gap_ms:
-                stalls.append({"rx": rx, "ms": ms, "phase": f.get("phase", "unknown"), "cmds": cmds})
-        elif r.type == tc.REC_FRAME:
-            frames += 1
-            if prev_idx is not None:
-                d = f["idx"] - prev_idx
-                cls = "+1" if d == 1 else "-1" if d == -1 else "small" if abs(d) < 10 else "jump"
-                step.setdefault(cls, []).append(f["sd_load_us"])
-            prev_idx = f["idx"]
-            if "req_age_us" in f:
-                ages.append(f["req_age_us"])
-    clusters = []
-    for s in stalls:
-        if clusters and (s["rx"] - clusters[-1][-1]["rx"]) / 1000.0 < CLUSTER_GAP_S:
-            clusters[-1].append(s)
-        else:
-            clusters.append([s])
-    spacing = [c[0]["cmds"] - p[0]["cmds"] for p, c in zip(clusters, clusters[1:])]
-    return {
-        "accepted_0x70": accepted_reads,
-        "frames": frames,
-        "stalls_over_gap": len(stalls),
-        "clusters": len(clusters),
-        "clusters_per_1e5_cmds": round(len(clusters) * 1e5 / cmds, 2) if cmds else None,
-        "cluster_ms": [[round(s["ms"], 1) for s in c] for c in clusters],
-        "cluster_phases": [[s["phase"] for s in c] for c in clusters],
-        "spacing_cmds_median": statistics.median(spacing) if spacing else None,
-        "spacing_cmds": spacing,
-        "worst_ms": max((s["ms"] for s in stalls), default=0.0),
-        "step_cost_us_p50": {k: statistics.median(v) for k, v in step.items()},
-        "step_cost_us_p99": {k: sorted(v)[min(len(v) - 1, int(0.99 * len(v)))] for k, v in step.items()},
-        "req_age_us": {"p50": statistics.median(ages) if ages else None,
-                       "p99": sorted(ages)[min(len(ages) - 1, int(0.99 * len(ages)))] if ages else None,
-                       "max": max(ages) if ages else None,
-                       "over_gap": sum(1 for a in ages if a > gap_ms * 1000)},
-    }
+    def capture(self) -> dict:
+        gaps_after = [g for g in self.tracker.gaps if self.boundary is None or ((g[1] - self.boundary) & 0xFFFFFFFF) < 0x80000000]
+        valid = (self.errors == 0 and not self.disabled_seen and not self.events_off_seen
+                 and self.dropped_delta == 0 and not gaps_after and self.blocks > 0)
+        return {"valid": valid, "drain_errors": self.errors, "blocks": self.blocks, "rows": dict(self.rows),
+                "ring_disabled": self.disabled_seen, "events_off": self.events_off_seen,
+                "dropped_during_run": self.dropped_delta, "seq_gaps": len(gaps_after),
+                "boot_count": self.last_header.boot_count if self.last_header else None}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -277,13 +425,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--frames", type=int, default=0, help="override the frame count (default: GET_PATTERN_INFO)")
     p.add_argument("--hz", type=float, default=200.0, help="0x70 rate (default 200)")
     p.add_argument("--minutes", type=float, default=20.0, help="run length (default 20; 0 = until --reads / Ctrl-C)")
-    p.add_argument("--reads", type=int, default=0, help="stop after N accepted 0x70s (0 = no limit)")
+    p.add_argument("--reads", type=int, default=0, help="stop after ~N SD reads (index-changing 0x70s; 0 = no limit)")
     p.add_argument("--sigma", type=float, default=1.6, help="random-walk step sigma, frames per sample (default 1.6)")
     p.add_argument("--jump-every", type=int, default=100, help="one jump every N samples (0 = none; default 100)")
     p.add_argument("--jump-deg", type=float, default=90.0, help="jump size in degrees of the pattern's 360° (default 90)")
     p.add_argument("--window", type=int, default=0, help="confine indices to the first N frames (working-set test; 0 = all)")
     p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--gap-ms", type=float, default=10.0, help="stall threshold for the summary (default 10)")
+    p.add_argument("--gap-ms", type=float, default=10.0, help="stall threshold for the summary (default 10; below the firmware's 10 ms only FRAME ages are covered)")
     p.add_argument("--label", default="", help="free text for the log name / metadata (card, experiment)")
     p.add_argument("--log-dir", default="./soak-logs")
     p.add_argument("--timeout", type=float, default=0.5, help="reply timeout, s (default 0.5)")
@@ -297,6 +445,11 @@ def main(argv=None) -> int:
     if args.hz <= 0 or args.gap_ms <= 0:
         print("--hz and --gap-ms must be positive", file=sys.stderr)
         return 2
+    coverage_note = None
+    if args.gap_ms < FW_SD_SLOW_THRESHOLD_MS:
+        coverage_note = (f"--gap-ms {args.gap_ms} is below the firmware sd_slow threshold ({FW_SD_SLOW_THRESHOLD_MS} ms): "
+                         f"reads between the two are only visible through FRAME req_age_us")
+        print("WARNING:", coverage_note, file=sys.stderr)
     os.makedirs(args.log_dir, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     label = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in args.label) or "run"
@@ -309,11 +462,14 @@ def main(argv=None) -> int:
     except Exception as e:
         print(f"cannot open {args.port}: {e}", file=sys.stderr)
         return 1
-    accepted = 0
-    exit_code = 0
+    stats = Stats(args.gap_ms)
     drainer = None
+    exit_code = 0
+    shutdown_verified = False
+    sent = accepted = missed_slots = echo_mismatch = long_intervals = 0
+    period = 1.0 / args.hz
     try:
-        t.command(STOP_DISPLAY_CMD, timeout=2.0)
+        st, _, _, _ = t.command(STOP_DISPLAY_CMD, timeout=2.0)
         st, _, info, _ = t.command(GET_CONTROLLER_INFO_CMD, timeout=2.0)
         if st != 0 or len(info) < 2 or not (info[1] & CAP_HEALTH):
             print("controller does not advertise health/version (0xC2 cap bit 7)", file=sys.stderr)
@@ -331,6 +487,15 @@ def main(argv=None) -> int:
             st, _, sdp, _ = t.command(GET_SD_INFO_CMD, timeout=2.0)
             if len(sdp) >= 30:
                 sd_card = decode_sd_info(bytes(sdp))
+        # runtime settings that change the timing (Codex: identical CLI args ≠ identical controller)
+        settings = {}
+        for name, cmd, fmt in (("refresh_hz", GET_REFRESH_RATE_CMD, "<H"), ("spi_mhz", GET_SPI_CLOCK_CMD, "<H"),
+                               ("panel_disp_mode", GET_PANEL_DISPLAY_MODE_CMD, "<B")):
+            try:
+                st, _, pl, _ = t.command(cmd, timeout=2.0)
+                settings[name] = struct.unpack_from(fmt, bytes(pl))[0] if st == 0 and len(pl) >= struct.calcsize(fmt) else None
+            except Exception:
+                settings[name] = None
         st, _, pip, _ = t.command(GET_PATTERN_INFO_CMD, struct.pack("<H", args.pattern), timeout=2.0)
         if st != 0 or len(pip) < 2:
             print(f"GET_PATTERN_INFO({args.pattern}) failed status={st}", file=sys.stderr)
@@ -342,14 +507,16 @@ def main(argv=None) -> int:
         jump_frames = frames * args.jump_deg / 360.0
         walker = Walker(frames, args.sigma, args.jump_every, jump_frames, args.seed, args.window)
         log.event("run_metadata", tool="sd_stall_test", firmware=fw["label"], sd_card=sd_card, pattern=args.pattern,
-                  frames=frames, log_format="behavior_v2", telemetry="ring-10hz",
-                  args={k: v for k, v in vars(args).items() if k != "port"}, gap_threshold_ms=args.gap_ms)
+                  frames=frames, log_format="behavior_v2", telemetry="ring-10hz", controller_settings=settings,
+                  args={k: v for k, v in vars(args).items() if k != "port"}, gap_threshold_ms=args.gap_ms,
+                  coverage_note=coverage_note)
         log.write({"event": "stream_schema", "streams": {
             "cc": {"cols": ["rx", "t_us", "seq", "cmd", "status", "req"]},
             "cf": {"cols": ["rx", "t_us", "seq", "idx", "pattern", "sd_load_us", "spi_us", "req_age_us", "superseded", "flags"]},
             "cs": {"cols": ["rx", "t_us", "seq", "kind", "code", "arg"], "kinds": tc.STATE_KIND_NAMES}}})
         print(f"firmware: {fw['label']}")
         print(f"sd card : {sd_card['label'] if sd_card else '(firmware without GET_SD_INFO)'}")
+        print(f"settings: {settings}")
         print(f"pattern {args.pattern}: {frames} frames, window {walker.n}, {args.hz} Hz, sigma {args.sigma}, "
               f"jump {args.jump_deg}° every {args.jump_every}, {args.minutes} min")
 
@@ -357,9 +524,13 @@ def main(argv=None) -> int:
         if st != 0:
             print("SET_TELEMETRY refused", file=sys.stderr)
             return 1
-        drainer = Drainer(t, log, args.timeout)
-        drainer.drain(max_chunks=400)  # backlog from before this run (kept in the log, tagged by seq)
-        log.event("telemetry_backlog_drained", records=len(drainer.records))
+        drainer = Drainer(t, log, args.timeout, stats)
+        drainer.drain(max_chunks=400)  # pre-run backlog: kept in the log, excluded from the summary
+        if drainer.errors or drainer.blocks == 0:
+            print("telemetry ring did not answer at start — refusing to run a blind measurement", file=sys.stderr)
+            return 1
+        drainer.set_boundary()
+        log.event("telemetry_backlog_drained", boundary_seq=drainer.boundary, blocks=drainer.blocks)
 
         tp = (bytes([3]) + struct.pack("<H", args.pattern) + struct.pack("<h", 0) + struct.pack("<H", 0)
               + struct.pack("<h", 0) + struct.pack("<H", 0))
@@ -369,32 +540,45 @@ def main(argv=None) -> int:
             return 1
         log.event("runner", phase="trial_start", pattern=args.pattern, mode=3)
 
-        period = 1.0 / args.hz
-        t_end = time.perf_counter() + args.minutes * 60.0 if args.minutes > 0 else None
-        next_send = time.perf_counter()
-        next_drain = next_send + args.drain_every
-        next_progress = next_send + args.progress_every
-        fails = []  # rolling window of the last 10 outcomes
-        sent = 0
+        t_start = time.perf_counter()
+        t_end = t_start + args.minutes * 60.0 if args.minutes > 0 else None
+        next_send = t_start
+        next_drain = t_start + args.drain_every
+        next_progress = t_start + args.progress_every
+        last_send = None
+        fails = []
         while True:
             nowp = time.perf_counter()
             if t_end and nowp >= t_end:
                 break
-            if args.reads and accepted >= args.reads:
+            if args.reads and stats.index_changes >= args.reads:
                 break
             if nowp < next_send:
                 time.sleep(min(next_send - nowp, 0.002))
                 continue
+            # Missed-slot policy: never burst to catch up — skip the expired slots and count them.
+            if nowp - next_send >= period:
+                skipped = int((nowp - next_send) // period)
+                missed_slots += skipped
+                next_send += skipped * period
             next_send += period
+            if last_send is not None and (nowp - last_send) > 1.5 * period:
+                long_intervals += 1
+            last_send = nowp
             idx = walker.next()
             req = build_frame(SET_FRAME_POSITION_CMD, struct.pack("<H", idx))
             t_off = now_ms() - log.t0
             t1 = time.perf_counter()
             try:
-                st, _, _, _ = t.command(SET_FRAME_POSITION_CMD, struct.pack("<H", idx), timeout=args.timeout)
+                st, echo, _, _ = t.command(SET_FRAME_POSITION_CMD, struct.pack("<H", idx), timeout=args.timeout)
                 dt = (time.perf_counter() - t1) * 1000.0
-                log.write(["a", round(t_off, 3), round(dt, 3), hexstr(req), st, round(now_ms() - log.t0, 3)])
-                ok = st == 0
+                if echo != SET_FRAME_POSITION_CMD:
+                    echo_mismatch += 1
+                    ok = False
+                    log.write(["a", round(t_off, 3), round(dt, 3), hexstr(req), None, round(now_ms() - log.t0, 3), f"echo 0x{echo:02x}"])
+                else:
+                    ok = st == 0
+                    log.write(["a", round(t_off, 3), round(dt, 3), hexstr(req), st, round(now_ms() - log.t0, 3)])
             except Exception as e:
                 dt = (time.perf_counter() - t1) * 1000.0
                 log.write(["a", round(t_off, 3), round(dt, 3), hexstr(req), None, round(now_ms() - log.t0, 3), str(e)[:40]])
@@ -415,30 +599,43 @@ def main(argv=None) -> int:
                 drainer.drain(max_chunks=10)
             if nowp >= next_progress:
                 next_progress = nowp + args.progress_every
-                s = summarize(drainer.records, args.gap_ms, accepted)
-                log.event("soak_progress", sent=sent, accepted=accepted, stalls=s["stalls_over_gap"],
-                          clusters=s["clusters"], worst_ms=s["worst_ms"])
-                print(f"  {sent} sent / {accepted} accepted · stalls>{args.gap_ms}ms {s['stalls_over_gap']} in "
-                      f"{s['clusters']} clusters · worst {s['worst_ms']} ms · seq gaps {len(drainer.tracker.gaps)}")
+                el = nowp - t_start
+                log.event("soak_progress", sent=sent, accepted=accepted, achieved_hz=round(sent / el, 1) if el else None,
+                          missed_slots=missed_slots, stalls=stats.stalls and len(stats.stalls) or 0,
+                          clusters=len(stats.clusters()), worst_ms=max((s["ms"] for s in stats.stalls), default=0.0),
+                          capture=drainer.capture())
+                print(f"  {el:6.0f}s {sent} sent / {accepted} ok · {sent / el:.1f} Hz achieved · missed slots {missed_slots} · "
+                      f"reads≈{stats.index_changes} · stalls>{args.gap_ms}ms {len(stats.stalls)} in {len(stats.clusters())} clusters · "
+                      f"worst {max((s['ms'] for s in stats.stalls), default=0.0)} ms · seq gaps {len(drainer.tracker.gaps)} · drain errors {drainer.errors}")
     except KeyboardInterrupt:
         print("interrupted")
     finally:
         try:
-            t.command(STOP_DISPLAY_CMD, timeout=2.0)
-            log.event("runner", phase="trial_stop")
+            st, echo, _, _ = t.command(STOP_DISPLAY_CMD, timeout=2.0)
+            shutdown_verified = (st == 0 and echo == STOP_DISPLAY_CMD)
+            log.event("runner", phase="trial_stop", verified=shutdown_verified)
         except Exception:
-            pass
+            log.event("runner", phase="trial_stop", verified=False)
         if drainer is not None:
             try:
                 time.sleep(0.2)
-                drainer.drain(max_chunks=400)
+                drainer.drain(max_chunks=400)   # the trailing sd_reads / state_change records
             except Exception:
                 pass
-            s = summarize(drainer.records, args.gap_ms, accepted)
-            s.update({"seq_gaps": len(drainer.tracker.gaps), "drain_errors": drainer.errors, "rows": drainer.rows})
+            elapsed = time.perf_counter() - t_start if 't_start' in dir() else None
+            cap = drainer.capture()
+            s = stats.summary()
+            s.update({"sent": sent, "accepted": accepted, "achieved_hz": round(sent / elapsed, 1) if elapsed else None,
+                      "missed_slots": missed_slots, "long_send_intervals": long_intervals, "echo_mismatch": echo_mismatch,
+                      "capture": cap, "shutdown_verified": shutdown_verified, "coverage_note": coverage_note,
+                      "measurement_usable": cap["valid"] and shutdown_verified and exit_code == 0})
             log.event("sd_stall_summary", **s)
             print("\n=== SD stall summary ===")
             print(json.dumps(s, indent=1))
+            if not cap["valid"]:
+                print("CAPTURE INVALID — telemetry incomplete; do not use this summary for a card comparison", file=sys.stderr)
+                if exit_code == 0:
+                    exit_code = 4
             print(f"\nfull report: python3 webDisplayTools/scripts/telemetry-report.py {log.path}")
         log.close()
         t.close()
