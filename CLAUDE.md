@@ -40,7 +40,7 @@ if you add a fifth variant or change what any of them does.
 pixi run build-10-10               # compile only
 pixi run deploy-10-10               # compile and upload
 pixi run deploy-10-10-performance   # compile and upload, no DEBUG_SERIAL
-pixi run monitor-10-10              # USB serial monitor, logs to log/
+pixi run monitor-10-10              # USB serial monitor, logs to log/ (-- --port X to override)
 
 pixi run build-12-18
 pixi run deploy-12-18
@@ -130,3 +130,19 @@ mismatch shows up as a failed `status == 0` assertion on the first
   code bug. Reporting the variant in `GET_CONTROLLER_INFO_CMD`'s
   capability bitmap would close this gap and is worth doing before this
   bites someone.
+- **`pixi run deploy-*` can only soft-reboot a board whose firmware is
+  still servicing USB.** The `teensy-cli` upload runs PJRC's
+  `teensy_reboot -s` and then `teensy_loader_cli -w -s`; if the running
+  firmware is hung or the board never enumerated, neither can reach it
+  and the loader just sits at "Waiting for Teensy device...". The symptom
+  text differs by OS ("Unable to soft reboot with USB error" on Linux,
+  "Soft reboot is not implemented for Win32" / "for OSX" elsewhere, since
+  `teensy_loader_cli`'s own `-s` only exists in its libusb build), but the
+  remedy is the same everywhere: press the Teensy's program button or
+  power-cycle it with the arena powered, then re-run the deploy task. A
+  first attempt right after manual HalfKay entry can still fail with
+  "error writing to Teensy"; running it again succeeds. `--upload-port`
+  is ignored by the `teensy-cli` protocol on every OS. The `monitor-*`
+  tasks find the arena's port themselves (`scripts/monitor.py`, by USB
+  product string, then Teensy VID:PID) on every OS; pass
+  `-- --port <device>` if more than one Teensy is attached.
