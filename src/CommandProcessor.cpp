@@ -1,6 +1,9 @@
 #include "CommandProcessor.h"
 #include "Crc.h"
 #include "ErrorGlyph.h"
+#include "Health.h"
+#include "Version.h"
+#include "Telemetry.h"
 #include <Wire.h>
 
 using namespace AC;
@@ -100,7 +103,10 @@ void CommandProcessor::processCommand() {
     current_source_ = &net_;
     const ParsedCommand &cmd = net_.command();
     if (cmd.is_bulk) {
+      const bool fw_upload = (cmd.cmd == SET_FIRMWARE_FILE_CMD);  // synchronous image upload: 30 s watchdog window
+      if (fw_upload && !Health::watchdogSuspend()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, cmd.cmd);
       bool async_handoff = handleBulkWriteCommand(cmd);
+      if (fw_upload && !Health::watchdogResume()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, cmd.cmd);
       if (!async_handoff) net_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
@@ -116,7 +122,10 @@ void CommandProcessor::processCommand() {
     current_source_ = &serial_;
     const ParsedCommand &cmd = serial_.command();
     if (cmd.is_bulk) {
+      const bool fw_upload = (cmd.cmd == SET_FIRMWARE_FILE_CMD);  // synchronous image upload: 30 s watchdog window
+      if (fw_upload && !Health::watchdogSuspend()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, cmd.cmd);
       bool async_handoff = handleBulkWriteCommand(cmd);
+      if (fw_upload && !Health::watchdogResume()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, cmd.cmd);
       if (!async_handoff) serial_.commandConsumed();
     } else if (cmd.is_stream) {
       handleStreamCommand(cmd);
@@ -130,6 +139,7 @@ void CommandProcessor::processCommand() {
 }
 
 void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
+  const uint32_t t_rx_us = micros();  // telemetry CMD.t_us: receipt time, before dispatch
   const uint8_t *buf = cmd.data;
   uint8_t claimed_len = buf[0];
   if (cmd.data_len - 1 != claimed_len) {
@@ -141,6 +151,22 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
   uint8_t command_byte = buf[pos++];
   DBG_PRINTF("[cmd] handleBinary cmd=0x%02X len=%u\n",
              command_byte, (unsigned)cmd.data_len);
+
+  // Health breadcrumb (issue #50): "dispatching opcode X". Handlers that hit
+  // SD/SPI re-mark with their own op (innermost wins); cleared after the switch.
+  Health::mark(Health::OP_CMD, command_byte);
+  last_cmd_rx_us_ = t_rx_us;  // FRAME.req_age_us origin for SET_FRAME_POSITION
+
+  // Synchronous handlers that legitimately run longer than the 2 s watchdog
+  // (SD format, panel ISP program/verify, ZIP entry collection over 258 files)
+  // pause it for the dispatch; everything else must finish in well under 2 s.
+  const bool long_op = command_byte == PURGE_MEMORY_CMD || command_byte == G6_PROGRAM_PANEL_CMD
+                    || command_byte == G6_VERIFY_PANEL_CMD || command_byte == GET_SD_ARCHIVE_CMD;
+  if (long_op && !Health::watchdogSuspend()) {
+    // The RTWDOG refused the 30 s window (unlock/RCS timeout; state unknown).
+    // Proceed anyway, but leave a trace: STATE(telemetry, code 0xEE, arg opcode).
+    Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, command_byte);
+  }
 
   switch (command_byte) {
     case ALL_OFF_CMD:
@@ -179,9 +205,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       if (rate > 0) {
         refresh_rate_hz_ = rate;
         refresh_rate_explicit_ = true;
-        if (state_ != ArenaState::ALL_OFF) {
-          spi_.disarmRefreshTimer();
-          spi_.armRefreshTimer(refresh_rate_hz_);
+        if (state_ != ArenaState::ALL_OFF &&
+            !spi_.armRefreshTimer(refresh_rate_hz_)) {  // running timer: LDVAL update only
+          current_source_->sendResponse(command_byte, 1, "refresh timer unavailable");
+          break;
         }
       }
       current_source_->sendResponse(command_byte, 0, "");
@@ -224,6 +251,26 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
 
     case GET_CONTROLLER_INFO_CMD:
       handleGetControllerInfo();
+      break;
+
+    case GET_HEALTH_CMD:
+      handleGetHealth();
+      break;
+
+    case GET_FIRMWARE_VERSION_CMD:
+      handleGetFirmwareVersion();
+      break;
+
+    case GET_CRASHREPORT_CMD:
+      handleGetCrashReport();
+      break;
+
+    case GET_SD_INFO_CMD:
+      handleGetSdInfo();
+      break;
+
+    case SET_SD_DIAG_CMD:
+      handleSetSdDiag(cmd);
       break;
 
     case SET_DIAG_OUTPUT_CMD:
@@ -655,6 +702,14 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       break;
     }
 
+    case SET_TELEMETRY_CMD:
+      handleSetTelemetry(cmd);
+      break;
+
+    case GET_TELEMETRY_BLOCK_CMD:
+      handleGetTelemetryBlock(cmd);
+      break;
+
     case SET_DIGITAL_OUT_CMD: {
       if (claimed_len != 3) {
         current_source_->sendResponse(command_byte, 1, "Expected [03 AA channel state]");
@@ -772,6 +827,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         break;
       }
       ao_mode_ = new_mode;
+      dropFrameCache();  // next 0x70 re-runs loadFrame's output derivation (SD fast path B)
       if (ao_mode_ == 1) {
         ao_lut_len_ = 0;  // frame_number owns the DAC — stop LUT playback
         // Reflect the current position immediately if a pattern is open.
@@ -835,6 +891,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case SET_AO_LUT_CMD: {
+      dropFrameCache();  // a new LUT must be applied by the next loadFrame (SD fast path B)
       // [len, 0xA2, mode, step_hz_lo, step_hz_hi, count_lo, count_hi, mv[0..n-1]×2]
       //   mode     uint8:  0 = frame-locked, 1 = time-based
       //   step_hz  uint16 LE: step rate for mode 1 (ignored for mode 0; max 1000 Hz)
@@ -914,6 +971,18 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       current_source_->sendResponse(command_byte, 1, "Unknown command");
       break;
   }
+  Health::clear();
+  if (long_op && !Health::watchdogResume()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, command_byte);
+
+  // Telemetry CMD record (Telemetry.h): receipt time, opcode, the reply's
+  // status byte, and the first <= 8 request bytes after [len, cmd]. The
+  // drain opcode itself is skipped — a 10 Hz poller looping on `more` would
+  // otherwise fill the ring with records of reading the ring. 0xCA/0xCB/0xC2
+  // and 0xA8 ARE recorded (they mark host connects / probes in the timeline).
+  if (command_byte != GET_TELEMETRY_BLOCK_CMD) {
+    uint8_t plen = (claimed_len >= 1) ? (uint8_t)(claimed_len - 1) : 0;
+    Telemetry::cmd(t_rx_us, command_byte, current_source_->lastResponseStatus(), buf + 2, plen);
+  }
 }
 
 void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
@@ -940,6 +1009,7 @@ void CommandProcessor::handleStreamCommand(const ParsedCommand &cmd) {
 
   // Copy the frame payload into our owned buffer so the network layer can
   // recycle its receive slot.
+  invalidateFrameBuf();  // streamed frame replaces the SD frame
   memcpy(frame_buf_, buf + stream_header_byte_count, frame_byte_count);
   frame_byte_count_  = (uint16_t)frame_byte_count;
   block_byte_count_  = block_size;
@@ -986,6 +1056,412 @@ void CommandProcessor::handleGetControllerInfo() {
   DBG_PRINTF("[cmd] controller-info v=%u cap=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
              (unsigned)payload[0], (unsigned)payload[1], payload[2], payload[3],
              payload[4], payload[5], payload[6], payload[7]);
+}
+
+// ---------------------------------------------------------------------------
+// get-health (0xCA) — issue #50 soak-harness telemetry. Read-only, O(1), no
+// SD I/O (the SD error code is SdFat's cached last-error, not a card query).
+// Nothing here is clear-on-read: counters are cumulative since boot and a
+// poller diffs successive samples. Layout (all little-endian), 66 bytes:
+//
+//   off  0  u8  ver              = 1 (schema version of this payload)
+//   off  1  u8  flags            bit0 sd_mounted, bit1 pattern_open,
+//                                bit2 display_active (state != ALL_OFF — same
+//                                predicate as the CE_DISPLAY_ACTIVE guards),
+//                                bit3 breadcrumb_valid (prev_* fields usable)
+//   off  2  u32 uptime_ms        millis()
+//   off  6  u32 loop_count       loop() iterations since boot
+//   off 10  u32 loop_max_us      max loop() iteration since boot
+//   off 14  u32 loop_max_1s_us   max loop() iteration in the last COMPLETED 1 s window
+//   off 18  u32 sd_reads         readFrame() calls since boot
+//   off 22  u32 sd_read_max_us   max readFrame() duration since boot
+//   off 26  u8  sd_err           SdFat card errorCode() (0 = none)
+//   off 27  u32 sd_err_data      SdFat card errorData()
+//   off 31  u32 frames_sent      == GET_FRAMES_SENT (0x33)
+//   off 35  u32 isr_count        refresh-timer ISRs since boot
+//   off 39  u32 cmd70_count      SET_FRAME_POSITION commands RECEIVED (incl. rejected)
+//   off 43  u8  state            ArenaState (0 ALL_OFF .. 7 ERROR_DISPLAY)
+//   off 44  u16 cur_frame        cur_frame_index_
+//   off 46  u32 reset_cause      SRC_SRSR captured at boot (then cleared)
+//   off 50  u8  prev_breadcrumb     previous boot's last_op (Health::LastOp; 0 = idle/none)
+//   off 51  u32 prev_breadcrumb_us  micros() stamp of that op in the previous boot
+//   off 55  u8  prev_breadcrumb_arg opcode when prev_breadcrumb == OP_CMD, else 0
+//   off 56  u8  prev_slow_op        previous boot's slowest single op
+//   off 57  u32 prev_slow_us        ...and its duration
+//   off 61  u8  slow_op             THIS boot's slowest single op so far
+//   off 62  u32 slow_us             ...and its duration
+//   ---- ver 2 tail (watchdog + ISR breadcrumb; Health.h) ----
+//   off 66  u8  prev_isr_last       ISR the previous boot was inside when it died (0 none, 1 refresh, 2 dma, 3 wdog)
+//   off 67  u32 prev_isr_count      ISR entries in the previous boot
+//   off 71  u32 prev_wdog_pc        stacked PC captured by the watchdog pre-reset IRQ (valid when wdog_flags bit2)
+//   off 75  u32 prev_wdog_lr        stacked LR at that moment
+//   off 79  u8  wdog_flags          bit0 armed, bit1 prev reset = watchdog (SRSR wdog3), bit2 prev pc captured,
+//                                   bit3 compiled in, bit4 long-op window (30 s) active, bit5 starving (test),
+//                                   bit6 last RTWDOG reprogramming failed (state unknown)
+//   off 80  u8  isr_last            THIS boot: ISR currently inside (live)
+//   off 81  u32 isr_count           THIS boot: ISR entries
+//   off 85  u32 wdog_kicks          THIS boot: watchdog refreshes
+//   ---- ver 3 tail (RTWDOG raw state for the bench) ----
+//   off 89  u32 wdog_cs_boot        WDOG3_CS as found before the first programming (reset default; expect 0x2520)
+//   off 93  u32 wdog_cs_now         WDOG3_CS live readback (EN bit7, CMD32EN bit13, RCS bit10, ULK bit11, FLG bit14)
+//   ---- ver 4 tail (measured timing) ----
+//   off 97  u32 wdog_tick_hz        measured WDOG3_CNT tick rate (~127 on this silicon; == comparator rate per the two-point bench fit)
+//   off 101 u32 wdog_toval_now      WDOG3_TOVAL live readback = tick_hz * s + 190 offset ticks (444 = 2.0 s normally, 4000 = 30 s long-op)
+//   off 105 u8  wdog_verify         bit0 RCS timeout, bit1 EN mismatch, bit2 TOVAL mismatch, bit3 tick-rate fallback, bit4 key-width retry
+//   ---- ver 5 tail (kick-path CNT diagnostics for the ~190-tick anomaly) ----
+//   off 106 u16 wdog_cnt_before_max WDOG3_CNT read just BEFORE a refresh, max since boot (= longest kick gap in ticks)
+//   off 108 u16 wdog_cnt_after_min  WDOG3_CNT read just AFTER a refresh, min since boot (0..1 if the refresh zeroes it)
+//   off 110 u16 wdog_cnt_after_max  ... max since boot (anything large = refreshes not zeroing / being ignored)
+//   off 112 u16 wdog_cnt_now        WDOG3_CNT live
+//
+// Bytes 0..54 are the layout agreed in issue #50; 55..65 are an additive
+// tail (a SYSTEM_RESET sent by the host is itself a dispatched command, so
+// prev_breadcrumb after a commanded reset always reads OP_CMD/0x01 — the
+// slow-op fields are what carry the "what was wedging" answer).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+inline uint8_t *put8(uint8_t *p, uint8_t v)   { *p++ = v; return p; }
+inline uint8_t *put16(uint8_t *p, uint16_t v) { *p++ = (uint8_t)v; *p++ = (uint8_t)(v >> 8); return p; }
+inline uint8_t *put32(uint8_t *p, uint32_t v) {
+  *p++ = (uint8_t)v; *p++ = (uint8_t)(v >> 8);
+  *p++ = (uint8_t)(v >> 16); *p++ = (uint8_t)(v >> 24);
+  return p;
+}
+
+}  // namespace
+
+void CommandProcessor::handleGetHealth() {
+  constexpr uint8_t kHealthVersion    = 5;   // v2 +23 B watchdog/ISR; v3 +8 B raw CS; v4 +9 B timing; v5 +8 B kick CNT (offsets never move)
+  constexpr size_t  kHealthPayloadLen = 114;
+  const Health::Stats &hs = Health::stats;
+
+  uint8_t flags = 0;
+  if (sd_.available())                flags |= 0x01;
+  if (sd_.patternOpen())              flags |= 0x02;
+  if (state_ != ArenaState::ALL_OFF)  flags |= 0x04;
+  if (hs.prev_valid)                  flags |= 0x08;
+
+  uint8_t payload[kHealthPayloadLen];
+  uint8_t *p = payload;
+  p = put8 (p, kHealthVersion);
+  p = put8 (p, flags);
+  p = put32(p, millis());
+  p = put32(p, hs.loop_count);
+  p = put32(p, hs.loop_max_us);
+  p = put32(p, hs.loop_max_1s_us);
+  p = put32(p, hs.sd_reads);
+  p = put32(p, hs.sd_read_max_us);
+  p = put8 (p, sd_.cardErrorCode());
+  p = put32(p, sd_.cardErrorData());
+  p = put32(p, spi_.framesSent());
+  p = put32(p, spi_.isr_count_);
+  p = put32(p, hs.cmd70_count);
+  p = put8 (p, (uint8_t)state_);
+  p = put16(p, cur_frame_index_);
+  p = put32(p, hs.reset_cause);
+  p = put8 (p, hs.prev_last_op);
+  p = put32(p, hs.prev_stamp_us);
+  p = put8 (p, hs.prev_op_arg);
+  p = put8 (p, hs.prev_slow_op);
+  p = put32(p, hs.prev_slow_us);
+  p = put8 (p, Health::slowOp());
+  p = put32(p, Health::slowUs());
+  p = put8 (p, hs.prev_isr_last);
+  p = put32(p, hs.prev_isr_count);
+  p = put32(p, hs.prev_wdog_pc);
+  p = put32(p, hs.prev_wdog_lr);
+  p = put8 (p, Health::watchdogFlags());
+  p = put8 (p, Health::isrLast());
+  p = put32(p, Health::isrCount());
+  p = put32(p, hs.wdog_kicks);
+  p = put32(p, Health::watchdogCsAtBoot());
+  p = put32(p, Health::watchdogCsNow());
+  p = put32(p, Health::watchdogTickHz());
+  p = put32(p, Health::watchdogTovalNow());
+  p = put8 (p, Health::watchdogVerify());
+  p = put16(p, Health::watchdogCntBeforeMax());
+  p = put16(p, Health::watchdogCntAfterMin());
+  p = put16(p, Health::watchdogCntAfterMax());
+  p = put16(p, Health::watchdogCntNow());
+  static_assert(kHealthPayloadLen <= byte_count_per_response_max - 3,
+                "GET_HEALTH payload must fit one framed reply");
+  current_source_->sendResponse(GET_HEALTH_CMD, 0, payload, (size_t)(p - payload));
+}
+
+// ---------------------------------------------------------------------------
+// get-crashreport (0xCC) — raw passthrough of the top 128 B of OCRAM: PJRC's
+// arm_fault_info_struct at 0x2027FF80 {len, ipsr, cfsr, hfsr, mmfar, bfar, ret,
+// xpsr, temp(float), time, crc} (44 B; len == 0 means no fault recorded), then
+// PJRC's own breadcrumb words at 0x2027FFC0. Readable without DEBUG_SERIAL and
+// NEVER cleared by this read (CrashReport.clear() is only called by the core's
+// printTo — which the DEBUG_SERIAL boot banner invokes, so DEBUG builds hand
+// over a cleared record; the performance build preserves it until the next
+// fault overwrites it).
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::handleGetCrashReport() {
+  uint8_t payload[Health::crashreport_len];
+  memcpy(payload, reinterpret_cast<const void *>(Health::crashreport_addr), sizeof(payload));
+  static_assert(Health::crashreport_len <= byte_count_per_response_max - 4,
+                "GET_CRASHREPORT payload must fit one framed reply");
+  current_source_->sendResponse(GET_CRASHREPORT_CMD, 0, payload, sizeof(payload));
+}
+
+// ---------------------------------------------------------------------------
+// get-firmware-version (0xCB) — which build is this controller running?
+// Read-only, O(1), no SD I/O: every value is a compile-time constant from
+// src/Version.h, injected per build by scripts/build_version.py from the git
+// checkout. Advertised by the same capability bit 7 as 0xCA (both shipped in
+// the same build; older firmware flashes CE 01 on an unknown opcode, so hosts
+// gate on the bit rather than probing). Layout, 46 bytes, ASCII fields
+// right-padded with spaces (never NUL-terminated on the wire):
+//
+//   off  0  u8   ver         = 1 (schema version of this payload)
+//   off  1  u8   rows        panel_count_per_frame_row (this build's arena)
+//   off  2  u8   cols        panel_count_per_frame_col
+//   off  3  u8   flags       bit0 dirty working tree at build, bit1 DEBUG_SERIAL build,
+//                            bit2 telemetry ring compiled in (0xA8/0xA9 present),
+//                            bit3 GET_CRASHREPORT 0xCC + GET_HEALTH ver >= 2 present
+//                            bit4 free-running refresh timer (SET_FRAME_POSITION never disarms/re-arms the PIT)
+//   off  4  char sha[8]      short git SHA, lowercase hex; "unknown " without git
+//   off 12  char date[10]    build date UTC "YYYY-MM-DD"
+//   off 22  char branch[24]  git branch; "detached" for detached HEAD; "unknown"
+//                            when unavailable; truncated to 24
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Copy src into a fixed-width field: truncate to `len`, right-pad with spaces.
+inline uint8_t *putField(uint8_t *p, const char *src, size_t len) {
+  size_t i = 0;
+  for (; i < len && src[i] != '\0'; ++i) *p++ = (uint8_t)src[i];
+  for (; i < len; ++i) *p++ = ' ';
+  return p;
+}
+
+}  // namespace
+
+void CommandProcessor::handleGetFirmwareVersion() {
+  using namespace AC::version;
+  uint8_t flags = 0;
+  if (fw_git_dirty)     flags |= fw_flag_dirty;
+  if (fw_debug_build)   flags |= fw_flag_debug;
+  if (fw_has_telemetry) flags |= fw_flag_telemetry;  // hosts gate SET_TELEMETRY on this, not on 0xC2 bit 7
+  if (fw_has_crashreport) flags |= fw_flag_crashreport;  // hosts gate GET_CRASHREPORT 0xCC (+ HEALTH v2) on this
+  if (fw_freerun_refresh) flags |= fw_flag_freerun_refresh;  // variant marker for run logs: 0x70 no longer touches the PIT
+  if (fw_sd_fastpath)     flags |= fw_flag_sd_fastpath;      // O(1) seeks + same-index skip + FRAME 26 B + GET_SD_INFO 0xCD
+  if (fw_sd_diag)         flags |= fw_flag_sd_diag;          // SET_SD_DIAG 0xCE + STATE kind 14 present — hosts gate 0xCE on THIS bit
+
+  uint8_t payload[fw_version_payload_len];
+  uint8_t *p = payload;
+  p = put8(p, fw_version_payload_version);
+  p = put8(p, panel_count_per_frame_row);
+  p = put8(p, panel_count_per_frame_col);
+  p = put8(p, flags);
+  p = putField(p, fw_git_sha,    fw_sha_field_len);
+  p = putField(p, fw_build_date, fw_date_field_len);
+  p = putField(p, fw_git_branch, fw_branch_field_len);
+  static_assert(fw_version_payload_len == 46, "GET_FIRMWARE_VERSION payload is 46 bytes");
+  static_assert(fw_version_payload_len <= byte_count_per_response_max - 3,
+                "GET_FIRMWARE_VERSION payload must fit one framed reply");
+  current_source_->sendResponse(GET_FIRMWARE_VERSION_CMD, 0, payload, (size_t)(p - payload));
+  DBG_PRINTF("[cmd] firmware-version %s%s (%s) built %s, %ux%u%s\n",
+             fw_git_sha, fw_git_dirty ? "-dirty" : "", fw_git_branch, fw_build_date,
+             (unsigned)panel_count_per_frame_row, (unsigned)panel_count_per_frame_col,
+             fw_debug_build ? " DEBUG_SERIAL" : "");
+}
+
+// ---------------------------------------------------------------------------
+// get-sd-info (0xCD): SD card identity + volume geometry, 30-byte payload.
+// Every card-comparison / stall measurement must be attributable to a specific
+// card: SdFat caches CID and CSD at mount, so this is O(1) with no card traffic.
+//   off  0  u8   ver = 1
+//   off  1  u8   flags  bit0 mounted, bit1 cid valid, bit2 csd valid
+//   off  2  u8   card_type  SdFat type(): 0 none, 1 SD1, 2 SD2, 3 SDHC/SDXC
+//   off  3  u8   fat_type   12 / 16 / 32, 64 = exFAT, 0 unknown
+//   off  4  u32  sectors    capacity in 512 B sectors (CSD)
+//   off  8  u32  bytes_per_cluster
+//   off 12  u8[16] cid      raw CID: MID @0, OID @1-2, PNM @3-7, PRV @8, PSN @9-12, MDT @13-14, CRC @15
+//   off 28  u8   sd_status_maint  SD 6.0 §4.18 maintenance support bits (SD_STATUS b328/329); 0xFF = not read
+//   off 29  u8   sd_diag    SET_SD_DIAG (0xCE): bit0 legacy seek requested, bit1 no same-index skip, bit2 legacy seek APPLIED to the currently open file
+// Status 1 (payload still sent, flags bit0 clear) when no card is mounted.
+// Gated on GET_FIRMWARE_VERSION flags bit 5 (fw_flag_sd_fastpath).
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// set-sd-diag (0xCE): [02 CE flags] — bench A/B switches for the causal test of
+// the card stalls (2026-09-13). bit0 = legacy seek: the NEXT pattern open skips
+// contiguousRange(), so FatFile::seekSet walks the FAT chain again (the
+// pre-fast-path behaviour; on this 4 KB-cluster card the 813 KB pattern's chain
+// spans two FAT sectors → a FAT-sector read from the card on most backward
+// seeks — the suspected read-disturb hot spot). bit1 = no same-index skip: every
+// 0x70 reads its frame (takes effect immediately). Both default OFF at boot and
+// are reported in GET_SD_INFO byte 29 and in STATE(sd_layout) code bit 2 (legacy
+// seek at that open), so every log line carries the arm it was recorded under.
+// Reply: status 0, payload = the flags now in force.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::handleSetSdDiag(const ParsedCommand &cmd) {
+  uint8_t claimed_len = cmd.data[0];
+  if (claimed_len != 2) {
+    current_source_->sendResponse(SET_SD_DIAG_CMD, 1, "Expected [02 CE flags]");
+    return;
+  }
+  uint8_t flags = cmd.data[2];
+  if (flags & ~0x03) {
+    current_source_->sendResponse(SET_SD_DIAG_CMD, 1, "SET_SD_DIAG: bits 2-7 reserved");
+    return;
+  }
+  if ((flags & 0x01) && sd_.fatType() == 64) {
+    // exFAT: the library flags every file contiguous at open, so the legacy arm
+    // would silently equal the fast path — refuse rather than mislabel a run.
+    current_source_->sendResponse(SET_SD_DIAG_CMD, 1, "SET_SD_DIAG: legacy seek has no effect on exFAT");
+    return;
+  }
+  sd_.setLegacySeek(flags & 0x01);
+  sd_skip_same_index_ = !(flags & 0x02);
+  if (!sd_skip_same_index_) sd_cache_ok_ = false;  // the next 0x70 reads even if it repeats the index
+  uint8_t echo = sdDiagFlags();
+  Telemetry::state(Telemetry::ST_TELEMETRY, 0xCE, echo);  // timeline marker: arm switch (code 0xCE, arg = flags)
+  current_source_->sendResponse(SET_SD_DIAG_CMD, 0, &echo, 1);
+  DBG_PRINTF("[cmd] set-sd-diag flags=0x%02X\n", (unsigned)echo);
+}
+
+uint8_t CommandProcessor::sdDiagFlags() const {
+  return (uint8_t)((sd_.legacySeek() ? 0x01 : 0) | (sd_skip_same_index_ ? 0 : 0x02));
+}
+
+void CommandProcessor::handleGetSdInfo() {
+  SdManager::CardInfo ci;
+  const bool mounted = sd_.cardInfo(ci);
+  uint8_t payload[30];
+  uint8_t *p = payload;
+  p = put8(p, 1);
+  p = put8(p, (uint8_t)((mounted ? 1 : 0) | (ci.cid_valid ? 2 : 0) | (ci.csd_valid ? 4 : 0)));
+  p = put8(p, ci.card_type);
+  p = put8(p, ci.fat_type);
+  p = put32(p, ci.sectors);
+  p = put32(p, ci.bytes_per_cluster);
+  memcpy(p, ci.cid, sizeof(ci.cid)); p += sizeof(ci.cid);
+  p = put8(p, 0xFF);  // SD_STATUS maintenance bits: SdFat 2.1.2 exposes no ACMD13 reader
+  p = put8(p, (uint8_t)(sdDiagFlags() | (sd_.appliedLegacySeek() ? 0x04 : 0)));  // byte 29: bits 0-1 requested, bit 2 legacy seek APPLIED to the open file
+  static_assert(sizeof(payload) == 30, "GET_SD_INFO payload is 30 bytes");
+  current_source_->sendResponse(GET_SD_INFO_CMD, mounted ? 0 : 1, payload, (size_t)(p - payload));
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry ring (issue #50 follow-on; layout + semantics in src/Telemetry.h,
+// README § Telemetry ring). Both opcodes were reserved by fw PR #47 for this
+// stream; hosts gate them on GET_FIRMWARE_VERSION (0xCB) flags bit 2
+// (fw_flag_telemetry) — the 0xC2 capability byte is full.
+//
+// set-telemetry (0xA8): [04 A8 flags rate_lo rate_hi] or [02 A8 flags].
+//   flags bit0 = record events (default ON at boot); bit7 = synthetic producer
+//   (bench test T1: a dummy CMD record, cmd 0xFE, at `rate` records/s, paced
+//   from loop(); off at boot); bit4 = watchdog bits present, then bit6 =
+//   watchdog OFF, bit5 = starve (bench test) — see Health.h; bits 1..3 reserved.
+//   The 2-byte form leaves `rate` unchanged. Reply: status 0, no payload.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::handleSetTelemetry(const ParsedCommand &cmd) {
+  const uint8_t *buf = cmd.data;
+  uint8_t claimed_len = buf[0];
+  if (claimed_len != 2 && claimed_len != 4) {
+    current_source_->sendResponse(SET_TELEMETRY_CMD, 1,
+                                  "Expected [04 A8 flags rate_lo rate_hi] or [02 A8 flags]");
+    return;
+  }
+  uint8_t flags = buf[2];
+  int32_t rate  = -1;  // -1 = unchanged (2-byte form)
+  if (claimed_len == 4) {
+    uint16_t r;
+    memcpy(&r, buf + 3, sizeof(r));
+    rate = r;
+  }
+  Telemetry::configure(flags, rate);  // records STATE(telemetry, flags, rate) itself
+  // Watchdog bench control (Health.h): applied ONLY when bit4 ("watchdog bits
+  // present") is set, so a plain logging enable/disable (0x01 / 0x00) never
+  // touches watchdog policy. bit6 = watchdog OFF, bit5 = starve it (stop
+  // kicking -> reset in 2 s, validates the crash-dump path end to end).
+  if (flags & 0x10) {
+    if (!Health::watchdogSetEnabled(!(flags & 0x40))) {
+      Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, SET_TELEMETRY_CMD);  // RTWDOG refused; state unknown
+    }
+    Health::watchdogStarve((flags & 0x20) != 0);
+  }
+  current_source_->sendResponse(SET_TELEMETRY_CMD, 0, "");
+  DBG_PRINTF("[cmd] set-telemetry flags=0x%02X rate=%ld\n", (unsigned)flags, (long)rate);
+}
+
+// ---------------------------------------------------------------------------
+// get-telemetry-block (0xA9): [08 A9 ack_seq(u32 LE) max_bytes(u16 LE) flags].
+//   1. Free (advance read_off past) every record with seq <= ack_seq.
+//      ack_seq = 0xFFFFFFFF means "no ack".
+//   2. Reply with the 18-byte block header + as many WHOLE records from
+//      read_off as fit in min(max_bytes, 178) bytes, WITHOUT advancing
+//      read_off — they are freed only by a later ack, so a lost reply is
+//      recovered by re-asking with the same ack_seq. `flags` is reserved.
+//
+// Reply payload (little-endian), 18-byte header then records verbatim:
+//   off  0  u32 t_now_us    micros() at reply time (host clock pairing)
+//   off  4  u32 first_seq   seq of the first returned record; 0 if none
+//   off  8  u16 n_records   records in this block
+//   off 10  u32 dropped     records dropped since the ring was initialised
+//   off 14  u8  more        1 if unread records remain after this block
+//   off 15  u8  flags       bit0 events_enabled, bit1 ring contents survived
+//                           a reboot (boot_count > 0 since init), bit2 ring
+//                           disabled: heap collision (Telemetry.h heap guard),
+//                           bit3 synthetic producer on
+//   off 16  u16 boot_count  boots that kept this ring (saturates at 65535)
+//
+// 178, not 180: SerialManager::sendResponse accepts a payload only while
+// 3 + payload_len < RESP_BUF_SIZE (200), i.e. payload <= 196 B, and the
+// header takes 18 of those.
+// ---------------------------------------------------------------------------
+
+void CommandProcessor::handleGetTelemetryBlock(const ParsedCommand &cmd) {
+  const uint8_t *buf = cmd.data;
+  uint8_t claimed_len = buf[0];
+  if (claimed_len < 7) {  // flags byte optional; ack_seq + max_bytes required
+    current_source_->sendResponse(GET_TELEMETRY_BLOCK_CMD, 1,
+                                  "Expected [08 A9 ack_seq(4) max_bytes(2) flags]");
+    return;
+  }
+  // A ring disabled by the heap guard still answers: header only, flags bit2
+  // set, counters 0 (the ring memory is not touched again this boot).
+  uint32_t ack_seq;
+  uint16_t max_bytes;
+  memcpy(&ack_seq,   buf + 2, sizeof(ack_seq));
+  memcpy(&max_bytes, buf + 6, sizeof(max_bytes));
+
+  constexpr size_t kBlockHeaderLen = 18;
+  constexpr size_t kPayloadMax     = byte_count_per_response_max - 4;  // 196: 3 framing bytes + payload < 200
+  constexpr size_t kRecordBytesMax = kPayloadMax - kBlockHeaderLen;    // 178
+  static_assert(kRecordBytesMax == 178, "GET_TELEMETRY_BLOCK record budget is 178 B");
+  static_assert(kRecordBytesMax >= Telemetry::kRecordLenMax,
+                "a block must be able to carry at least one maximal record");
+
+  Telemetry::ack(ack_seq);
+
+  uint8_t payload[kPayloadMax];
+  Telemetry::BlockInfo info;
+  size_t budget = (max_bytes < kRecordBytesMax) ? max_bytes : kRecordBytesMax;
+  size_t n = Telemetry::peek(payload + kBlockHeaderLen, budget, info);
+
+  uint8_t  flags = Telemetry::blockFlags();
+  uint32_t boots = Telemetry::bootCount();
+
+  uint8_t *p = payload;
+  p = put32(p, micros());
+  p = put32(p, info.first_seq);
+  p = put16(p, info.n_records);
+  p = put32(p, Telemetry::dropped());
+  p = put8 (p, info.more ? 1 : 0);
+  p = put8 (p, flags);
+  p = put16(p, boots > 0xFFFF ? 0xFFFF : (uint16_t)boots);
+  current_source_->sendResponse(GET_TELEMETRY_BLOCK_CMD, 0, payload, kBlockHeaderLen + n);
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,6 +1547,7 @@ void CommandProcessor::handleTrialParams(const ParsedCommand &cmd) {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
+  ++Health::stats.cmd70_count;  // every 0x70 received, rejected or not (#50)
   uint8_t param_len = cmd.data[0] - 1;
   if (param_len < 2) {
     showError(CE_BAD_PAYLOAD_LEN);
@@ -1093,16 +1570,71 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
     return;
   }
 
-  spi_.disarmRefreshTimer();
+  // FREE-RUNNING REFRESH (2026-09-13). Wedges #2-#5 all died in this handler;
+  // #5 was caught by the watchdog at IntervalTimer::end()'s `channel->TCTRL = 0`
+  // (prev_breadcrumb OP_CMD_DISARM/0x70, wdog_pc 0x212f4): the main loop blocked
+  // on a peripheral-bus store to the PIT, and USB/SD went silent behind it.
+  // Every 0x70 used to disarm + re-arm the refresh timer, which also RESTARTED
+  // the refresh period on each command — at 286 Hz commands vs a 300 Hz
+  // refresh the tick rarely fired before the next restart (~20 displayed
+  // frames/s). The timer is now left running: this handler only validates,
+  // loads the frame, sets the state and replies. The PIT is touched once, on
+  // entering SHOW_FRAME from another state or when the refresh rate differs
+  // (armRefreshTimer is idempotent), and disarmed only by STOP/ALL_OFF/ALL_ON/
+  // glyph/trial-start paths as before.
+  //
+  // Buffer-safety race analysis: SpiManager::refreshISR only sets refreshFlag.
+  // The transfer (transmitOnRefresh -> transferFrame, which spins for DMA
+  // completion) and loadFrame (SD -> frame_buf_) both run in loop(), so they
+  // are strictly serialized by construction; a tick that lands during
+  // loadFrame just defers the transfer to the next serviceDisplay(). The
+  // disarm never protected frame_buf_. What it did protect is a GEOMETRY
+  // change (block_byte_count_ updated before the buffer is refilled) — that
+  // only happens on pattern open / ALL_ON / glyph / stream size change, and
+  // those paths keep their disarm+arm. No double buffer is needed.
+  Health::mark(Health::OP_CMD_PRELOAD, SET_FRAME_POSITION_CMD);
+  // SD fast path B (2026-09-13): the requested frame is already in frame_buf_
+  // (same index, loaded by a successful loadFrame, not overwritten since) →
+  // answer without an SD read. ~24 % of Mode-3 commands repeat the index; each
+  // saved read is one fewer card operation feeding the card's read-count
+  // maintenance (the 30–90 ms stalls). The held buffer already carries this
+  // trial's duty, the live panel display mode and the AO outputs.
+  // Only when the refresh timer is actually running at the current rate: a
+  // previous arm failure must be retried by the normal path, never hidden
+  // behind a cached-frame success (Codex review, blocking).
+  if (sd_skip_same_index_ && state_ == ArenaState::SHOW_FRAME && frame_buf_is_frame_ && sd_cache_ok_
+      && index == cur_frame_index_ && spi_.refreshArmedAt(refresh_rate_hz_)) {
+    ++Health::stats.cmd70_same_index;
+    Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
+    current_source_->sendResponse(SET_FRAME_POSITION_CMD, 0, "");
+    return;
+  }
   cur_frame_index_ = index;
+  pending_req_us_    = last_cmd_rx_us_;  // FRAME.req_age_us: this command's dispatch time
+  pending_req_valid_ = true;
   if (!loadFrame(cur_frame_index_)) {
+    Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
     current_source_->sendResponse(SET_FRAME_POSITION_CMD, 1,
                       "SET_FRAME_POSITION: frame read failed");
     return;
   }
+  if (state_ != ArenaState::SHOW_FRAME) {
+    Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::SHOW_FRAME, pattern_id_);
+  }
   state_ = ArenaState::SHOW_FRAME;
   if (!refresh_rate_explicit_) refresh_rate_hz_ = defaultRefreshFor(block_byte_count_);
-  spi_.armRefreshTimer(refresh_rate_hz_);
+  if (!spi_.refreshArmedAt(refresh_rate_hz_)) {   // state entry or rate change only
+    Health::mark(Health::OP_CMD_ARM, SET_FRAME_POSITION_CMD);
+    if (!spi_.armRefreshTimer(refresh_rate_hz_)) {
+      // No timer → the frame would never be transferred; do not acknowledge a
+      // display state that cannot display (Codex E8). STATE(timer_fail) recorded.
+      Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
+      current_source_->sendResponse(SET_FRAME_POSITION_CMD, 1,
+                        "SET_FRAME_POSITION: refresh timer unavailable");
+      return;
+    }
+  }
+  Health::mark(Health::OP_CMD_RESPOND, SET_FRAME_POSITION_CMD);
   current_source_->sendResponse(SET_FRAME_POSITION_CMD, 0, "");
 }
 
@@ -1117,6 +1649,7 @@ void CommandProcessor::handleSetFramePosition(const ParsedCommand &cmd) {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::buildPsramFrame(uint16_t index) {
+  invalidateFrameBuf();
   memset(frame_buf_, 0, sizeof(frame_buf_));
   frame_buf_[0] = 'F';
   frame_buf_[1] = 'R';
@@ -1149,11 +1682,14 @@ void CommandProcessor::handleDisplayPsramIndex(const ParsedCommand &cmd) {
   }
   uint16_t index = (uint16_t)cmd.data[2] | ((uint16_t)cmd.data[3] << 8);
 
-  spi_.disarmRefreshTimer();
+  // free-running refresh: no disarm per command; the arm below is idempotent
   psram_start_index_ = index;
   psram_play_count_  = 1;          // static single index
   psram_play_offset_ = 0;
   buildPsramFrame(index);
+  if (state_ != ArenaState::PSRAM_PLAY) {
+    Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::PSRAM_PLAY, 0);
+  }
   state_ = ArenaState::PSRAM_PLAY;
   if (!refresh_rate_explicit_) refresh_rate_hz_ = defaultRefreshFor(block_byte_count_);
   spi_.armRefreshTimer(refresh_rate_hz_);
@@ -1174,12 +1710,15 @@ void CommandProcessor::handlePsramPlay(const ParsedCommand &cmd) {
   uint16_t fps   = (uint16_t)p[4] | ((uint16_t)p[5] << 8);
   if (count == 0) count = 1;
 
-  spi_.disarmRefreshTimer();
+  // free-running refresh: no disarm per command; the arm below is idempotent
   psram_start_index_ = start;
   psram_play_count_  = count;
   psram_play_offset_ = 0;
   frame_rate_hz_     = fps;          // animation advance rate (separate from refresh)
   buildPsramFrame(start);
+  if (state_ != ArenaState::PSRAM_PLAY) {
+    Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::PSRAM_PLAY, 0);
+  }
   state_ = ArenaState::PSRAM_PLAY;
   last_advance_us_ = micros();
   // Retransmit (refresh) faster than the animation advances so each index is
@@ -1219,7 +1758,24 @@ void CommandProcessor::serviceDisconnects() {
 void CommandProcessor::transmitOnRefresh() {
   if (spi_.refreshFlag) {
     spi_.refreshFlag = false;
+    uint32_t t0 = micros();
     spi_.transferFrame(frame_buf_, block_byte_count_);
+    buf_presented_ = true;  // presentation accounting runs on EVERY transfer, not only on recorded changes
+    // Telemetry FRAME (Telemetry.h): one record per displayed frame CHANGE —
+    // t_us = start of the SPI push (what the panels latch), spi_us = its
+    // duration, sd_load_us = the readFrame that produced this frame. Held
+    // frames (same index + pattern re-sent every refresh tick) are not
+    // recorded, so a 300 Hz refresh of a static frame costs nothing.
+    if (cur_frame_index_ != tel_last_frame_ || pattern_id_ != tel_last_pattern_) {
+      tel_last_frame_   = cur_frame_index_;
+      tel_last_pattern_ = pattern_id_;
+      const uint8_t superseded = superseded_pending_;  // buffers replaced before any transfer since the last record
+      superseded_pending_ = 0;
+      Telemetry::frame(t0, cur_frame_index_, pattern_id_,
+                       Health::stats.last_sd_read_us, micros() - t0,
+                       t0 - frame_req_us_,                       // dispatch/decision → SPI start
+                       superseded, frame_src_flags_);
+    }
   }
 }
 
@@ -1538,8 +2094,95 @@ void CommandProcessor::serviceClosedLoop() {
   if (changed) loadFrame(cur_frame_index_);
 }
 
+// STATE(sd_reads): how many readFrame calls the pattern being closed / left
+// received — the host cannot derive it from FRAME records (replaced-before-
+// transfer frames are not FRAMEs) nor, since same-index 0x70s skip the read,
+// from accepted commands. Emitted from enterAllOff and enterPatternMode; the
+// counter restarts at 0 so a STOP followed by a new trial emits it once.
+static constexpr uint32_t kSdReadsCheckpoint = 30000;  // ≈ 2.5 min at 200 reads/s
+
+void CommandProcessor::flushOpenReads() {
+  if (open_reads_ == 0) return;
+  // code = binary shift, arg = reads >> shift: a 20-minute single-pattern trial at
+  // 300 reads/s is 360k reads, well past a bare u16 (Codex review).
+  uint8_t shift = 0;
+  uint32_t v = open_reads_;
+  while (v > 0xFFFF) { v >>= 1; ++shift; }
+  Telemetry::state(Telemetry::ST_SD_READS, shift, (uint16_t)v);
+  open_reads_ = 0;
+}
+
+// Buffer ownership changes hands (error glyph / all-on / dark / streamed frame /
+// PSRAM index block / pattern open): drop the SD-frame validity AND its
+// provenance, so a FRAME record for the new content never inherits sd_read /
+// contiguous flags or a stale request time, and count an SD frame that never
+// reached the panels as superseded (Codex review, 2026-09-13).
+// The pixels stay, the derived outputs (DAC frame marker, LUT) may not: make the
+// next SET_FRAME_POSITION for this index run loadFrame again, but keep the
+// buffer's provenance and count it as superseded only if it was never shown
+// (Codex round 2: an AO change between two loads lost one superseded count).
+void CommandProcessor::dropFrameCache() {
+  // Reuse eligibility only: the pixels stay valid (and may still be presented at the
+  // next refresh), so provenance and presentation accounting are untouched — an
+  // unpresented frame is counted as superseded when its pixels are actually replaced.
+  sd_cache_ok_ = false;
+}
+
+void CommandProcessor::invalidateFrameBuf() {
+  if (frame_buf_is_frame_ && !buf_presented_ && superseded_pending_ < 0xFF) ++superseded_pending_;
+  frame_buf_is_frame_ = false;
+  sd_cache_ok_ = false;
+  frame_src_flags_ = 0;
+  frame_req_us_ = micros();
+  buf_presented_ = false;
+}
+
 bool CommandProcessor::loadFrame(uint16_t frame_index) {
+  // Request/decision time of the frame about to be loaded: the 0x70 dispatch
+  // when handleSetFramePosition asked for it, else now (Mode 2/4 decided here).
+  if (frame_buf_is_frame_ && !buf_presented_ && superseded_pending_ < 0xFF) ++superseded_pending_;  // the previous SD frame never reached the panels
+  frame_req_us_ = pending_req_valid_ ? pending_req_us_ : micros();
+  pending_req_valid_ = false;
+  frame_buf_is_frame_ = false;  // being overwritten; set again below on success
+  frame_src_flags_ = 0;
+  buf_presented_ = false;
+  // Health (#50): breadcrumb + readFrame timing. Only caller of readFrame.
+  Health::mark(Health::OP_SD_READ);
+  uint32_t t_sd = micros();
   uint8_t err = sd_.readFrame(frame_index, frame_buf_, sizeof(frame_buf_));
+  t_sd = micros() - t_sd;
+  Health::clear();
+  ++Health::stats.sd_reads;
+  ++open_reads_;
+  if ((open_reads_ % kSdReadsCheckpoint) == 0) {
+    // Cumulative checkpoint (STATE kind 14, own kind so kind 13 keeps its meaning): a
+    // watchdog reset mid-trial would otherwise lose the read count of exactly the
+    // trial worth analysing (Codex rounds 2/3).
+    uint8_t shift = 0;
+    uint32_t v = open_reads_;
+    while (v > 0xFFFF) { v >>= 1; ++shift; }
+    Telemetry::state(Telemetry::ST_SD_READS_CKPT, shift, (uint16_t)v);  // own kind: kind 13 keeps its meaning
+  }
+  if (t_sd > Health::stats.sd_read_max_us) Health::stats.sd_read_max_us = t_sd;
+  Health::stats.last_sd_read_us = t_sd;  // -> telemetry FRAME.sd_load_us
+  if (t_sd > Telemetry::kSdSlowThresholdUs) {
+    // Attribute the stall to the slowest phase of the read (seek = FAT walk /
+    // O(1); body = data sectors incl. the CMD18 restart; tail = CRC trailer),
+    // then the card's error context: did SdFat see an error / retry, or did
+    // the card simply hold the bus (housekeeping)?
+    uint32_t hundreds = t_sd / 100;
+    uint32_t s = sd_.lastSeekUs(), b = sd_.lastBodyUs(), c = sd_.lastTailUs();
+    uint8_t phase = (s >= b && s >= c) ? Telemetry::kSdSlowPhaseSeek
+                  : (b >= c)           ? Telemetry::kSdSlowPhaseBody
+                                       : Telemetry::kSdSlowPhaseTail;
+    if (err != CE_NONE) phase |= Telemetry::kSdSlowErrorFlag;
+    Telemetry::state(Telemetry::ST_SD_SLOW, phase, hundreds > 0xFFFF ? 0xFFFF : (uint16_t)hundreds);
+    // errorData() is the USDHC IRQSTAT the driver saved at its LAST error (sticky, may
+    // predate this read); its informative bits are 16-28 (command/data timeout, CRC,
+    // end-bit, auto-CMD12, DMA errors) — keep the upper half (Codex review).
+    Telemetry::state(Telemetry::ST_SD_SLOW_CTX, sd_.cardErrorCode(),
+                     (uint16_t)(sd_.cardErrorData() >> 16));
+  }
   if (err != CE_NONE) {
     DBG_PRINTF("[cmd] loadFrame %u failed err=%u\n",
                (unsigned)frame_index, (unsigned)err);
@@ -1548,19 +2191,27 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
   }
   frame_byte_count_ = (uint16_t)(stream_frame_prefix_byte_count
                                  + (uint32_t)sd_.info().num_panels * block_byte_count_);
+  frame_buf_is_frame_ = true;
+  frame_src_flags_ = (uint8_t)(Telemetry::kFrameFlagSdRead
+                               | (sd_.contiguous() ? Telemetry::kFrameFlagContiguous : 0));
   patchDispMode();
   patchTrialDuty();
+  bool outputs_ok = true;
   if (ao_mode_ == 1) {
     // frame_number AO (#135): DAC tracks the frame position, 0 V = frame 0 ..
     // 5 V = last frame. loadFrame only runs when the index CHANGES, so the
     // ~100 µs blocking I2C write costs nothing while a frame is held.
-    writeDacMv(frame_count_ > 1
-                   ? (uint16_t)((uint32_t)frame_index * 5000 / (frame_count_ - 1))
-                   : (uint16_t)0);
+    outputs_ok = writeDacMv(frame_count_ > 1
+                                ? (uint16_t)((uint32_t)frame_index * 5000 / (frame_count_ - 1))
+                                : (uint16_t)0);
   } else if (ao_lut_len_ > 0 && ao_lut_mode_ == 0) {
     ao_lut_idx_ = (uint16_t)(frame_index % ao_lut_len_);
-    applyAoLut(ao_lut_idx_);
+    outputs_ok = applyAoLut(ao_lut_idx_);
   }
+  // The same-index skip may reuse this frame only if its derived outputs were
+  // actually applied: after an I²C failure the next 0x70 for the same index must
+  // come back through here and retry (whole-stack review, 2026-09-13).
+  sd_cache_ok_ = outputs_ok;
   return true;
 }
 
@@ -1569,7 +2220,9 @@ bool CommandProcessor::loadFrame(uint16_t frame_index) {
 // ---------------------------------------------------------------------------
 
 void CommandProcessor::enterAllOff() {
+  Health::mark(Health::OP_CMD_DISARM, 0);  // the STOP-path PIT access (IntervalTimer::end)
   spi_.disarmRefreshTimer();
+  Health::clear();
   // Panels run in Persistent mode and HOLD their last received frame, so simply
   // stopping transmission leaves them lit. Push an all-dark frame so they
   // actually blank, then go quiet. Sent a few times for reliability on the
@@ -1580,6 +2233,8 @@ void CommandProcessor::enterAllOff() {
   }
   state_ = ArenaState::ALL_OFF;
   frame_byte_count_ = 0;
+  Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::ALL_OFF, pattern_id_);
+  flushOpenReads();
   trial_duty_ = 0;  // trial over — per-trial duty does not outlive it (#33)
 }
 
@@ -1592,6 +2247,7 @@ void CommandProcessor::enterAllOn() {
   fillFrameBufferAllOn(block_byte_count_);
   state_ = ArenaState::ALL_ON;
   spi_.armRefreshTimer(refresh_rate_hz_);
+  Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::ALL_ON, 0);
 #ifdef DEBUG_SERIAL
   DBG_PRINTF("[cmd] enterAllOn block=%u refresh=%lu Hz frame_bytes=%u\n",
              (unsigned)block_byte_count_,
@@ -1608,19 +2264,34 @@ void CommandProcessor::enterStreamingFrame(uint16_t block_byte_count) {
   block_byte_count_ = block_byte_count;
   state_ = ArenaState::STREAMING_FRAME;
   spi_.armRefreshTimer(refresh_rate_hz_);
+  Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)ArenaState::STREAMING_FRAME, 0);
 }
 
 bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
                                         int16_t frame_rate_hz, int16_t gain,
                                         uint16_t init_frame, uint16_t duration_ticks) {
   spi_.disarmRefreshTimer();
+  flushOpenReads();              // STATE(sd_reads) for the pattern being left, if any
+  invalidateFrameBuf();          // a new pattern: whatever is buffered is not its frame
 
+  Health::mark(Health::OP_SD_OPEN);  // #50 breadcrumb: SD open + header validate
   uint8_t err = sd_.openPattern(pattern_id);
+  Health::clear();
+  Telemetry::state(Telemetry::ST_SD_OPEN, err, pattern_id);  // success and failure alike
   if (err != CE_NONE) {
     DBG_PRINTF("[cmd] openPattern %u failed err=%u\n",
                (unsigned)pattern_id, (unsigned)err);
     showError(err);
     return false;
+  }
+  // Layout of the file we will random-access: contiguous (O(1) seeks) or not,
+  // volume type, cluster size — the context for every sd_load_us in this trial.
+  {
+    uint32_t spc = sd_.sectorsPerCluster();
+    Telemetry::state(Telemetry::ST_SD_LAYOUT,
+                     (uint8_t)((sd_.contiguous() ? 1 : 0) | (sd_.fatType() == 64 ? 2 : 0)
+                               | (sd_.appliedLegacySeek() ? 4 : 0) | (sd_skip_same_index_ ? 0 : 8)),
+                     spc > 0xFFFF ? 0xFFFF : (uint16_t)spc);
   }
 
   pattern_id_      = pattern_id;
@@ -1642,7 +2313,15 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
       ? millis() + (uint32_t)duration_ticks * AC::constants::duration_tick_ms
       : 0;
   state_ = mode;
-  spi_.armRefreshTimer(refresh_rate_hz_);
+  if (!spi_.armRefreshTimer(refresh_rate_hz_)) {
+    // No refresh timer → nothing would ever reach the panels. Park in ALL_OFF
+    // and fail the trial start (TRIAL_PARAMS replies "load failed") instead of
+    // acknowledging a display state that cannot display (Codex E8).
+    enterAllOff();
+    return false;
+  }
+  Telemetry::state(Telemetry::ST_STATE_CHANGE, (uint8_t)mode, pattern_id_);
+  tel_last_frame_ = tel_last_pattern_ = 0xFFFF;  // first refresh of the trial records a FRAME
   DBG_PRINTF("[cmd] enterPatternMode state=%u id=%u frames=%u rate=%u gain=%d\n",
              (unsigned)mode, (unsigned)pattern_id_, (unsigned)frame_count_,
              (unsigned)frame_rate_hz_, (int)gain_);
@@ -1652,9 +2331,11 @@ bool CommandProcessor::enterPatternMode(ArenaState mode, uint16_t pattern_id,
 void CommandProcessor::showError(uint8_t code) {
   spi_.disarmRefreshTimer();
   block_byte_count_ = G6::block_byte_count_gs16;
+  invalidateFrameBuf();
   frame_byte_count_ = G6Error::buildErrorFrame(frame_buf_, code, panel_count_per_frame);
   state_ = ArenaState::ERROR_DISPLAY;
   error_until_ms_ = millis() + error_display_hold_ms;
+  Telemetry::state(Telemetry::ST_ERROR_GLYPH, code, 0);  // implies state_change -> ERROR_DISPLAY
   uint32_t r = refresh_rate_explicit_ ? refresh_rate_hz_
                                       : defaultRefreshFor(block_byte_count_);
   spi_.armRefreshTimer(r);
@@ -1736,6 +2417,7 @@ void CommandProcessor::fillFrameBufferAllOn(uint16_t block_byte_count) {
   // Synthesize an all-max-pixel frame using the current panel display mode.
   // Block layout: [header][cmd][200 pixel bytes = 0xFF][duty_cycle=0xFF].
   // Parity is recomputed per block.
+  invalidateFrameBuf();
   memset(frame_buf_, 0, sizeof(frame_buf_));
 
   // Frame prefix: "FR" + frame index 0 — informational only, matches the
@@ -1768,6 +2450,7 @@ void CommandProcessor::fillFrameBufferDark() {
   // HOLD dark after transmission stops. A fixed Persistent opcode (not
   // panel_disp_mode_) guarantees blanking even from Triggered/Gated modes,
   // mirroring how the error-glyph path uses a mode-independent opcode.
+  invalidateFrameBuf();
   memset(frame_buf_, 0, sizeof(frame_buf_));
   frame_buf_[0] = 'F';
   frame_buf_[1] = 'R';
@@ -1956,6 +2639,7 @@ bool CommandProcessor::handleSetFirmwareFile(const ParsedCommand &cmd) {
   const char *fail_msg = "Upload timeout";
 
   while (remaining > 0) {
+    Health::watchdogKick();  // synchronous upload (30 s idle deadline) in loop() context
     size_t want = (remaining < CHUNK) ? (size_t)remaining : CHUNK;
     size_t got  = current_source_->readBulkBytes(chunk, want);
     if (got > 0) {
@@ -2097,6 +2781,7 @@ void CommandProcessor::drainBulkData(uint32_t remaining) {
   uint32_t t0 = start;
   while (remaining > 0) {
     if ((uint32_t)(millis() - start) > kAbsoluteTimeoutMs) break;
+    Health::watchdogKick();  // up to 15 s of draining in loop() context; deadlines below unchanged
     size_t want = (remaining < sizeof(buf)) ? (size_t)remaining : sizeof(buf);
     size_t got = current_source_->readBulkBytes(buf, want);
     if (got > 0) {

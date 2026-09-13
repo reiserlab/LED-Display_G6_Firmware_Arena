@@ -30,8 +30,20 @@ class SpiManager {
                            uint8_t *cipo, size_t len);
 
   // Display refresh timer — fires refreshFlag from ISR; main loop drains.
-  void armRefreshTimer(uint32_t frequency_hz);
+  // FREE-RUNNING refresh timer (2026-09-13, wedge #5 caught by the watchdog at
+  // IntervalTimer::end()'s PIT register store, prev_breadcrumb OP_CMD_DISARM/0x70):
+  // arm is IDEMPOTENT — already running at this rate = no PIT access at all;
+  // a different rate on a running timer updates LDVAL (IntervalTimer::update),
+  // from a stopped timer begin()s the channel. Callers on the per-command hot
+  // path (0x70, 0x3A) never disarm; only geometry/mode changes do.
+  // Returns false only when the timer could not be started (no free PIT
+  // channel — STATE(timer_fail) is recorded); callers that enter a display
+  // state must not acknowledge it in that case. A rate change on a running
+  // timer uses IntervalTimer::update() (LDVAL only, phase-preserving, no end()).
+  bool armRefreshTimer(uint32_t frequency_hz);
   void disarmRefreshTimer();
+  bool     refreshArmed() const            { return armed_hz_ != 0; }
+  bool     refreshArmedAt(uint32_t hz) const { return armed_hz_ == hz && hz != 0; }
 
   // SPI clock — runtime-adjustable in whole MHz (1..30). CS setup/hold delays
   // and the CIPO realign shift are recomputed proportionally on each change.
@@ -65,6 +77,7 @@ class SpiManager {
   uint32_t cs_setup_delay_ns_ = AC::constants::cs_setup_delay_ns;
   uint32_t cs_hold_delay_ns_  = AC::constants::cs_hold_delay_ns;
   uint32_t frames_sent_       = 0;
+  uint32_t armed_hz_          = 0;   // refresh rate the PIT channel is running at; 0 = disarmed
   int16_t  framescan_pin_a_   = -1;  // frame-scan gate pins (setFramescanGatePins)
   int16_t  framescan_pin_b_   = -1;
 #ifdef DEBUG_SERIAL
