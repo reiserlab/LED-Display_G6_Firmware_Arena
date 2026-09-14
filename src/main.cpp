@@ -150,6 +150,14 @@ void setup() {
   // attached by now, so a wedge with an unpreemptable interrupt storm shows
   // isr_last = 4/5/6 instead of "main loop at X, ISR none".
   wrapDriverVectors();
+
+  // Second blank burst (a RETRY, ~0.4 s after the first because watchdogBegin()'s
+  // calibration sits between them): on a forced watchdog reset the first burst reached
+  // 18 of 20 panels and an all-off sent seconds later blanked the other two (bench
+  // 2026-09-13). Why those two missed the first burst is not established; a panel that
+  // misses both stays lit while the controller reports ALL_OFF — verified per reset on
+  // the bench, not by the firmware (there is no panel acceptance readback).
+  cmdProc.blankPanelsAtBoot();
 }
 
 // The external-trigger input path (BNC "Digital IO 2 (5V)"/J4 -> U3 SN74LVC1T45
