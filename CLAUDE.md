@@ -25,11 +25,14 @@ instead of a silently wrong or frozen display.
 |---|---|---|---|
 | arena_10-10 (current production board) | `ARENA_HW_10_10` | 4 rows x 10 cols (40 panels) | `src/hw/ArenaConfig_10_10.h` |
 | arena_12-18 | `ARENA_HW_12_18` | 4 rows x 12 cols (48 panels) | `src/hw/ArenaConfig_12_18.h` |
+| G6_2x10 (arena_10-10 board, 2 rows populated -- the CSHL course controllers) | `ARENA_HW_2_10` | 2 rows x 10 cols (20 panels) | `src/hw/ArenaConfig_2_10.h` |
 
 `src/ArenaConfig.h` is a thin selector that includes the right per-board
 header based on the flag. `src/constants.h` selects `panel_count_per_frame_row/col`
-the same way. Everything else (SPI mode, block byte counts, refresh
-defaults, command opcodes) is shared and lives outside the `#if` blocks.
+the same way (the 2-10 branch also carries that board's refresh-rate
+defaults and its MISO OE-decode tie-high pin list). Everything else (SPI
+mode, block byte counts, command opcodes) is shared and lives outside the
+`#if` blocks.
 
 ## pixi tasks
 
@@ -46,10 +49,16 @@ pixi run build-12-18
 pixi run deploy-12-18
 pixi run deploy-12-18-performance
 pixi run monitor-12-18
+
+pixi run build-2-10
+pixi run deploy-2-10
+pixi run deploy-2-10-performance
+pixi run monitor-2-10
 ```
 
 These map directly to `platformio.ini` environments (`teensy41-10-10`,
-`teensy41-10-10-performance`, `teensy41-12-18`, `teensy41-12-18-performance`),
+`teensy41-10-10-performance`, `teensy41-12-18`, `teensy41-12-18-performance`,
+`teensy41-2-10`, `teensy41-2-10-performance`),
 all of which `extends = env:teensy41-base` and only differ by their
 `build_flags`. `DEBUG_SERIAL` gates the `[spi] CIPO` diagnostic prints and
 other `DBG_PRINTF` output (see `constants.h`'s `DBG_PRINTF` macro) -- use

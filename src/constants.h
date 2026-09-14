@@ -50,8 +50,11 @@ constexpr uint8_t panel_count_per_frame_col = 10;
 #elif defined(ARENA_HW_12_18)
 constexpr uint8_t panel_count_per_frame_row = 4;   // G6_4x12 arena (arena_12-18)
 constexpr uint8_t panel_count_per_frame_col = 12;
+#elif defined(ARENA_HW_2_10)
+constexpr uint8_t panel_count_per_frame_row = 2;   // G6_2x10 arena — the CSHL course controllers
+constexpr uint8_t panel_count_per_frame_col = 10;
 #else
-#error "Define ARENA_HW_10_10 or ARENA_HW_12_18 in build_flags (see platformio.ini)"
+#error "Define ARENA_HW_10_10, ARENA_HW_12_18 or ARENA_HW_2_10 in build_flags (see platformio.ini)"
 #endif
 
 constexpr uint8_t panel_count_per_frame
@@ -117,8 +120,15 @@ constexpr uint8_t region_cipo_pins[region_count_per_frame] = { 12, 1 };
 // rates are host-overridable via SET_REFRESH_RATE.
 // -----------------------------------------------------------------------------
 
+#if defined(ARENA_HW_2_10)
+// G6_2x10: inherited from the G4.1-ArenaSlim baseline — the values the CSHL
+// course controllers were bench-tested at (Mode-3 reliability stack, 2026-09).
+constexpr uint32_t refresh_rate_gs16_default = 300;
+constexpr uint32_t refresh_rate_gs2_default  = 1000;
+#else
 constexpr uint32_t refresh_rate_gs16_default = 400;
 constexpr uint32_t refresh_rate_gs2_default  = 1200;
+#endif
 
 // -----------------------------------------------------------------------------
 // Ethernet / TCP framing.
@@ -157,9 +167,16 @@ constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // bit1 v2_local_storage, bit2 mode_1_tsi, bit3 v3_triggered, bit4 v3_gated,
 // bit5 io_ext (extended I/O command set: SET_DIO_ROLE 0xAC / GET_DIO_ROLE
 // 0xAD / SET_AO_MODE 0xA3 / GET_ANALOG_IN 0xA4 — lets hosts detect the
-// #135 rig-I/O roles by capability instead of firmware-version guessing).
-// Advertises g6_mode + v2_local_storage + io_ext.
-constexpr uint8_t controller_capability_bitmap = 0x23;
+// #135 rig-I/O roles by capability instead of firmware-version guessing),
+// bit7 health (GET_HEALTH 0xCA: read-only loop/SD/SPI/USB telemetry + the
+// reset-surviving breadcrumb, issue #50; also gates GET_FIRMWARE_VERSION
+// 0xCB — same build introduced both, and older firmware flashes a CE 01
+// glyph on any unknown opcode, so hosts must not probe 0xCB blind). This byte
+// is FULL (bit 6 is claimed by fw #47 ai_cal): the telemetry ring
+// (SET_TELEMETRY 0xA8 / GET_TELEMETRY_BLOCK 0xA9, Telemetry.h) is advertised
+// by GET_FIRMWARE_VERSION (0xCB) flags bit 2 instead — hosts gate 0xA8 on that.
+// Advertises g6_mode + v2_local_storage + io_ext + health.
+constexpr uint8_t controller_capability_bitmap = 0xA3;
 
 // -----------------------------------------------------------------------------
 // SD pattern backend — Modes 2/3/4 load .pat files from the built-in SD slot.

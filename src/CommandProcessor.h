@@ -84,6 +84,32 @@ class CommandProcessor {
   uint32_t last_sample_us_  = 0;   // Mode 4 AIN sample clock
   float    frame_accum_     = 0.0f;// Mode 4 fractional-frame accumulator
   uint32_t trial_end_ms_    = 0;   // trial_params (0x08) Duration auto-stop deadline; 0 = not armed
+  // Telemetry FRAME de-dup (Telemetry.h): transmitOnRefresh records a FRAME
+  // only when the displayed index/pattern differs from the last one recorded.
+  // 0xFFFF = "nothing recorded yet" (reset in enterPatternMode so the first
+  // refresh of every trial is recorded even if it repeats the previous one).
+  uint16_t tel_last_frame_   = 0xFFFF;
+  uint16_t tel_last_pattern_ = 0xFFFF;
+  // SD fast path (2026-09-13). frame_buf_is_frame_: frame_buf_ holds the frame
+  // cur_frame_index_ of the open pattern, loaded by a successful loadFrame and
+  // not overwritten since (every other writer of frame_buf_ — glyph, all-on,
+  // dark, stream, PSRAM index — clears it). sd_cache_ok_ is the REUSE gate:
+  // AO mode/LUT changes clear only that (the pixels stay valid and may still
+  // be presented) so the next 0x70 re-derives the outputs. A SET_FRAME_POSITION
+  // for the same index is answered without touching the SD card only when both
+  // are set.
+  bool     frame_buf_is_frame_ = false;
+  bool     sd_cache_ok_ = false;        // reuse eligibility for the same-index skip (derived outputs current); cleared by dropFrameCache
+  bool     sd_skip_same_index_ = true;  // SET_SD_DIAG bit1 clears it: every 0x70 reads (A/B arm)
+  // Request→presentation instrumentation (FRAME.req_age_us / superseded).
+  uint32_t last_cmd_rx_us_   = 0;      // dispatch entry of the command being handled
+  uint32_t pending_req_us_   = 0;      // set by handleSetFramePosition before loadFrame
+  bool     pending_req_valid_ = false;
+  uint32_t frame_req_us_     = 0;      // request/decision time of the frame now in frame_buf_
+  uint8_t  frame_src_flags_  = 0;      // Telemetry::kFrameFlag*
+  bool     buf_presented_    = true;   // frame_buf_ content has reached the panels at least once
+  uint8_t  superseded_pending_ = 0;    // buffers replaced before any transfer since the last FRAME record (saturating)
+  uint32_t open_reads_       = 0;      // readFrame calls since the pattern was opened (STATE sd_reads)
 
   // Digital IO roles (#135, SET_DIO_ROLE 0xAC). Ports are 1-based on the wire
   // (== the board's "Digital IO 1/2 (5V)" BNC silkscreen == 0xAA channel);
@@ -265,6 +291,14 @@ class CommandProcessor {
   void handleTrialParams(const ParsedCommand &cmd);
   void handleSetFramePosition(const ParsedCommand &cmd);
   void handleGetControllerInfo();
+  void handleGetHealth();                                // get-health (0xCA) — O(1), no SD I/O (issue #50)
+  void handleGetFirmwareVersion();                       // get-firmware-version (0xCB) — compiled-in git identity (src/Version.h)
+  void handleSetTelemetry(const ParsedCommand &cmd);     // set-telemetry (0xA8) — events on/off (src/Telemetry.h); bits 5/6 = watchdog starve/off (Health.h)
+  void handleGetCrashReport();                           // get-crashreport (0xCC) — raw 128 B PJRC CrashReport region, not cleared
+  void handleGetSdInfo();                                // get-sd-info (0xCD) — card CID/CSD identity + volume geometry, O(1)
+  void handleSetSdDiag(const ParsedCommand &cmd);        // set-sd-diag (0xCE) — bench A/B switches (legacy seek / no same-index skip)
+  uint8_t sdDiagFlags() const;
+  void handleGetTelemetryBlock(const ParsedCommand &cmd);// get-telemetry-block (0xA9) — ack cursor + framed chunk of ring records
   void handleDisplayPsramIndex(const ParsedCommand &cmd);
   void handlePsramPlay(const ParsedCommand &cmd);
   bool handleBulkWriteCommand(const ParsedCommand &cmd);  // true = handed off to serviceUpload; caller must not consume yet
@@ -280,6 +314,12 @@ class CommandProcessor {
 
   // State transitions.
   void enterAllOff();
+ public:
+  // Boot: push a dark frame so panels that HELD a stimulus through a watchdog /
+  // software reset go dark with the controller's ALL_OFF state (persistent panels
+  // keep their last frame; a power-on starts dark anyway, so this is harmless then).
+  void blankPanelsAtBoot() { enterAllOff(); }
+ private:
   void enterAllOn();
   void enterStreamingFrame(uint16_t block_byte_count);
   bool enterPatternMode(ArenaState mode, uint16_t pattern_id,
@@ -294,6 +334,9 @@ class CommandProcessor {
   void serviceClosedLoop();
   void servicePsramPlay();               // V2 auto-advance (LAB-41/42)
   bool loadFrame(uint16_t frame_index);  // false on SD/CRC error (shows glyph)
+  void flushOpenReads();                 // STATE(sd_reads) for the pattern being left
+  void invalidateFrameBuf();             // buffer ownership changes: drop SD validity + provenance, count an unpresented frame
+  void dropFrameCache();                 // outputs derived in loadFrame changed (AO mode/LUT): drop cache reuse only, keep provenance
 
   // Helpers.
   void fillFrameBufferAllOn(uint16_t block_byte_count);

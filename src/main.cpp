@@ -4,6 +4,9 @@
 #include "SpiManager.h"
 #include "SdManager.h"
 #include "CommandProcessor.h"
+#include "Health.h"
+#include "Version.h"
+#include "Telemetry.h"
 
 NetworkManager   net;
 SerialManager    serial;
@@ -53,15 +56,42 @@ class SentinelPrint : public Print {
 
 void blinkStartupPattern();
 void setupInterruptPriorities();
+void wrapDriverVectors();
 
 void setup() {
+  // FIRST: capture + clear the reset cause and harvest the previous boot's
+  // breadcrumb before anything else runs (GET_HEALTH 0xCA, issue #50).
+  Health::begin();
+  // Telemetry ring (0xA8/0xA9): keep a valid OCRAM ring from the previous boot
+  // (the crash dump) or initialise it, then append STATE(boot). After
+  // Health::begin() — the boot record carries the reset cause + breadcrumb.
+  Telemetry::begin();
+
 #ifdef DEBUG_SERIAL
   Serial.begin(115200);
   delay(50);  // let CDC settle so this print isn't lost before the host attaches
   // TEMPORARY crash-loop diagnostic -- remove once root-caused.
   {
     SentinelPrint diag;
-    uint32_t srsr = SRC_SRSR;
+    // Build identity — same values GET_FIRMWARE_VERSION (0xCB) reports (src/Version.h).
+    diag.printf("=== G6 arena controller fw %s%s (%s) built %s, %ux%u panels%s ===\n",
+                AC::version::fw_git_sha, AC::version::fw_git_dirty ? "-dirty" : "",
+                AC::version::fw_git_branch, AC::version::fw_build_date,
+                (unsigned)AC::constants::panel_count_per_frame_row,
+                (unsigned)AC::constants::panel_count_per_frame_col,
+                AC::version::fw_debug_build ? " DEBUG_SERIAL" : "");
+    uint32_t srsr = Health::stats.reset_cause;  // SRC_SRSR itself is cleared by Health::begin()
+    if (Health::stats.prev_isr_valid && Health::stats.prev_wdog_fired) {
+      diag.printf("=== WATCHDOG reset: previous boot hung at pc=0x%08lX lr=0x%08lX (isr entries %lu) ===\n",
+                  (unsigned long)Health::stats.prev_wdog_pc, (unsigned long)Health::stats.prev_wdog_lr,
+                  (unsigned long)Health::stats.prev_isr_count);
+    }
+    if (Health::stats.prev_valid) {
+      diag.printf("=== health breadcrumb from previous boot: op=%u arg=0x%02X at %lu us; slowest op=%u %lu us ===\n",
+                  (unsigned)Health::stats.prev_last_op, (unsigned)Health::stats.prev_op_arg,
+                  (unsigned long)Health::stats.prev_stamp_us,
+                  (unsigned)Health::stats.prev_slow_op, (unsigned long)Health::stats.prev_slow_us);
+    }
     diag.printf("=== SRC_SRSR (reset cause) = 0x%08lX ===\n", (unsigned long)srsr);
     if (srsr & SRC_SRSR_IPP_USER_RESET_B)     diag.println("  IPP_USER_RESET_B (reset pin / button)");
     if (srsr & SRC_SRSR_CSU_RESET_B)          diag.println("  CSU_RESET_B");
@@ -72,6 +102,10 @@ void setup() {
     if (srsr & SRC_SRSR_JTAG_SW_RST)          diag.println("  JTAG_SW_RST");
     if (srsr & SRC_SRSR_IPP_RESET_B)          diag.println("  IPP_RESET_B (power-on reset)");
     if (srsr & SRC_SRSR_TEMPSENSE_RST_B)      diag.println("  TEMPSENSE_RST_B");
+    diag.printf("=== telemetry ring: %s, boot_count=%lu next_seq=%lu pending=%lu B dropped=%lu ===\n",
+                Telemetry::keptAcrossReset() ? "KEPT across reset" : "initialised",
+                (unsigned long)Telemetry::bootCount(), (unsigned long)Telemetry::nextSeq(),
+                (unsigned long)Telemetry::pendingBytes(), (unsigned long)Telemetry::dropped());
     if (CrashReport) {
       diag.println("=== CrashReport (previous reset) ===");
       diag.print(CrashReport);
@@ -97,7 +131,33 @@ void setup() {
   spi.begin();
   sd.begin();  // mounts BUILTIN_SDCARD for Modes 2/3/4; safe with no card
 
+  // A watchdog or software reset restarts the controller in ALL_OFF, but the
+  // panels are persistent and still show the last frame of the interrupted
+  // trial — blank them now so "controller idle" also means "arena dark".
+  cmdProc.blankPanelsAtBoot();
+
   setupInterruptPriorities();
+
+  // LAST: measure the RTWDOG tick rate and program the real 2 s timeout
+  // (Health::begin() already armed it with a long provisional timeout, so the
+  // boot above was protected but never clipped). From here loop() must kick
+  // it every iteration or the controller resets WITH the breadcrumb +
+  // telemetry ring intact (the #50 hang becomes a self-healing reboot).
+  Health::watchdogBegin();
+
+  // ISR breadcrumb coverage for the core/driver vectors we cannot instrument
+  // from inside (USB-CDC, SDIO, LPSPI): thin trampolines around whatever is
+  // attached by now, so a wedge with an unpreemptable interrupt storm shows
+  // isr_last = 4/5/6 instead of "main loop at X, ISR none".
+  wrapDriverVectors();
+
+  // Second blank burst (a RETRY, ~0.4 s after the first because watchdogBegin()'s
+  // calibration sits between them): on a forced watchdog reset the first burst reached
+  // 18 of 20 panels and an all-off sent seconds later blanked the other two (bench
+  // 2026-09-13). Why those two missed the first burst is not established; a panel that
+  // misses both stays lit while the controller reports ALL_OFF — verified per reset on
+  // the bench, not by the firmware (there is no panel acceptance readback).
+  cmdProc.blankPanelsAtBoot();
 }
 
 // The external-trigger input path (BNC "Digital IO 2 (5V)"/J4 -> U3 SN74LVC1T45
@@ -108,6 +168,7 @@ void setup() {
 // net against U3 (boot contention). applyDioRole tri-states D35 first.
 
 void loop() {
+  Health::loopTick();         // 0.  loop-iteration timing + count (GET_HEALTH 0xCA, #50)
   // Must run BEFORE net.serviceTcp(): net_'s client_ is a single reused slot,
   // so if the client owning an active 0x84/0x85/0x8A transfer disconnected,
   // serviceTcp() below would silently swap in a brand-new client on the same
@@ -118,6 +179,7 @@ void loop() {
   serial.serviceUsb();        // 1b. Read and parse commands from USB CDC
   cmdProc.processCommand();   // 2.  Handle one parsed command per source
   cmdProc.serviceDisplay();   // 3.  Re-transmit current frame at refresh rate
+  Telemetry::service();       // 3a. Telemetry ring: heap guard + synthetic producer (T1); one compare when idle
   cmdProc.serviceDownload();  // 3b. Stream one 0x84 download chunk, if one is in flight
   cmdProc.serviceUpload();    // 3c. Stream one 0x85 upload chunk, if one is in flight
   cmdProc.serviceArchive();   // 3d. Stream one 0x8A archive step, if one is in flight
@@ -159,10 +221,64 @@ void blinkStartupPattern() {
 }
 
 void setupInterruptPriorities() {
-  // SPI first, then Ethernet, then SDIO last. SD reads happen in the main
-  // loop (Modes 2/3/4), so the SDHC IRQ stays below SPI and Ethernet.
-  NVIC_SET_PRIORITY(IRQ_LPSPI4, 0);   // Teensy 4.1 "SPI"  (B0)
-  NVIC_SET_PRIORITY(IRQ_LPSPI3, 0);   // Teensy 4.1 "SPI1" (B1)
+  // Ethernet, then SDIO last. SD reads happen in the main loop (Modes 2/3/4),
+  // so the SDHC IRQ stays below Ethernet.
+  //
+  // The LPSPI3/LPSPI4 lines used to be set to priority 0 here. Nothing in this
+  // firmware attaches an LPSPI vector (SpiManager's async path completes via
+  // the DMA channel ISRs / EventResponder), so that was dead configuration —
+  // but at priority 0 an LPSPI interrupt, if one ever fired, could not be
+  // preempted by the RTWDOG pre-reset IRQ (also 0) and we would lose the PC
+  // capture. They now stay at the core default (128). (2026-09-13)
+  NVIC_SET_PRIORITY(IRQ_LPSPI4, 128);
+  NVIC_SET_PRIORITY(IRQ_LPSPI3, 128);
   NVIC_SET_PRIORITY(IRQ_ENET,   64);
   NVIC_SET_PRIORITY(IRQ_SDHC1,  96);  // USDHC1 drives the built-in SD slot
+}
+
+// ---------------------------------------------------------------------------
+// ISR breadcrumb trampolines (Health.h ISR_USB / ISR_SDHC / ISR_LPSPI).
+// Installed AFTER every begin() so the saved handler is whatever the core and
+// drivers attached. A vector still pointing at the core's
+// unused_interrupt_vector is left alone (nothing to measure; wrapping it would
+// only hide a spurious-interrupt fault).
+// ---------------------------------------------------------------------------
+
+extern "C" void unused_interrupt_vector(void);
+
+namespace {
+
+void (*saved_usb_isr)(void)    = nullptr;
+void (*saved_sdhc_isr)(void)   = nullptr;
+void (*saved_lpspi3_isr)(void) = nullptr;
+void (*saved_lpspi4_isr)(void) = nullptr;
+
+void usbTramp()    { uint8_t p = Health::isrEnterLite(Health::ISR_USB);   saved_usb_isr();    Health::isrExitLite(p); }
+void sdhcTramp()   { uint8_t p = Health::isrEnterLite(Health::ISR_SDHC);  saved_sdhc_isr();   Health::isrExitLite(p); }
+void lpspi3Tramp() { uint8_t p = Health::isrEnterLite(Health::ISR_LPSPI); saved_lpspi3_isr(); Health::isrExitLite(p); }
+void lpspi4Tramp() { uint8_t p = Health::isrEnterLite(Health::ISR_LPSPI); saved_lpspi4_isr(); Health::isrExitLite(p); }
+
+bool wrapVector(IRQ_NUMBER_t irq, void (**saved)(void), void (*tramp)(void)) {
+  void (*cur)(void) = _VectorsRam[irq + 16];
+  if (cur == nullptr || cur == unused_interrupt_vector || cur == tramp) return false;
+  *saved = cur;
+  attachInterruptVector(irq, tramp);
+  return true;
+}
+
+}  // namespace
+
+void wrapDriverVectors() {
+  bool usb   = wrapVector(IRQ_USB1,   &saved_usb_isr,    usbTramp);
+  bool sdhc  = wrapVector(IRQ_SDHC1,  &saved_sdhc_isr,   sdhcTramp);
+  bool spi3  = wrapVector(IRQ_LPSPI3, &saved_lpspi3_isr, lpspi3Tramp);
+  bool spi4  = wrapVector(IRQ_LPSPI4, &saved_lpspi4_isr, lpspi4Tramp);
+  (void)usb; (void)sdhc; (void)spi3; (void)spi4;
+#ifdef DEBUG_SERIAL
+  // DBG_PRINTF is gated on g_dbg_on (false during setup) and could never print
+  // here; use the boot-banner path, which is sentinel-framed and never blocks.
+  SentinelPrint diag;
+  diag.printf("=== isr breadcrumb trampolines: usb=%d sdhc=%d lpspi3=%d lpspi4=%d (0 = vector unused, not wrapped) ===\n",
+              (int)usb, (int)sdhc, (int)spi3, (int)spi4);
+#endif
 }

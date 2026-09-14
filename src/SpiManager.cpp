@@ -1,5 +1,7 @@
 #include "SpiManager.h"
 #include "G6PanelProtocol.h"
+#include "Health.h"
+#include "Telemetry.h"
 
 using namespace AC;
 using namespace AC::constants;
@@ -8,14 +10,18 @@ SpiManager   *SpiManager::instance_     = nullptr;
 volatile bool SpiManager::dmaComplete_  = false;
 
 void SpiManager::dmaISR(EventResponderRef) {
+  uint8_t p = Health::isrEnter(Health::ISR_DMA);
   dmaComplete_ = true;
+  Health::isrExit(p);
 }
 
 void SpiManager::refreshISR() {
+  uint8_t p = Health::isrEnter(Health::ISR_REFRESH);  // restores the PIT trampoline's marker on exit
   if (instance_) {
     instance_->refreshFlag = true;
     instance_->isr_count_++;
   }
+  Health::isrExit(p);
 }
 
 void SpiManager::begin() {
@@ -34,8 +40,6 @@ void SpiManager::begin() {
   }
 
   // Drive every CS line HIGH (deselected) before any transaction can run.
-  // This covers all 20 CS lines (4 rows x 5 bus-column-pairs), so every
-  // column's MISO OE-decode AND (see ArenaConfig.h) starts at all-HIGH / Hi-Z.
   for (uint8_t i = 0; i < panel_set_count; ++i) {
     // Preload HIGH before switching the pin to OUTPUT: the output register
     // resets to LOW, so pinMode-first drives a brief CS-low pulse on every
@@ -44,16 +48,76 @@ void SpiManager::begin() {
     digitalWriteFast(panel_sets[i].cs_pin, HIGH);
     pinMode(panel_sets[i].cs_pin, OUTPUT);
   }
+
+  // Hold the 2nd pair of per-column MISO OE-decode inputs HIGH. Without this
+  // they float (≈low), the OE̅ = CS0&CS1&CS2&CS3 AND can never reach all-HIGH,
+  // and every column's buffer stays enabled — shorting the wired-OR MISO bus so
+  // CIPO reads 00. Tied HIGH, OE̅ = CS_row0 & CS_row1, so one buffer per bus
+  // drives at a time. See ArenaConfig.h / arena-hardware-bug.md.
+  for (uint8_t i = 0; i < cs_decode_tie_high_count; ++i) {
+    pinMode(cs_decode_tie_high_pins[i], OUTPUT);
+    digitalWriteFast(cs_decode_tie_high_pins[i], HIGH);
+  }
 }
 
-void SpiManager::armRefreshTimer(uint32_t frequency_hz) {
-  if (frequency_hz == 0) return;
+bool SpiManager::armRefreshTimer(uint32_t frequency_hz) {
+  if (frequency_hz == 0) return false;
+  if (armed_hz_ == frequency_hz) return true;  // free-running: already ticking at this rate, leave the PIT alone
   uint32_t period_us = microseconds_per_second / frequency_hz;
-  refreshTimer_.begin(refreshISR, period_us);
+  if (armed_hz_ != 0) {
+    // Rate change on a running timer: IntervalTimer::update() rewrites LDVAL
+    // only — the current period completes, the next one uses the new length.
+    // No end()/begin() pair, so no PIT disable, no vector re-attach, no phase
+    // restart (Codex D7, 2026-09-13).
+    refreshTimer_.update(period_us);
+    armed_hz_ = frequency_hz;
+    return true;
+  }
+  if (!refreshTimer_.begin(refreshISR, period_us)) {   // starts the channel at the new period
+    // No free PIT channel (should be impossible with one timer, but a failed
+    // allocation must not become a sticky "already armed at this rate" — D5).
+    armed_hz_ = 0;
+    Telemetry::state(Telemetry::ST_TIMER_FAIL, 0, (uint16_t)(frequency_hz > 0xFFFF ? 0xFFFF : frequency_hz));
+    return false;
+  }
+  // begin() re-attached the core's pit_isr: put the ISR_PIT breadcrumb trampoline back.
+  Health::wrapPitVector();
+  armed_hz_ = frequency_hz;
+  return true;
 }
 
+// SAFE SHUTDOWN of the refresh timer — the leading mechanism candidate for the
+// #50 wedge (2026-09-13, wedge #5 wdog_pc at IntervalTimer::end()'s TCTRL store).
+// framework-arduinoteensy 1.160.0, cores/teensy4/IntervalTimer.cpp:
+//   end():    funct_table[index] = nullptr;   // FIRST
+//             channel->TCTRL = 0; channel->TFLG = 1;   // THEN
+//   pit_isr(): if (funct_table[n] != nullptr && channel->TFLG) { channel->TFLG = 1; funct_table[n](); }
+// If the PIT interrupt is taken between the nullptr store and the TCTRL store,
+// pit_isr runs with a null callback, never clears TFLG, and re-enters forever
+// at priority 128 — the main context is starved with its stacked PC exactly
+// at the TCTRL store (what the watchdog captured). SDHC (priority 96, see
+// main.cpp) preempts the storm outright; USB (128, IRQ 113 < 122) wins the
+// equal-priority NVIC tie-break between iterations — so USB stays enumerated
+// and the bootloader route works. Fix: mask ONLY the PIT at the NVIC around
+// end() — NOT PRIMASK, which would also mask the watchdog IRQ and, if the
+// alternative reading (a genuinely stalled peripheral store) were true, lose
+// the PC capture exactly where it matters. A PIT interrupt that pends during
+// the window runs pit_isr afterwards with a null callback AND an already-
+// cleared TFLG -> no storm. begin() re-enables IRQ_PIT itself (and the core's
+// TODO leaves it enabled after end()). Nothing else inside (no SD, no SPI).
 void SpiManager::disarmRefreshTimer() {
-  refreshTimer_.end();
+  if (armed_hz_ != 0) {
+    // Preserve the NVIC enable state rather than unconditionally re-enabling:
+    // the PIT IRQ is shared by all four channels, and the owner of that line
+    // is the core, not this driver (Codex round-3 F6 / hygiene item, 2026-09-13).
+    const bool was_enabled = NVIC_IS_ENABLED(IRQ_PIT);
+    NVIC_DISABLE_IRQ(IRQ_PIT);
+    asm volatile("dsb\n\tisb" ::: "memory");
+    refreshTimer_.end();
+    asm volatile("dsb" ::: "memory");
+    if (was_enabled) NVIC_ENABLE_IRQ(IRQ_PIT);
+  }
+  armed_hz_   = 0;
   refreshFlag = false;
 }
 
@@ -174,6 +238,7 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
     return;
   }
   ++frames_sent_;
+  Health::mark(Health::OP_SPI_FRAME);  // #50 breadcrumb; cleared at function end
 
   // Frame-scan gate HIGH: envelope opens just before the first panel set's
   // SPI transaction (out_debug_framescan, #135). digitalWrite (not Fast):
@@ -242,6 +307,7 @@ void SpiManager::transferFrame(const uint8_t *frame_buf,
   // actual SPI time.
   if (framescan_pin_a_ >= 0) digitalWrite((uint8_t)framescan_pin_a_, LOW);
   if (framescan_pin_b_ >= 0) digitalWrite((uint8_t)framescan_pin_b_, LOW);
+  Health::clear();  // SPI frame done (the diag dump below is USB, not SPI)
 
 #ifdef DEBUG_SERIAL
   if (capture) {
