@@ -59,6 +59,10 @@ pixi run monitor-12-18   # USB serial monitor (logs to log/)
 Each hardware target also has a `-performance` variant (`deploy-10-10-performance`,
 `deploy-12-18-performance`) that builds without `DEBUG_SERIAL`.
 
+The `monitor-*` tasks work on Linux, macOS and Windows and pick the arena's serial port
+automatically. If more than one Teensy is attached, name the port explicitly:
+`pixi run monitor-10-10 -- --port COM5` (or `/dev/cu.usbmodem*`, `/dev/ttyACM*`).
+
 ## Source files
 
 All source files live in `src/`.

@@ -2037,7 +2037,8 @@ void CommandProcessor::handleProgramPanel(const ParsedCommand &cmd) {
     return;
   }
   // Payload is the 1-based panel NUMBER (matches the panel-map labels); the arena
-  // config is 0-based (panel_index = row*10 + col), so convert here.
+  // config is 0-based (panel_index = row*panel_count_per_frame_col + col), so
+  // convert here.
   uint8_t panel_number = cmd.data[2];
   if (panel_number < 1) {
     current_source_->sendResponse(G6_PROGRAM_PANEL_CMD, 1, "panel numbers are 1-based (1..N)");

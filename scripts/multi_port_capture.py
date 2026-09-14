@@ -26,9 +26,9 @@ the strings parsed below:
     panel/src/messenger.cpp. Without it summarize_panel() reports 0 heartbeats.
   * Teensy/arena: the `[spi] CIPO` rows are gated on -DDEBUG_SERIAL (the
     DBG_PRINTF macro in src/constants.h, emitted from src/SpiManager.cpp). Build
-    with env teensy41-printf and flash via `pixi run deploy-printf`. The default
-    `pixi run deploy-10-10` (env teensy41-10-10) compiles them out, so summarize_teensy()
-    finds no rows.
+    with env teensy41-10-10 and flash via `pixi run deploy-10-10`. The
+    `pixi run deploy-10-10-performance` build (env teensy41-10-10-performance)
+    compiles them out, so summarize_teensy() finds no rows.
 """
 
 import argparse
