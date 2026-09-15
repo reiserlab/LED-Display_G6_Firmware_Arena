@@ -47,12 +47,15 @@ constexpr uint16_t panel_pixel_count
 #if defined(ARENA_HW_10_10)
 constexpr uint8_t panel_count_per_frame_row = 4;   // G6_4x10 arena (arena_10-10)
 constexpr uint8_t panel_count_per_frame_col = 10;
+constexpr bool    qwiic_present = false;           // no Qwiic/STEMMA QT jack on arena_10-10
 #elif defined(ARENA_HW_12_18)
 constexpr uint8_t panel_count_per_frame_row = 4;   // G6_4x12 arena (arena_12-18)
 constexpr uint8_t panel_count_per_frame_col = 12;
+constexpr bool    qwiic_present = true;            // J2 Qwiic/STEMMA QT jack (arena_12-18 v1.0)
 #elif defined(ARENA_HW_2_10)
 constexpr uint8_t panel_count_per_frame_row = 2;   // G6_2x10 arena — the CSHL course controllers
 constexpr uint8_t panel_count_per_frame_col = 10;
+constexpr bool    qwiic_present = false;           // no Qwiic/STEMMA QT jack on the 2x10 board
 #else
 #error "Define ARENA_HW_10_10, ARENA_HW_12_18 or ARENA_HW_2_10 in build_flags (see platformio.ini)"
 #endif
@@ -237,6 +240,23 @@ constexpr float    adc_ref_volts        = 3.3f;
 // Bipolar BNC input range that the OPA2277 front-end maps onto the ADC span
 // (midscale = 0 V). Hardware calibration value — flagged TBD in g6_03 § Mode 4.
 constexpr float    mode4_ain_input_range_volts = 10.0f;
+
+// -----------------------------------------------------------------------------
+// Qwiic / STEMMA QT jack (J2 on arena_12-18 v1.0, net-traced from
+// teensy.kicad_sch): pin 1 GND, pin 2 +3.3V, pin 3 SDA -> Teensy D17 (SDA1),
+// pin 4 SCL -> Teensy D16 (SCL1) — i.e. Wire1, a separate bus from the MCP4725
+// DAC on Wire (D18/D19). The board has no pull-ups on this bus; the Teensy's
+// 22k pad pull-ups keep it idle-high when nothing is plugged in, and the
+// Adafruit breakouts carry 10k each. 100 kHz for bring-up: tolerant of long
+// (200 mm) cables and a PCA9548 mux in the chain.
+// -----------------------------------------------------------------------------
+
+constexpr uint8_t  qwiic_sda_pin              = 17;
+constexpr uint8_t  qwiic_scl_pin              = 16;
+constexpr uint32_t qwiic_i2c_clock_hz         = 100'000;
+constexpr uint8_t  qwiic_i2c_addr_min         = 0x08;   // 0x00-0x07 reserved
+constexpr uint8_t  qwiic_i2c_addr_max         = 0x77;   // 0x78-0x7F reserved
+constexpr uint8_t  qwiic_i2c_read_byte_count_max = 64;  // < Wire BUFFER_LENGTH (136) and response max
 
 // -----------------------------------------------------------------------------
 // Controller error display (g6_03 § 6) — "CE / NN" glyph held >= this long.
