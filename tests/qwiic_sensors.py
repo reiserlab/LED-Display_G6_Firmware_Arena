@@ -412,3 +412,72 @@ class AS7343:
 
 
 SENSOR_CLASSES = {VEML7700.ADDR: VEML7700, TSL2591.ADDR: TSL2591, AS7343.ADDR: AS7343}
+SENSOR_NAMES = {addr: cls.__name__ for addr, cls in SENSOR_CLASSES.items()}
+
+
+class Sampler:
+    """Every supported sensor on the bus, read together in pipelined rounds:
+    the AS7343 frame is started first, the continuously-integrating TSL2591 /
+    VEML7700 are read while it runs, then the AS7343 is collected. A round
+    therefore takes the slowest integration, not the sum."""
+
+    def __init__(self, transport, tsl_gain="med", tsl_atime=100, as_gain=64):
+        self.t = transport
+        self.devices = locate_devices(transport)
+        self.sensors: list[tuple[Located, object]] = []
+        self.period_s = 0.0
+        for dev in self.devices:
+            cls = SENSOR_CLASSES.get(dev.addr)
+            if cls is None:
+                continue
+            s = cls(transport)
+            with reach(transport, dev):
+                if isinstance(s, TSL2591):
+                    s.configure(gain=tsl_gain, atime_ms=tsl_atime)
+                    self.period_s = max(self.period_s, tsl_atime / 1000.0)
+                elif isinstance(s, VEML7700):
+                    s.configure()
+                    self.period_s = max(self.period_s, 0.1)
+                else:
+                    s.configure(gain=as_gain)
+                    self.period_s = max(self.period_s, s.frame_ms / 1000.0)
+            self.sensors.append((dev, s))
+        self.settings = {"tsl_gain": tsl_gain, "tsl_atime": tsl_atime, "as_gain": as_gain}
+
+    def missing(self, expected=SENSOR_CLASSES) -> list[str]:
+        present = {dev.addr for dev, _ in self.sensors}
+        return [f"{SENSOR_NAMES[a]} (0x{a:02X})" for a in expected if a not in present]
+
+    def round(self) -> list[tuple[Located, object, dict]]:
+        spectral = [(d, s) for d, s in self.sensors if isinstance(s, AS7343)]
+        others = [(d, s) for d, s in self.sensors if not isinstance(s, AS7343)]
+        for d, s in spectral:
+            with reach(self.t, d):
+                s.start()
+        out = {}
+        for d, s in others:
+            with reach(self.t, d):
+                out[id(s)] = s.read()
+        for d, s in spectral:
+            with reach(self.t, d):
+                out[id(s)] = s.collect()
+        return [(d, s, out[id(s)]) for d, s in self.sensors]
+
+    def close(self) -> None:
+        for d, s in self.sensors:
+            if isinstance(s, (TSL2591, AS7343)):
+                with reach(self.t, d):
+                    s.power_off()
+
+
+def flatten(sensor, r: dict) -> dict:
+    """Reading dict -> ordered {metric: value} for tables; None = unusable."""
+    if isinstance(sensor, TSL2591):
+        return {"full": r["full"], "ir": r["ir"],
+                "lux~": None if r["lux_approx"] is None else r["lux_approx"], "sat": int(r["full"] >= 0xFFFF or r["lux_approx"] is None)}
+    if isinstance(sensor, VEML7700):
+        return {"als": r["als"], "white": r["white"], "lux~": r["lux_approx"], "sat": int(r["als"] >= 0xFFFF)}
+    out = {k: v for k, v in r["spectral"].items()}
+    out["VIS"] = r["vis"]
+    out["sat"] = int(r["sat"])
+    return out
