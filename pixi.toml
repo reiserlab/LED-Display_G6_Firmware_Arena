@@ -39,6 +39,9 @@ all-on-serial = "python scripts/all_on_serial.py"
 qwiic-probe = "python scripts/qwiic_probe.py"
 # Continuous one-line-per-sample readout of the TSL2591 / VEML7700 (Ctrl-C -> stats).
 qwiic-read = "python scripts/qwiic_read.py"
+# Evaluate the daisy-chained sensors: timed capture -> noise/headroom/spectrum report,
+# `-- --ab` for a before/after light change, `-- --live` for an in-place dashboard.
+qwiic-eval = "python scripts/qwiic_eval.py"
 test-diag    = "pytest tests/test_serial_only.py -v --transport=serial"
 # Automated suite excludes guided visual tests (they need a human at the arena).
 test-serial  = "pytest tests -v --transport=serial -m 'not visual'"
