@@ -1,4 +1,4 @@
-"""Qwiic / STEMMA QT jack (J2, arena_12-18) — I2C bridge commands 0xA6/0xA7
+"""Qwiic / STEMMA QT jack (J2, arena_12-18) — I2C bridge commands 0xB0/0xB1
 and the LAB-211 sensors behind them.
 
 Hardware-adaptive: the bus-level tests need only the jack (they pass with

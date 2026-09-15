@@ -262,7 +262,7 @@ def main():
         except NoQwiicJack as e:
             sys.exit(str(e))
         except RuntimeError as e:
-            sys.exit(f"{e} — firmware lacks the Qwiic bridge (0xA6/0xA7)?")
+            sys.exit(f"{e} — firmware lacks the Qwiic bridge (0xB0/0xB1)?")
 
         print(f"Qwiic sensor evaluation on {link}")
         found = ", ".join(f"{type(s).__name__} 0x{d.addr:02X} @ {d.where()}" for d, s in sampler.sensors) or "none"

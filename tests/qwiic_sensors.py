@@ -1,5 +1,5 @@
 """Qwiic / STEMMA QT sensor helpers over the controller's I2C bridge
-(GET_I2C_SCAN 0xA6 / I2C_TRANSFER 0xA7 -> Wire1 = jack J2 on arena_12-18).
+(GET_I2C_SCAN 0xB0 / I2C_TRANSFER 0xB1 -> Wire1 = jack J2 on arena_12-18).
 
 Shared by tests/test_qwiic_i2c.py and scripts/qwiic_probe.py. The register
 maps here are the minimum needed to prove the I2C path end to end — identify

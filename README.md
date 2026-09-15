@@ -760,8 +760,8 @@ i.e. `Wire1` — separate from the MCP4725 AO DAC on `Wire` (D18/D19). The board
 on it (the breakouts carry 10k each); the firmware runs it at 100 kHz. Two commands expose the
 bus to a host so sensors can be validated without sensor-specific firmware:
 
-- `GET_I2C_SCAN` (0xA6): `[01 A6]` → `[count, addr...]`, the 7-bit addresses (0x08–0x77) that ACK.
-- `I2C_TRANSFER` (0xA7): `[len A7 addr wlen w... rlen]` → the `rlen` bytes read. Writes `wlen`
+- `GET_I2C_SCAN` (0xB0): `[01 B0]` → `[count, addr...]`, the 7-bit addresses (0x08–0x77) that ACK.
+- `I2C_TRANSFER` (0xB1): `[len B1 addr wlen w... rlen]` → the `rlen` bytes read. Writes `wlen`
   bytes, then reads `rlen` under a repeated start; `wlen = 0` is a plain read, `rlen = 0` a plain
   write, both zero an ACK probe. `rlen ≤ 64`. Status: 1 bad framing, 2 address NACK, 3 data NACK,
   4 bus error/timeout, 5 short read.
