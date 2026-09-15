@@ -873,7 +873,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case GET_I2C_SCAN_CMD: {
-      // [01 A6] → [count, addr...]: every 7-bit address on the Qwiic bus
+      // [01 B0] → [count, addr...]: every 7-bit address on the Qwiic bus
       // (Wire1) that ACKs a zero-length write. Bench check that the jack,
       // cable and sensor power are good before any register traffic. Blocks
       // the loop for the scan (~12 ms at 100 kHz when the bus is empty).
@@ -894,7 +894,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
     }
 
     case I2C_TRANSFER_CMD: {
-      // [len A7 addr wlen w[0..wlen) rlen] → the rlen bytes read. The wlen
+      // [len B1 addr wlen w[0..wlen) rlen] → the rlen bytes read. The wlen
       // bytes are written first; a following read (rlen > 0) runs under a
       // repeated start with no STOP in between, which is what register-
       // pointer reads on every Qwiic sensor expect. wlen = 0 is a plain read,
@@ -906,7 +906,7 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         break;
       }
       if (claimed_len < 4) {
-        current_source_->sendResponse(command_byte, 1, "Expected [len A7 addr wlen w... rlen]");
+        current_source_->sendResponse(command_byte, 1, "Expected [len B1 addr wlen w... rlen]");
         break;
       }
       uint8_t addr = buf[pos++];

@@ -1,6 +1,6 @@
 """Bench probe for the Qwiic / STEMMA QT jack (J2) on arena_12-18.
 
-Scans the controller's Wire1 bus through GET_I2C_SCAN (0xA6), maps any
+Scans the controller's Wire1 bus through GET_I2C_SCAN (0xB0), maps any
 PCA9548 mux channels, identifies the LAB-211 sensors (AS7343, TSL2591,
 VEML7700) and takes one raw light reading from each. Optionally repeats the
 readings so you can wave a hand / toggle the arena LEDs and watch them move.
@@ -11,7 +11,7 @@ readings so you can wave a hand / toggle the arena LEDs and watch them move.
     pixi run qwiic-probe -- --loop 20 --interval 0.5
 
 Exit codes: 0 all identified sensors OK, 1 no controller / firmware lacks
-0xA6 / no Qwiic jack, 2 a sensor answered but failed its ID check.
+0xB0 / no Qwiic jack, 2 a sensor answered but failed its ID check.
 """
 
 import argparse
@@ -154,7 +154,7 @@ def main():
         except NoQwiicJack as e:
             sys.exit(f"{e} — flash the arena_12-18 build (pixi run deploy-12-18)")
         except RuntimeError as e:
-            sys.exit(f"{e} — firmware predates the Qwiic bridge (0xA6/0xA7)?")
+            sys.exit(f"{e} — firmware predates the Qwiic bridge (0xB0/0xB1)?")
 
         print(f"\nQwiic bus scan ({len(root)} device{'s' if len(root) != 1 else ''}):")
         for a in root:

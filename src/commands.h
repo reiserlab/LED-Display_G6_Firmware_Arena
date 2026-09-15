@@ -40,14 +40,17 @@ enum ArenaCommands : uint8_t {
   SET_AO_LUT_CMD              = 0xA2,  // [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
   SET_AO_MODE_CMD             = 0xA3,  // [02 A3 mode] 0=programmable (0xA0/0xA2) | 1=frame_number (DAC tracks frame index, 0-5V normalized)
   GET_ANALOG_IN_CMD           = 0xA4,  // [01 A4] returns Analog In 1 + Analog In 2 as two int16 LE mV (±10V front-end, calibration TBD)
-  GET_I2C_SCAN_CMD            = 0xA6,  // [01 A6] Qwiic (Wire1) bus scan; returns [count, addr...] 7-bit addresses that ACKed (0x08-0x77)
-  I2C_TRANSFER_CMD            = 0xA7,  // [len A7 addr wlen w... rlen] Qwiic write-then-read (repeated start); returns the rlen bytes read
   SET_TELEMETRY_CMD           = 0xA8,  // [04 A8 flags rate_lo rate_hi] (or [02 A8 flags]) telemetry ring: flags bit0 = record events (default ON at boot), bit7 = synthetic producer (cmd 0xFE records at `rate`/s, T1 bench); bit4 = watchdog bits present, then bit6 = watchdog OFF, bit5 = starve (bench test, Health.h); bits 1-3 reserved
   GET_TELEMETRY_BLOCK_CMD     = 0xA9,  // [08 A9 ack_seq(u32) max_bytes(u16) flags] free records with seq <= ack_seq, then reply 18-byte header + whole records from the read cursor (not freed until acked); layout in src/Telemetry.h + README § Telemetry ring
   SET_DIGITAL_OUT_CMD         = 0xAA,  // [03 AA channel state] drive "Digital IO 1/2 (5V)" BNC HIGH/LOW (requires role out_programmable; off auto-promotes)
   GET_DIGITAL_OUT_CMD         = 0xAB,  // [01 AB] returns current state of Digital IO 1 and 2 data pins as two bytes
   SET_DIO_ROLE_CMD            = 0xAC,  // [03 AC port role] port 1|2; role 0=off 1=in_trigger 2=out_programmable 3=out_debug_framescan
   GET_DIO_ROLE_CMD            = 0xAD,  // [01 AD] returns [role1, level1, role2, level2] (level = live pin read, BNC level in input roles)
+  // 0xB0-0xBF: external sensors on the Qwiic/STEMMA QT jack (arena_12-18 J2 = Wire1).
+  // Generic I2C bridge first; sensor-level commands (e.g. a calibrated light
+  // read once LAB-211 picks a part) belong in this block too.
+  GET_I2C_SCAN_CMD            = 0xB0,  // [01 B0] Qwiic bus scan; returns [count, addr...] 7-bit addresses that ACKed (0x08-0x77)
+  I2C_TRANSFER_CMD            = 0xB1,  // [len B1 addr wlen w... rlen] write-then-read (repeated start); returns the rlen bytes read
   SET_ETHERNET_IP_ADDRESS_CMD = 0xC0,  // reserved — not yet implemented
   GET_ETHERNET_IP_ADDRESS_CMD = 0xC1,
   GET_CONTROLLER_INFO_CMD     = 0xC2,  // returns {version, capability_bitmap, mac[6]}
