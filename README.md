@@ -753,6 +753,25 @@ events are disabled. Ring capacity: 65,504 B ≈ 3,000–4,000 records ≈ 6 s a
 record as a JSON line, tracks seq gaps, and summarises on Ctrl-C (`--raw-out` also writes the raw
 blocks with a host receive stamp — the proposal's § 7 sidecar); `tests/telemetry_codec.py` is the
 decoder both it and the HIL tests use.
+### Qwiic / STEMMA QT jack (I2C bridge)
+
+arena_12-18 has a Qwiic jack, J2: GND, +3.3 V, SDA → Teensy D17 (SDA1), SCL → D16 (SCL1),
+i.e. `Wire1` — separate from the MCP4725 AO DAC on `Wire` (D18/D19). The board has no pull-ups
+on it (the breakouts carry 10k each); the firmware runs it at 100 kHz. Two commands expose the
+bus to a host so sensors can be validated without sensor-specific firmware:
+
+- `GET_I2C_SCAN` (0xB0): `[01 B0]` → `[count, addr...]`, the 7-bit addresses (0x08–0x77) that ACK.
+- `I2C_TRANSFER` (0xB1): `[len B1 addr wlen w... rlen]` → the `rlen` bytes read. Writes `wlen`
+  bytes, then reads `rlen` under a repeated start; `wlen = 0` is a plain read, `rlen = 0` a plain
+  write, both zero an ACK probe. `rlen ≤ 64`. Status: 1 bad framing, 2 address NACK, 3 data NACK,
+  4 bus error/timeout, 5 short read.
+
+arena_10-10 builds (no jack) answer both with `status = 1`. Both block the control loop for the
+transaction (≲ 12 ms for a full scan) — bench use, not the display hot path. `pixi run qwiic-probe`
+(`scripts/qwiic_probe.py`) scans the bus, maps PCA9548 mux channels, identifies the LAB-211 sensors
+(AS7343, TSL2591, VEML7700) and takes readings; `pixi run qwiic-read` streams all of them
+continuously (paced to the slowest integration, ~6.7 Hz with the AS7343, Ctrl-C for stats);
+`tests/test_qwiic_i2c.py` covers the same under pytest and skips whatever is not plugged in.
 
 ## SD pattern playback (Modes 2/3/4)
 

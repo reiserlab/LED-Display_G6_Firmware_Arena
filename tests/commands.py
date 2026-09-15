@@ -37,6 +37,8 @@ SET_DIGITAL_OUT_CMD         = 0xAA   # [03 AA ch state] drive "Digital IO 1/2 (5
 GET_DIGITAL_OUT_CMD         = 0xAB   # [01 AB] returns Digital IO 1 and 2 data-pin state as two bytes
 SET_DIO_ROLE_CMD            = 0xAC   # [03 AC port role] 0=off 1=in_trigger 2=out_programmable 3=out_debug_framescan
 GET_DIO_ROLE_CMD            = 0xAD   # [01 AD] returns [role1, level1, role2, level2]
+GET_I2C_SCAN_CMD            = 0xB0   # [01 B0] Qwiic (Wire1) bus scan; returns [count, addr...] 7-bit addresses that ACKed
+I2C_TRANSFER_CMD            = 0xB1   # [len B1 addr wlen w... rlen] Qwiic write-then-read (repeated start); returns rlen bytes
 SET_ETHERNET_IP_ADDRESS_CMD = 0xC0   # reserved, not yet implemented
 GET_ETHERNET_IP_ADDRESS_CMD = 0xC1
 GET_CONTROLLER_INFO_CMD     = 0xC2   # returns {version, capability_bitmap, mac[6]} (bit5 = io_ext, bit7 = health)

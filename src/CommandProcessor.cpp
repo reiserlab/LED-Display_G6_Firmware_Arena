@@ -13,6 +13,13 @@ void CommandProcessor::begin() {
   Wire.begin();
   Wire.setClock(400000);
 
+  if (qwiic_present) {
+    Wire1.setSDA(qwiic_sda_pin);
+    Wire1.setSCL(qwiic_scl_pin);
+    Wire1.begin();
+    Wire1.setClock(qwiic_i2c_clock_hz);
+  }
+
   // Digital IO boot roles (#135). Port 1 ("Digital IO 1 (5V)", J3): a driven-
   // LOW programmable output, as this firmware has always booted. Port 2
   // ("Digital IO 2 (5V)", J4): in_trigger — U3 in B→A so the BNC feeds the
@@ -862,6 +869,96 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       };
       current_source_->sendResponse(command_byte, 0, payload, sizeof(payload));
       DBG_PRINTF("[cmd] get-analog-in ain1=%d mV ain2=%d mV\n", (int)mv[0], (int)mv[1]);
+      break;
+    }
+
+    case GET_I2C_SCAN_CMD: {
+      // [01 B0] → [count, addr...]: every 7-bit address on the Qwiic bus
+      // (Wire1) that ACKs a zero-length write. Bench check that the jack,
+      // cable and sensor power are good before any register traffic. Blocks
+      // the loop for the scan (~12 ms at 100 kHz when the bus is empty).
+      if (!qwiic_present) {
+        current_source_->sendResponse(command_byte, 1, "No Qwiic jack on this hardware variant");
+        break;
+      }
+      uint8_t payload[1 + (qwiic_i2c_addr_max - qwiic_i2c_addr_min + 1)];
+      uint8_t count = 0;
+      for (uint8_t addr = qwiic_i2c_addr_min; addr <= qwiic_i2c_addr_max; ++addr) {
+        Wire1.beginTransmission(addr);
+        if (Wire1.endTransmission() == 0) payload[1 + count++] = addr;
+      }
+      payload[0] = count;
+      current_source_->sendResponse(command_byte, 0, payload, (size_t)1 + count);
+      DBG_PRINTF("[cmd] i2c-scan found %u device(s)\n", (unsigned)count);
+      break;
+    }
+
+    case I2C_TRANSFER_CMD: {
+      // [len B1 addr wlen w[0..wlen) rlen] → the rlen bytes read. The wlen
+      // bytes are written first; a following read (rlen > 0) runs under a
+      // repeated start with no STOP in between, which is what register-
+      // pointer reads on every Qwiic sensor expect. wlen = 0 is a plain read,
+      // rlen = 0 a plain write, both zero an ACK probe of the address.
+      // Status: 1 bad framing, 2 address NACK, 3 data NACK, 4 bus error /
+      // timeout, 5 short read.
+      if (!qwiic_present) {
+        current_source_->sendResponse(command_byte, 1, "No Qwiic jack on this hardware variant");
+        break;
+      }
+      if (claimed_len < 4) {
+        current_source_->sendResponse(command_byte, 1, "Expected [len B1 addr wlen w... rlen]");
+        break;
+      }
+      uint8_t addr = buf[pos++];
+      uint8_t wlen = buf[pos++];
+      if (claimed_len != 4 + wlen) {
+        current_source_->sendResponse(command_byte, 1, "wlen does not match frame length");
+        break;
+      }
+      const uint8_t *wdata = buf + pos;
+      uint8_t rlen = buf[pos + wlen];
+      if (addr > 0x7F) {
+        current_source_->sendResponse(command_byte, 1, "addr must be a 7-bit address");
+        break;
+      }
+      if (rlen > qwiic_i2c_read_byte_count_max) {
+        current_source_->sendResponse(command_byte, 1, "rlen exceeds 64");
+        break;
+      }
+      if (wlen > 0 || rlen == 0) {
+        Wire1.beginTransmission(addr);
+        if (wlen > 0) Wire1.write(wdata, wlen);
+        uint8_t err = Wire1.endTransmission(rlen == 0);
+        if (err != 0) {
+          if (err == 2) {
+            current_source_->sendResponse(command_byte, 2, "I2C address NACK");
+          } else if (err == 3) {
+            current_source_->sendResponse(command_byte, 3, "I2C data NACK");
+          } else {
+            current_source_->sendResponse(command_byte, 4, "I2C bus error/timeout");
+          }
+          DBG_PRINTF("[cmd] i2c-transfer 0x%02X write err=%u\n", (unsigned)addr, (unsigned)err);
+          break;
+        }
+      }
+      if (rlen == 0) {
+        current_source_->sendResponse(command_byte, 0, "");
+        break;
+      }
+      uint8_t n = Wire1.requestFrom(addr, rlen, (uint8_t)1);
+      if (n == 0) {
+        current_source_->sendResponse(command_byte, 2, "I2C address NACK on read");
+        break;
+      }
+      uint8_t rdata[qwiic_i2c_read_byte_count_max];
+      for (uint8_t i = 0; i < n; ++i) rdata[i] = Wire1.read();
+      if (n < rlen) {
+        current_source_->sendResponse(command_byte, 5, "I2C short read");
+        break;
+      }
+      current_source_->sendResponse(command_byte, 0, rdata, n);
+      DBG_PRINTF("[cmd] i2c-transfer 0x%02X wrote %u read %u\n",
+                 (unsigned)addr, (unsigned)wlen, (unsigned)n);
       break;
     }
 
