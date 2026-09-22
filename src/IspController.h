@@ -62,6 +62,15 @@ class IspController {
   // no reboot. Useful to confirm an OTA flash actually took.
   bool verifyPanel(uint8_t panel_index, char *msg, size_t msg_len);
 
+  // Boot-time presence probe: non-disruptive per-panel liveness check
+  // (COMM_CHECK, same wire exchange as pollPanelAlive) tuned for a fast sweep
+  // across every panel at startup rather than a post-OTA-reboot wait. Safe to
+  // call for every panel_count_per_frame index regardless of whether that
+  // panel is actually wired/populated -- an absent panel simply times out
+  // after panel_boot_scan_timeout_ms and the caller moves on to the next
+  // index. Never enters ISP mode and never touches display state.
+  bool checkPanelPresent(uint8_t panel_index);
+
  private:
   SpiManager &spi_;
 

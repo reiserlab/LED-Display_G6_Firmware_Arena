@@ -7,6 +7,7 @@
 #include "Health.h"
 #include "Version.h"
 #include "Telemetry.h"
+#include "BootDiag.h"
 
 NetworkManager   net;
 SerialManager    serial;
@@ -22,36 +23,6 @@ volatile bool g_dbg_on = false;
 
 #ifdef DEBUG_SERIAL
 static bool ipPrinted = false;
-
-// Sentinel-prefixes every line so this shares the same demux convention as
-// DBG_PRINTF (constants.h) instead of injecting bare ASCII into the USB-CDC
-// binary-response channel. Can't gate on g_dbg_on like DBG_PRINTF does --
-// a host can only set that AFTER boot, and this needs to fire during boot
-// itself -- so unlike DBG_PRINTF it prints unconditionally whenever
-// DEBUG_SERIAL is compiled in. It still never blocks the boot sequence:
-// no Serial.flush(), and each byte checks availableForWrite() first and
-// silently drops instead of waiting on a full/absent host.
-class SentinelPrint : public Print {
- public:
-  size_t write(uint8_t c) override {
-    if (Serial.availableForWrite() < (at_line_start_ ? 2 : 1)) return 0;
-    if (at_line_start_) {
-      Serial.write(AC::constants::diag_line_sentinel);
-      at_line_start_ = false;
-    }
-    Serial.write(c);
-    if (c == '\n') at_line_start_ = true;
-    return 1;
-  }
-  size_t write(const uint8_t *buffer, size_t size) override {
-    size_t n = 0;
-    for (size_t i = 0; i < size; ++i) n += write(buffer[i]);
-    return n;
-  }
-
- private:
-  bool at_line_start_ = true;
-};
 #endif
 
 void blinkStartupPattern();
@@ -128,7 +99,12 @@ void setup() {
   // net.begin();
   serial.begin();
   cmdProc.begin();
-  spi.begin();
+  spi.begin();  // waits out panel_power_settle_ms before driving any CS line
+  // One-shot fleet presence sweep (DEBUG_SERIAL builds only; see
+  // CommandProcessor::logPanelBootScan). Must run after spi.begin() (CS lines
+  // need to be configured/deselected first) and before sd.begin()/the main
+  // loop start moving frames, so it never contends with real display traffic.
+  cmdProc.logPanelBootScan();
   sd.begin();  // mounts BUILTIN_SDCARD for Modes 2/3/4; safe with no card
 
   // A watchdog or software reset restarts the controller in ALL_OFF, but the

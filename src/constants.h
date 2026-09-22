@@ -118,6 +118,27 @@ constexpr uint32_t cs_setup_delay_ns
 constexpr uint32_t cs_hold_delay_ns
     = (uint32_t)((1'000'000'000ULL * cs_hold_sck_periods)  / spi_clock_speed);
 
+// Panel power-up settle delay: how long SpiManager::begin() waits, before
+// touching the SPI peripherals or any CS line, so panel-side supplies have
+// time to come up. Closes the electrical issue where the controller starts
+// driving CS (and bringing up SPI/SCK) before an unpowered/still-rising panel
+// is ready for it, putting the panel into an undefined state (bench
+// workaround to date has been cutting a power trace). 500 ms is a starting
+// value, not a measured minimum -- bench-verify against the panel's own
+// power-on time (see the boot-sequence test plan) and adjust.
+constexpr uint32_t panel_power_settle_ms = 500;
+
+// Boot-time panel presence sweep (IspController::checkPanelPresent): poll
+// cadence and per-panel ceiling for the one-shot COMM_CHECK liveness probe
+// run once at startup across every panel_count_per_frame index. Deliberately
+// much shorter than kAlivePollMs/kAliveTimeoutMs (IspController.h), which
+// waits out a panel's post-OTA reboot -- here a missing/unpopulated panel
+// should cost this sweep only tens of ms, not seconds, so 40+ absent panels
+// still finish in about a second. Starting values; bench-tune if the sweep
+// either misses populated panels or runs longer than desired.
+constexpr uint32_t panel_boot_scan_poll_ms    = 5;
+constexpr uint32_t panel_boot_scan_timeout_ms = 50;
+
 // Two SPI buses (B0 = Teensy SPI, B1 = Teensy SPI1).
 constexpr uint8_t region_count_per_frame = 2;
 constexpr uint8_t region_cipo_pins[region_count_per_frame] = { 12, 1 };

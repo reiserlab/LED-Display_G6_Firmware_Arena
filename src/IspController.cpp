@@ -148,6 +148,15 @@ bool IspController::pollPanelAlive(uint8_t panel, uint32_t poll_ms,
   }
 }
 
+bool IspController::checkPanelPresent(uint8_t panel_index) {
+  uint16_t saved_mhz = spi_.getSpiClockMhz();
+  bool alive = pollPanelAlive(panel_index,
+                              AC::constants::panel_boot_scan_poll_ms,
+                              AC::constants::panel_boot_scan_timeout_ms);
+  spi_.setSpiClockMhz(saved_mhz);  // restore the caller's SPI clock
+  return alive;
+}
+
 bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len) {
   auto setMsg = [&](const char *m) { snprintf(msg, msg_len, "%s", m); };
 

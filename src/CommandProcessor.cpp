@@ -4,6 +4,7 @@
 #include "Health.h"
 #include "Version.h"
 #include "Telemetry.h"
+#include "BootDiag.h"
 #include <Wire.h>
 
 using namespace AC;
@@ -15,6 +16,40 @@ void CommandProcessor::serviceLateBootBlank() {
   late_boot_blank_pending_ = false;
   // A display the host started before then is left alone.
   if (state_ == ArenaState::ALL_OFF && !dl_active_ && !ul_active_ && !ar_active_) enterAllOff();
+}
+
+void CommandProcessor::logPanelBootScan() {
+#ifdef DEBUG_SERIAL
+  uint16_t alive_count = 0;
+  char missing[160] = {0};
+  size_t missing_len = 0;
+  bool truncated = false;
+
+  for (uint8_t i = 0; i < panel_count_per_frame; ++i) {
+    if (isp_.checkPanelPresent(i)) {
+      ++alive_count;
+      continue;
+    }
+    if (truncated) continue;
+    int n = snprintf(missing + missing_len, sizeof(missing) - missing_len,
+                     "%s%u", missing_len ? "," : "", (unsigned)(i + 1));  // 1-based
+    if (n < 0 || (size_t)n >= sizeof(missing) - missing_len) {
+      truncated = true;
+    } else {
+      missing_len += (size_t)n;
+    }
+  }
+
+  SentinelPrint diag;
+  if (alive_count == panel_count_per_frame) {
+    diag.printf("[boot] panel scan: %u/%u panels responded\n",
+               (unsigned)alive_count, (unsigned)panel_count_per_frame);
+  } else {
+    diag.printf("[boot] panel scan: %u/%u panels responded; no reply from: %s%s\n",
+               (unsigned)alive_count, (unsigned)panel_count_per_frame,
+               missing, truncated ? ",..." : "");
+  }
+#endif
 }
 
 void CommandProcessor::begin() {

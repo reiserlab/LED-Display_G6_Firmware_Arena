@@ -26,6 +26,12 @@ class CommandProcessor {
       : net_(net), serial_(serial), spi_(spi), sd_(sd) {}
 
   void begin();
+  // Boot-time reliability sweep: probe every panel_count_per_frame index with
+  // IspController::checkPanelPresent and print a one-line-per-panel-plus-
+  // summary boot report (DEBUG_SERIAL builds only; see BootDiag.h). Call once
+  // from main.cpp's setup(), AFTER spi.begin() (CS lines must already be
+  // configured/deselected) and after panel_power_settle_ms has elapsed.
+  void logPanelBootScan();
   void processCommand();
   void serviceDisconnects();  // PR #27 review point 5: abort a transfer whose source went away
   void serviceDisplay();

@@ -35,6 +35,14 @@ static constexpr uint32_t cs_pad_config =
 void SpiManager::begin() {
   instance_ = this;
 
+  // Let panel-side supplies settle before this controller drives ANYTHING
+  // onto the shared bus -- SPI peripheral bring-up (below) configures SCK/
+  // COPI/CIPO pin modes, and the CS-HIGH loop after it starts driving logic
+  // levels into every panel. Doing either before a panel's own rail has come
+  // up can inject current through its input protection diodes and leave it
+  // in an undefined state (see panel_power_settle_ms in constants.h).
+  delay(AC::constants::panel_power_settle_ms);
+
   dmaEvent_.attachImmediate(dmaISR);
 
   // Bring up both SPI buses. Explicitly route each region's CIPO pin to the
