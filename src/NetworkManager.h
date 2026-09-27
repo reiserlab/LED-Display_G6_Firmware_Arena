@@ -35,6 +35,7 @@ class NetworkManager : public MessageSource {
                     const uint8_t *payload, size_t payload_len) override;
 
   size_t readBulkBytes(uint8_t* buf, size_t max_len) override;
+  uint8_t lastResponseStatus() const override { return resp_len_ > 0 ? resp_buf_[1] : 0xFF; }
   size_t sendRaw(const uint8_t* buf, size_t len) override;
   bool   isConnected() override { return client_ && client_.connected(); }
 

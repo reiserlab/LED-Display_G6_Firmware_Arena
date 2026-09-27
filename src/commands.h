@@ -40,6 +40,8 @@ enum ArenaCommands : uint8_t {
   SET_AO_LUT_CMD              = 0xA2,  // [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
   SET_AO_MODE_CMD             = 0xA3,  // [02 A3 mode] 0=programmable (0xA0/0xA2) | 1=frame_number (DAC tracks frame index, 0-5V normalized)
   GET_ANALOG_IN_CMD           = 0xA4,  // [01 A4] returns Analog In 1 + Analog In 2 as two int16 LE mV (±10V front-end, calibration TBD)
+  SET_TELEMETRY_CMD           = 0xA8,  // [04 A8 flags rate_lo rate_hi] (or [02 A8 flags]) telemetry ring: flags bit0 = record events (default ON at boot), bit7 = synthetic producer (cmd 0xFE records at `rate`/s, T1 bench); bit4 = watchdog bits present, then bit6 = watchdog OFF, bit5 = starve (bench test, Health.h); bits 1-3 reserved
+  GET_TELEMETRY_BLOCK_CMD     = 0xA9,  // [08 A9 ack_seq(u32) max_bytes(u16) flags] free records with seq <= ack_seq, then reply 18-byte header + whole records from the read cursor (not freed until acked); layout in src/Telemetry.h + README § Telemetry ring
   SET_DIGITAL_OUT_CMD         = 0xAA,  // [03 AA channel state] drive "Digital IO 1/2 (5V)" BNC HIGH/LOW (requires role out_programmable; off auto-promotes)
   GET_DIGITAL_OUT_CMD         = 0xAB,  // [01 AB] returns current state of Digital IO 1 and 2 data pins as two bytes
   SET_DIO_ROLE_CMD            = 0xAC,  // [03 AC port role] port 1|2; role 0=off 1=in_trigger 2=out_programmable 3=out_debug_framescan
@@ -54,6 +56,11 @@ enum ArenaCommands : uint8_t {
   G6_PANEL_STORAGE_MODE_CMD   = 0xC7,  // reserved — not yet implemented; [02 C7 mode] 0=SD 1=local storage
   G6_PROGRAM_PANEL_CMD        = 0xC8,  // [02 C8 panel_number] reflash one panel from /firmware/panel.bin via SPI ISP (panel_number 1-based, matches panel-map)
   G6_VERIFY_PANEL_CMD         = 0xC9,  // [02 C9 panel_number] CRC the panel's RUNNING app flash vs /firmware/panel.bin footer (panel_number 1-based)
+  GET_HEALTH_CMD              = 0xCA,  // [01 CA] read-only controller health: loop/SD/SPI/USB counters + reset-surviving breadcrumb (issue #50; layout in README § Health)
+  GET_CRASHREPORT_CMD         = 0xCC,  // [01 CC] raw 128 B of OCRAM 0x2027FF80..0x20280000: PJRC arm_fault_info_struct (44 B) + PJRC breadcrumbs; never cleared by this read (gate on 0xCB flags bit 3 = crash report, NOT the telemetry bit)
+  GET_FIRMWARE_VERSION_CMD    = 0xCB,  // [01 CB] build identity: {ver, rows, cols, flags, sha[8], date[10], branch[24]} = 46 bytes, compiled in from git (src/Version.h; gated by capability bit 7 like 0xCA)
+  GET_SD_INFO_CMD             = 0xCD,  // [01 CD] SD card identity + volume geometry: {ver, flags, card_type, fat_type, sectors u32, bytes_per_cluster u32, cid[16], sd_status_maint, sd_diag} = 30 bytes; O(1) (SdFat caches CID/CSD at mount); gate on 0xCB flags bit 5
+  SET_SD_DIAG_CMD             = 0xCE,  // [02 CE flags] bench A/B switches for the SD fast path: bit0 legacy seek (skip contiguousRange at the NEXT pattern open → FAT-chain walk), bit1 no same-index skip (every 0x70 reads); reply echoes the flags; readback = GET_SD_INFO byte 29 (bit2 = applied); gate on 0xCB flags bit 6
   // Panel firmware image transfer to the controller SD (g6_03 § Panel firmware update).
   SET_FIRMWARE_FILE_CMD       = 0xE0,  // [0xE0, len_b0..b7, data…] upload image → /firmware/panel.bin; reply u32 LE CRC-32
   GET_FIRMWARE_INFO_CMD       = 0xE3,  // [01 E3] reply: 32-byte footer {magic[8], version[16], crc32 LE, size LE}

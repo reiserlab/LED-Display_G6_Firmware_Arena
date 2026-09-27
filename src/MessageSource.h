@@ -58,4 +58,11 @@ class MessageSource {
   // rather than leaving that transfer's state around for a LATER, unrelated
   // client on the same source to be silently fed into.
   virtual bool isConnected() { return true; }
+
+  // Status byte of the reply queued by the command currently being dispatched,
+  // or 0xFF if none is queued. Read by CommandProcessor right after dispatch
+  // for the telemetry CMD record (Telemetry.h); every binary handler queues
+  // exactly one reply, so this is that reply's status. Default for sources
+  // that don't buffer replies.
+  virtual uint8_t lastResponseStatus() const { return 0xFF; }
 };

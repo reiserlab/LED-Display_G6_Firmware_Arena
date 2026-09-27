@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "Crc.h"
+#include "Health.h"  // watchdogKick(): ISP phases outlive the 30 s long-op window
 #include "G6PanelProtocol.h"
 #include "constants.h"
 
@@ -83,6 +84,7 @@ bool IspController::pollResp(uint8_t panel, uint8_t *resp, size_t resp_len,
   uint32_t polls = 0;
   for (;;) {
     ++polls;
+    Health::watchdogKick();  // verify/commit/alive polls run up to 3/15/12 s each, after the image stream
     if (readResp(panel, resp, resp_len, status, /*wait_us=*/0)) {
       if (polls_out) *polls_out = polls;
       return true;
@@ -141,6 +143,7 @@ bool IspController::pollPanelAlive(uint8_t panel, uint32_t poll_ms,
     }
     primed = true;
     if (millis() - t0 >= timeout_ms) return false;
+    Health::watchdogKick();
     delay(poll_ms);
   }
 }
@@ -237,6 +240,7 @@ bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len)
     f.seek(0);
     bool page_ok = true;
     for (uint32_t p = 0; p < pages; ++p) {
+      Health::watchdogKick();  // ~130 KB image stream: progress, not a fixed window, keeps the watchdog quiet
       uint8_t page[kPageBytes];
       memset(page, 0xFF, sizeof(page));
       uint32_t remain = image_size - p * kPageBytes;
