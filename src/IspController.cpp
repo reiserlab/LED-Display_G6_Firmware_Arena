@@ -8,12 +8,15 @@
 #include "G6PanelProtocol.h"
 #include "constants.h"
 
+// Every function here is FLASHMEM: ISP is paced by >= 500 us gaps and ms polls,
+// so running from flash costs nothing measurable and keeps it out of RAM1/ITCM.
+
 // Out-of-class definitions for the static constexpr members (needed when their
 // address is taken, e.g. memcpy of kSentinel/kUnlock).
 constexpr char    IspController::kSentinel[17];
 constexpr uint8_t IspController::kUnlock[4];
 
-size_t IspController::buildMsg(uint8_t *out, uint8_t cmd,
+FLASHMEM size_t IspController::buildMsg(uint8_t *out, uint8_t cmd,
                                const uint8_t *payload, size_t plen) {
   out[0] = G6::header_version_v1;  // parity stamped below
   out[1] = cmd;
@@ -23,7 +26,7 @@ size_t IspController::buildMsg(uint8_t *out, uint8_t cmd,
   return len;
 }
 
-bool IspController::sendCmd(uint8_t panel, const uint8_t *msg, size_t len,
+FLASHMEM bool IspController::sendCmd(uint8_t panel, const uint8_t *msg, size_t len,
                             uint32_t gap_us) {
   // Let the panel settle back into its receive loop (parked waiting for CS)
   // before we assert CS for this command. A command sent immediately after the
@@ -39,7 +42,7 @@ bool IspController::sendCmd(uint8_t panel, const uint8_t *msg, size_t len,
   return spi_.transferSinglePanel(panel, msg, nullptr, len);
 }
 
-bool IspController::readResp(uint8_t panel, uint8_t *resp, size_t resp_len,
+FLASHMEM bool IspController::readResp(uint8_t panel, uint8_t *resp, size_t resp_len,
                              uint8_t *status, uint32_t wait_us) {
   // Give the panel time to finish processing the phase-A command and park in
   // panel_spi_drive_response() with its TX FIFO pre-loaded, BEFORE we drop CS
@@ -77,7 +80,7 @@ bool IspController::readResp(uint8_t panel, uint8_t *resp, size_t resp_len,
   return false;
 }
 
-bool IspController::pollResp(uint8_t panel, uint8_t *resp, size_t resp_len,
+FLASHMEM bool IspController::pollResp(uint8_t panel, uint8_t *resp, size_t resp_len,
                              uint8_t *status, uint32_t poll_ms,
                              uint32_t timeout_ms, uint32_t *polls_out) {
   uint32_t t0 = millis();
@@ -104,7 +107,7 @@ bool IspController::pollResp(uint8_t panel, uint8_t *resp, size_t resp_len,
   return false;
 }
 
-bool IspController::pollPanelAlive(uint8_t panel, uint32_t poll_ms,
+FLASHMEM bool IspController::pollPanelAlive(uint8_t panel, uint32_t poll_ms,
                                    uint32_t timeout_ms) {
   // Canonical COMM_CHECK frame: [hdr][0x01][0..199], parity-stamped.
   uint8_t cc[2 + 200];
@@ -148,7 +151,7 @@ bool IspController::pollPanelAlive(uint8_t panel, uint32_t poll_ms,
   }
 }
 
-bool IspController::checkPanelPresent(uint8_t panel_index) {
+FLASHMEM bool IspController::checkPanelPresent(uint8_t panel_index) {
   uint16_t saved_mhz = spi_.getSpiClockMhz();
   bool alive = pollPanelAlive(panel_index,
                               AC::constants::panel_boot_scan_poll_ms,
@@ -157,7 +160,7 @@ bool IspController::checkPanelPresent(uint8_t panel_index) {
   return alive;
 }
 
-bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len) {
+FLASHMEM bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len) {
   auto setMsg = [&](const char *m) { snprintf(msg, msg_len, "%s", m); };
 
   // --- 1. Open image + validate the 32-byte footer ---------------------------
@@ -370,7 +373,7 @@ bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len)
   return ok;
 }
 
-bool IspController::readReferenceFooter(uint32_t *image_crc32, uint32_t *image_size,
+FLASHMEM bool IspController::readReferenceFooter(uint32_t *image_crc32, uint32_t *image_size,
                                         const char **err) {
   // Read the SD footer (expected image_size + CRC) — no need to stream the image.
   File f = SD.open(AC::constants::firmware_path, FILE_READ);
@@ -389,7 +392,7 @@ bool IspController::readReferenceFooter(uint32_t *image_crc32, uint32_t *image_s
   return true;
 }
 
-bool IspController::fingerprintPanel(uint8_t panel_index, uint32_t len,
+FLASHMEM bool IspController::fingerprintPanel(uint8_t panel_index, uint32_t len,
                                      uint32_t expected_crc, uint32_t *crc_out,
                                      bool *match_out, const char **err) {
   uint16_t saved_mhz = spi_.getSpiClockMhz();
@@ -450,7 +453,7 @@ bool IspController::fingerprintPanel(uint8_t panel_index, uint32_t len,
   return ok;
 }
 
-bool IspController::verifyPanel(uint8_t panel_index, char *msg, size_t msg_len) {
+FLASHMEM bool IspController::verifyPanel(uint8_t panel_index, char *msg, size_t msg_len) {
   const char *err = "";
   uint32_t image_crc32 = 0, image_size = 0;
   if (!readReferenceFooter(&image_crc32, &image_size, &err)) {

@@ -5,8 +5,7 @@ Covers, on branch `claude/panel-boot-sequence-n6rbg1`:
 - **Power settle:** `panel_power_settle_ms` delay at the top of `SpiManager::begin()`.
 - **Presence scan:** `COMM_CHECK` per panel at every boot (`PanelInventory::scanPresence`).
 - **Fingerprint sweep:** `ISP_ENTER` + `ISP_VERIFY_CRC` per responding panel, run from
-  `loop()` one panel per pass while the display is `ALL_OFF`. Auto-starts only on a cold
-  power-on (`SRC_SRSR` = power-on reset and nothing else).
+  `loop()` one panel per pass while the display is `ALL_OFF`. Starts at every boot.
 - **`GET_PANEL_INVENTORY` (0xCF):** host-readable result, gated on 0xC2 capability bit 6.
   Wire format: `src/PanelInventory.h`.
 
@@ -66,17 +65,8 @@ been compiled for Teensy. Instead:
       the log shows `[boot] panel fw: all 40 panels identical, crc 0x… over N B (= SD panel.bin)`.
       Record the sweep duration (poll 0xCF for `fp_valid`, or stopwatch) — expected tens of
       ms per panel. If it's much longer, VERIFY_CRC's XIP CRC is slower than assumed.
-- [ ] **Warm reset** (Teensy reflash, `SYSTEM_RESET` 0x01, reset button): the log shows
-      `not a cold power-on, fingerprint sweep skipped` and 0xCF flags have bit 5. This checks
-      the `SRC_SRSR` classification. If a real power-cycle is ever classified warm, the
-      sweep just doesn't auto-run (safe); if a warm reset is ever classified cold, that is a
-      bug to report.
-- [ ] **Record the reset bits on a true cold boot.** The existing `=== SRC_SRSR (reset
-      cause) = 0x… ===` boot line lists them. The rule in `main.cpp` assumes a power-up sets
-      only `IPP_RESET_B`. If the Teensy's bootloader chip also asserts another bit at
-      power-up (e.g. `IPP_USER_RESET_B`), every boot reads as warm and the sweep never
-      auto-runs — drop that bit from the exclusion mask, after confirming a reflash still
-      sets something that stays excluded.
+- [ ] **Warm reset** (Teensy reflash, `SYSTEM_RESET` 0x01): the sweep runs again and the
+      panels keep displaying normally afterwards (they stayed powered through the reset).
 - [ ] **One panel on different firmware** (flash one panel with an older image): it appears
       as its own `crc … (!= SD panel.bin): panels N` group, status 4 in 0xCF.
 - [ ] **No `/firmware/panel.bin` on SD:** fingerprints report `(prefix; no SD panel.bin)`,
@@ -86,25 +76,28 @@ been compiled for Teensy. Instead:
 - [ ] 0xCF CRC for a panel == the CRC in that panel's 0xC9 reply
       (`test_fingerprint_agrees_with_verify_panel` automates this).
 
-## 5. Side effects I could not rule out from this repo (panel firmware not accessible)
+## 5. Panel-side behavior (answered from the panel firmware source)
 
-These are the reasons the sweep only auto-runs on a cold boot. Each needs a bench answer.
+Resolved by reading `LED-Display_G6_Firmware_Panel/panel/src/isp.cpp` and `isp_logic.h`;
+the bench items confirm rather than discover.
 
-- [ ] **Display after the sweep:** after a cold-boot sweep completes, ALL_ON, streaming and
-      SD pattern modes (2/3/4) look correct on every panel. The sweep leaves each panel after
-      `ISP_VERIFY_CRC` without an exit command — exactly what 0xC9 already does in the
-      field — but confirm no panel is stuck in an ISP state.
-- [ ] **PSRAM-resident frames:** `ISP_ENTER` can fail with a "PSRAM alloc" status, i.e. it
-      allocates a staging buffer in panel PSRAM. Load PSRAM frames (0x3A / 0x3B), run 0xCF
-      action 2, then replay the PSRAM frames. If they're corrupted, host-triggered sweeps must
-      be documented as destructive to PSRAM contents (or refused while frames are loaded).
-- [ ] **Post-flash smiley:** flash a panel (0xC8), then power-cycle. Note whether the boot
-      sweep retires the post-flash boot indicator (COMM_CHECK is exempt; ISP_ENTER may not
-      be). Cosmetic, but changes what the bench sees after a flash.
+- **ISP_ENTER has no side effects beyond arming a session.** The 2 MiB PSRAM staging buffer
+  is reserved once in `Isp::init()` at panel boot, separately from the PSRAM frame store
+  (`psram_store`, demo frames generated at boot); ENTER does not allocate. No display change.
+- **The post-flash smiley survives.** `retires_boot_indicator()` exempts COMM_CHECK and every
+  ISP opcode 0xE4-0xE9.
+- **`appcrc` in the ENTER reply is hard-coded 0** (`TODO(bench)`), so it is not used.
+- **VERIFY_CRC** CRCs XIP flash with a 4-bit table CRC-32; no bounds check on `len`
+  (the controller only asks for <= image size or 64 KB).
+- [ ] Confirm on the bench: after a sweep, ALL_ON / streaming / SD modes look correct on
+      every panel; flash a panel (0xC8), power-cycle, and the smiley is still shown.
+- [ ] Re-time one `g6-program-panel` flash: IspController now runs from flash (FLASHMEM).
+      The stream should stay ~0.6 s; a large increase means the page loop is not staying
+      in the I-cache.
 
 ## 6. Interaction with the running system
 
-- [ ] Start ALL_ON mid-sweep (right after a cold boot): the display works, 0xCF shows the
+- [ ] Start ALL_ON mid-sweep (right after boot): the display works, 0xCF shows the
       sweep paused (`fp_in_progress` still set). ALL_OFF: the sweep resumes and completes.
 - [ ] Commands stay responsive during the sweep: 0xC2 round-trip stays within roughly one
       panel's fingerprint time (~0.1 s).

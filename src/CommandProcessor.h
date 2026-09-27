@@ -27,10 +27,10 @@ class CommandProcessor {
       : net_(net), serial_(serial), spi_(spi), sd_(sd) {}
 
   void begin();
-  // Boot fleet inventory (PanelInventory.h): presence scan now, and on a cold
-  // power-on arm the background fingerprint sweep. Call once from setup()
-  // AFTER spi.begin() (CS lines configured/deselected, power settled).
-  void beginPanelInventory(bool cold_power_on);
+  // Boot fleet inventory (PanelInventory.h): presence scan now, then arm the
+  // background fingerprint sweep. Call once from setup() AFTER spi.begin()
+  // (CS lines configured/deselected, power settled).
+  void beginPanelInventory();
   void serviceInventory();  // one fingerprint-sweep step per loop() while idle
   void processCommand();
   void serviceDisconnects();  // PR #27 review point 5: abort a transfer whose source went away

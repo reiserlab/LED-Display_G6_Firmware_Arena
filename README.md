@@ -117,7 +117,7 @@ tracks it and is updated alongside firmware changes.
    peripherals or any CS line, so panel supplies are up before the controller drives the bus.
 2. **Presence scan.** Every panel gets a `COMM_CHECK` liveness probe; an absent panel costs
    ~50 ms, not a stall.
-3. **Fingerprint sweep** (cold power-on only). From the main loop, one panel per pass, and only
+3. **Fingerprint sweep.** From the main loop, one panel per pass, and only
    while the display is stopped: `ISP_ENTER` + `ISP_VERIFY_CRC` CRCs each panel's running app
    flash, over `/firmware/panel.bin`'s length when that image is on SD (so it doubles as a
    match check), else over a 64 KB prefix. No panel reboot.

@@ -12,7 +12,7 @@ static void putU32(uint8_t *p, uint32_t v) {
   p[3] = (uint8_t)(v >> 24);
 }
 
-void PanelInventory::scanPresence() {
+FLASHMEM void PanelInventory::scanPresence() {
   fp_active_ = false;
   flags_ &= (uint8_t)~(kFlagFpValid | kFlagFpInProgress | kFlagRefPresent | kFlagFpPrefix);
   ref_crc_ = 0;
@@ -27,13 +27,13 @@ void PanelInventory::scanPresence() {
   flags_ |= kFlagPresenceValid;
 }
 
-void PanelInventory::startFingerprints(bool log_when_done) {
+FLASHMEM void PanelInventory::startFingerprints(bool log_when_done) {
   for (uint8_t i = 0; i < kPanels; ++i) {
     if (status_[i] != kAbsent && status_[i] != kUnknown) status_[i] = kPresent;
     crc_[i] = 0;
   }
-  flags_ = (uint8_t)((flags_ & ~(kFlagFpValid | kFlagRefPresent | kFlagFpPrefix |
-                                 kFlagFpSkippedWarm)) | kFlagFpInProgress);
+  flags_ = (uint8_t)((flags_ & ~(kFlagFpValid | kFlagRefPresent | kFlagFpPrefix)) |
+                    kFlagFpInProgress);
   ref_crc_        = 0;
   fp_len_         = 0;
   fp_next_        = 0;
@@ -42,7 +42,7 @@ void PanelInventory::startFingerprints(bool log_when_done) {
   log_when_done_  = log_when_done;
 }
 
-bool PanelInventory::fingerprintStep() {
+FLASHMEM bool PanelInventory::fingerprintStep() {
   if (!fp_active_) return false;
 
   if (fp_ref_pending_) {
@@ -80,7 +80,7 @@ bool PanelInventory::fingerprintStep() {
   return true;
 }
 
-size_t PanelInventory::buildPage(uint8_t first, uint8_t *out) const {
+FLASHMEM size_t PanelInventory::buildPage(uint8_t first, uint8_t *out) const {
   uint8_t n = 0;
   if (first < kPanels) {
     n = (uint8_t)(kPanels - first);
@@ -107,7 +107,7 @@ size_t PanelInventory::buildPage(uint8_t first, uint8_t *out) const {
 }
 
 template <typename Pred>
-void PanelInventory::printPanelList(Print &out, Pred member) const {
+FLASHMEM void PanelInventory::printPanelList(Print &out, Pred member) const {
   static constexpr uint8_t kListMax = 8;
   uint8_t listed = 0;
   for (uint8_t i = 0; i < kPanels; ++i) {
@@ -118,7 +118,7 @@ void PanelInventory::printPanelList(Print &out, Pred member) const {
   }
 }
 
-void PanelInventory::printPresence(Print &out) const {
+FLASHMEM void PanelInventory::printPresence(Print &out) const {
   out.printf("[boot] panel scan: %u/%u panels responded",
              (unsigned)present_count_, (unsigned)kPanels);
   if (present_count_ < kPanels) {
@@ -128,7 +128,7 @@ void PanelInventory::printPresence(Print &out) const {
   out.println();
 }
 
-void PanelInventory::printFingerprints(Print &out) const {
+FLASHMEM void PanelInventory::printFingerprints(Print &out) const {
   uint8_t fingerprinted = 0, failed = 0, distinct = 0;
   uint32_t first_crc = 0;
   for (uint8_t i = 0; i < kPanels; ++i) {

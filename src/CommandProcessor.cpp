@@ -18,20 +18,12 @@ void CommandProcessor::serviceLateBootBlank() {
   if (state_ == ArenaState::ALL_OFF && !dl_active_ && !ul_active_ && !ar_active_) enterAllOff();
 }
 
-void CommandProcessor::beginPanelInventory(bool cold_power_on) {
+FLASHMEM void CommandProcessor::beginPanelInventory() {
   inventory_.scanPresence();
-  if (cold_power_on) {
-    inventory_.startFingerprints(/*log_when_done=*/true);
-  } else {
-    inventory_.skipFingerprintsWarmBoot();
-  }
+  inventory_.startFingerprints(/*log_when_done=*/true);
 #ifdef DEBUG_SERIAL
   SentinelPrint diag;
   inventory_.printPresence(diag);
-  if (!cold_power_on) {
-    diag.println("[boot] panel fw: not a cold power-on, fingerprint sweep skipped "
-                 "(0xCF action 2 runs it)");
-  }
 #endif
 }
 
@@ -2820,7 +2812,7 @@ void CommandProcessor::handleVerifyPanel(const ParsedCommand &cmd) {
 // PanelInventory.h. Action 0 is a pure read; rescans (1, 2) put COMM_CHECK /
 // ISP traffic on the panel bus, so they get the same gate as 0xC8/0xC9.
 // ---------------------------------------------------------------------------
-void CommandProcessor::handleGetPanelInventory(uint8_t action, uint8_t first) {
+FLASHMEM void CommandProcessor::handleGetPanelInventory(uint8_t action, uint8_t first) {
   if (action > 2) {
     current_source_->sendResponse(GET_PANEL_INVENTORY_CMD, 1,
                                   "action must be 0 read, 1 rescan, 2 rescan+fingerprint");

@@ -19,11 +19,11 @@
 // panel_fingerprint_prefix_bytes prefix. Tens of ms per panel, so it runs one
 // panel per loop() pass (CommandProcessor::serviceInventory), only while the
 // display is ALL_OFF and no SD transfer is in flight; a running display just
-// pauses it. Auto-starts only after a cold power-on: ISP_ENTER allocates a
-// panel PSRAM staging buffer, and whether that can disturb PSRAM-resident
-// display frames on a panel that stayed powered through a controller-only
-// reset is not verified from this repo. After a cold power-on panel PSRAM is
-// empty, so there is nothing to disturb.
+// pauses it. Runs at every boot. Safe on a panel that stayed powered through a
+// controller-only reset: ENTER only arms a session (the PSRAM staging buffer
+// is reserved once at panel boot, Isp::init, apart from the PSRAM frame
+// store), and ISP opcodes don't retire the post-flash smiley
+// (retires_boot_indicator, panel isp_logic.h).
 //
 // WIRE FORMAT — GET_PANEL_INVENTORY (0xCF). Gate on 0xC2 capability bit 6.
 //   Request  [01 CF] | [02 CF action] | [03 CF action first]
@@ -66,7 +66,7 @@ class PanelInventory {
     kFlagFpInProgress   = 0x04,  // sweep running, or paused while the display runs
     kFlagRefPresent     = 0x08,  // sweep compared against /firmware/panel.bin
     kFlagFpPrefix       = 0x10,  // no reference: CRCs cover a fixed prefix only
-    kFlagFpSkippedWarm  = 0x20,  // not a cold power-on, so no boot sweep ran
+    // 0x20 reserved
   };
 
   static constexpr uint8_t kVersion      = 1;
@@ -84,7 +84,6 @@ class PanelInventory {
   // found. The SD reference is read on the first fingerprintStep(), so this
   // is safe to call before the SD card is mounted.
   void startFingerprints(bool log_when_done);
-  void skipFingerprintsWarmBoot() { flags_ |= kFlagFpSkippedWarm; }
 
   bool fingerprintActive() const { return fp_active_; }
   bool logWhenDone() const { return log_when_done_; }
