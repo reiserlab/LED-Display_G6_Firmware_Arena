@@ -71,6 +71,21 @@ class IspController {
   // index. Never enters ISP mode and never touches display state.
   bool checkPanelPresent(uint8_t panel_index);
 
+  // Read /firmware/panel.bin's 32-byte footer: the reference image for
+  // verifyPanel and the panel inventory. Returns false (with *err) when the
+  // SD card has no usable image.
+  bool readReferenceFooter(uint32_t *image_crc32, uint32_t *image_size,
+                           const char **err);
+
+  // ISP_ENTER + ISP_VERIFY_CRC over the panel's RUNNING app flash [0, len).
+  // The VERIFY_CRC reply carries the panel-computed CRC-32 whether or not it
+  // equals expected_crc, so this doubles as a firmware fingerprint. Like
+  // verifyPanel (which is built on it) it never sends ISP_EXIT_REBOOT, so the
+  // panel does not reboot. Returns false (with *err) on no valid ENTER or
+  // VERIFY_CRC reply; otherwise sets *crc_out and *match_out.
+  bool fingerprintPanel(uint8_t panel_index, uint32_t len, uint32_t expected_crc,
+                        uint32_t *crc_out, bool *match_out, const char **err);
+
  private:
   SpiManager &spi_;
 

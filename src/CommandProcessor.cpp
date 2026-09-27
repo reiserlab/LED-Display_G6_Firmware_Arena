@@ -18,38 +18,34 @@ void CommandProcessor::serviceLateBootBlank() {
   if (state_ == ArenaState::ALL_OFF && !dl_active_ && !ul_active_ && !ar_active_) enterAllOff();
 }
 
-void CommandProcessor::logPanelBootScan() {
-#ifdef DEBUG_SERIAL
-  uint16_t alive_count = 0;
-  char missing[160] = {0};
-  size_t missing_len = 0;
-  bool truncated = false;
-
-  for (uint8_t i = 0; i < panel_count_per_frame; ++i) {
-    if (isp_.checkPanelPresent(i)) {
-      ++alive_count;
-      continue;
-    }
-    if (truncated) continue;
-    int n = snprintf(missing + missing_len, sizeof(missing) - missing_len,
-                     "%s%u", missing_len ? "," : "", (unsigned)(i + 1));  // 1-based
-    if (n < 0 || (size_t)n >= sizeof(missing) - missing_len) {
-      truncated = true;
-    } else {
-      missing_len += (size_t)n;
-    }
-  }
-
-  SentinelPrint diag;
-  if (alive_count == panel_count_per_frame) {
-    diag.printf("[boot] panel scan: %u/%u panels responded\n",
-               (unsigned)alive_count, (unsigned)panel_count_per_frame);
+void CommandProcessor::beginPanelInventory(bool cold_power_on) {
+  inventory_.scanPresence();
+  if (cold_power_on) {
+    inventory_.startFingerprints(/*log_when_done=*/true);
   } else {
-    diag.printf("[boot] panel scan: %u/%u panels responded; no reply from: %s%s\n",
-               (unsigned)alive_count, (unsigned)panel_count_per_frame,
-               missing, truncated ? ",..." : "");
+    inventory_.skipFingerprintsWarmBoot();
+  }
+#ifdef DEBUG_SERIAL
+  SentinelPrint diag;
+  inventory_.printPresence(diag);
+  if (!cold_power_on) {
+    diag.println("[boot] panel fw: not a cold power-on, fingerprint sweep skipped "
+                 "(0xCF action 2 runs it)");
   }
 #endif
+}
+
+void CommandProcessor::serviceInventory() {
+  if (!inventory_.fingerprintActive()) return;
+  // Same gate as 0xC8/0xC9: ISP traffic only while the display is stopped and
+  // no SD transfer is in flight. A running display pauses the sweep.
+  if (state_ != ArenaState::ALL_OFF || dl_active_ || ul_active_ || ar_active_) return;
+  if (inventory_.fingerprintStep() && inventory_.logWhenDone()) {
+#ifdef DEBUG_SERIAL
+    SentinelPrint diag;
+    inventory_.printFingerprints(diag);
+#endif
+  }
 }
 
 void CommandProcessor::begin() {
@@ -667,6 +663,11 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
         break;
       }
       handleVerifyPanel(cmd);
+      break;
+
+    case GET_PANEL_INVENTORY_CMD:
+      handleGetPanelInventory((claimed_len >= 2) ? buf[pos] : 0,
+                              (claimed_len >= 3) ? buf[pos + 1] : 0);
       break;
 
     case GET_DIAG_OUTPUT_CMD: {
@@ -2811,6 +2812,36 @@ void CommandProcessor::handleVerifyPanel(const ParsedCommand &cmd) {
   DBG_PRINTF("[cmd] g6-verify-panel panel=%u %s: %s\n",
              (unsigned)panel_number, ok ? "MATCH" : "NOMATCH", msg);
   current_source_->sendResponse(G6_VERIFY_PANEL_CMD, ok ? 0 : 1, msg);
+}
+
+// ---------------------------------------------------------------------------
+// handleGetPanelInventory — get-panel-inventory (0xCF): per-panel presence +
+// firmware fingerprint, one 32-panel page per reply. Wire format lives in
+// PanelInventory.h. Action 0 is a pure read; rescans (1, 2) put COMM_CHECK /
+// ISP traffic on the panel bus, so they get the same gate as 0xC8/0xC9.
+// ---------------------------------------------------------------------------
+void CommandProcessor::handleGetPanelInventory(uint8_t action, uint8_t first) {
+  if (action > 2) {
+    current_source_->sendResponse(GET_PANEL_INVENTORY_CMD, 1,
+                                  "action must be 0 read, 1 rescan, 2 rescan+fingerprint");
+    return;
+  }
+  if (action != 0) {
+    if (state_ != ArenaState::ALL_OFF) {
+      current_source_->sendResponse(GET_PANEL_INVENTORY_CMD, CE_DISPLAY_ACTIVE,
+                                    "Stop display before rescanning panels");
+      return;
+    }
+    if (dl_active_ || ul_active_ || ar_active_) {
+      current_source_->sendResponse(GET_PANEL_INVENTORY_CMD, 1, "SD transfer in progress");
+      return;
+    }
+    inventory_.scanPresence();
+    if (action == 2) inventory_.startFingerprints(/*log_when_done=*/false);
+  }
+  uint8_t payload[PanelInventory::kPageBytesMax];
+  size_t len = inventory_.buildPage(first, payload);
+  current_source_->sendResponse(GET_PANEL_INVENTORY_CMD, 0, payload, len);
 }
 
 // Reads and discards a rejected/undelivered bulk payload so the host's

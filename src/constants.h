@@ -139,6 +139,15 @@ constexpr uint32_t panel_power_settle_ms = 500;
 constexpr uint32_t panel_boot_scan_poll_ms    = 5;
 constexpr uint32_t panel_boot_scan_timeout_ms = 50;
 
+// Panel firmware fingerprint length when the SD card has no reference image
+// (/firmware/panel.bin): CRC only this prefix of each panel's app flash. Kept
+// well under every panel image seen to date (~96-130 KB), so the range is a
+// subset of what g6-verify-panel already CRCs and never runs past the end of
+// the installed image into stale flash. A prefix CRC is one-sided evidence:
+// differing CRCs prove different firmware, equal CRCs only suggest the same.
+// With a reference image present the full image length is used instead.
+constexpr uint32_t panel_fingerprint_prefix_bytes = 64UL * 1024UL;
+
 // Two SPI buses (B0 = Teensy SPI, B1 = Teensy SPI1).
 constexpr uint8_t region_count_per_frame = 2;
 constexpr uint8_t region_cipo_pins[region_count_per_frame] = { 12, 1 };

@@ -5,6 +5,7 @@
 #include "SpiManager.h"
 #include "SdManager.h"
 #include "IspController.h"
+#include "PanelInventory.h"
 #include "G6PanelProtocol.h"
 #include "commands.h"
 
@@ -26,12 +27,11 @@ class CommandProcessor {
       : net_(net), serial_(serial), spi_(spi), sd_(sd) {}
 
   void begin();
-  // Boot-time reliability sweep: probe every panel_count_per_frame index with
-  // IspController::checkPanelPresent and print a one-line-per-panel-plus-
-  // summary boot report (DEBUG_SERIAL builds only; see BootDiag.h). Call once
-  // from main.cpp's setup(), AFTER spi.begin() (CS lines must already be
-  // configured/deselected) and after panel_power_settle_ms has elapsed.
-  void logPanelBootScan();
+  // Boot fleet inventory (PanelInventory.h): presence scan now, and on a cold
+  // power-on arm the background fingerprint sweep. Call once from setup()
+  // AFTER spi.begin() (CS lines configured/deselected, power settled).
+  void beginPanelInventory(bool cold_power_on);
+  void serviceInventory();  // one fingerprint-sweep step per loop() while idle
   void processCommand();
   void serviceDisconnects();  // PR #27 review point 5: abort a transfer whose source went away
   void serviceDisplay();
@@ -48,6 +48,7 @@ class CommandProcessor {
 
   // SPI in-system-programming driver for g6-program-panel (0xC8).
   IspController   isp_{spi_};
+  PanelInventory  inventory_{isp_};  // GET_PANEL_INVENTORY (0xCF); after isp_ (init order)
 
   // Set by processCommand() to point at whichever MessageSource (net_ or
   // serial_) originated the command being handled. Handlers send their
@@ -314,6 +315,7 @@ class CommandProcessor {
   void handleGetFirmwareInfo();                          // get-firmware-info (0xE3)
   void handleProgramPanel(const ParsedCommand &cmd);     // g6-program-panel (0xC8) — SPI ISP
   void handleVerifyPanel(const ParsedCommand &cmd);      // g6-verify-panel (0xC9) — CRC running app flash
+  void handleGetPanelInventory(uint8_t action, uint8_t first);  // get-panel-inventory (0xCF)
   void drainBulkData(uint32_t remaining_bytes);
   void abortArchive();  // serviceArchive() teardown on a stalled/timed-out 0x8A stream
   void endDownload();   // serviceDownload() teardown: completion, timeout, error, or stall

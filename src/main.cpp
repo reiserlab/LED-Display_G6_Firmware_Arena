@@ -37,6 +37,17 @@ void setup() {
   // (the crash dump) or initialise it, then append STATE(boot). After
   // Health::begin() — the boot record carries the reset cause + breadcrumb.
   Telemetry::begin();
+  // Cold = power-on reset and nothing else: any software, watchdog, lockup,
+  // JTAG or reset-pin cause means the panels may have stayed powered (e.g. a
+  // Teensy reflash), so the boot fingerprint sweep is skipped. Health::begin()
+  // has cleared SRC_SRSR; reset_cause is its copy. Ambiguous bits err toward
+  // "not cold".
+  const uint32_t boot_srsr = Health::stats.reset_cause;
+  const bool cold_power_on =
+      (boot_srsr & SRC_SRSR_IPP_RESET_B) &&
+      !(boot_srsr & (SRC_SRSR_IPP_USER_RESET_B | SRC_SRSR_CSU_RESET_B | SRC_SRSR_WDOG_RST_B |
+                     SRC_SRSR_WDOG3_RST_B | SRC_SRSR_LOCKUP_SYSRESETREQ | SRC_SRSR_JTAG_RST_B |
+                     SRC_SRSR_JTAG_SW_RST | SRC_SRSR_TEMPSENSE_RST_B));
 
 #ifdef DEBUG_SERIAL
   Serial.begin(115200);
@@ -100,11 +111,11 @@ void setup() {
   serial.begin();
   cmdProc.begin();
   spi.begin();  // waits out panel_power_settle_ms before driving any CS line
-  // One-shot fleet presence sweep (DEBUG_SERIAL builds only; see
-  // CommandProcessor::logPanelBootScan). Must run after spi.begin() (CS lines
-  // need to be configured/deselected first) and before sd.begin()/the main
-  // loop start moving frames, so it never contends with real display traffic.
-  cmdProc.logPanelBootScan();
+  // Fleet presence scan now; the fingerprint sweep (cold boot only) runs from
+  // loop() so it never delays boot. Must follow spi.begin() (CS lines
+  // configured/deselected). The sweep reads the SD reference lazily, after
+  // sd.begin() below has mounted the card.
+  cmdProc.beginPanelInventory(cold_power_on);
   sd.begin();  // mounts BUILTIN_SDCARD for Modes 2/3/4; safe with no card
 
   // A watchdog or software reset restarts the controller in ALL_OFF, but the
@@ -160,6 +171,7 @@ void loop() {
   cmdProc.serviceUpload();    // 3c. Stream one 0x85 upload chunk, if one is in flight
   cmdProc.serviceArchive();   // 3d. Stream one 0x8A archive step, if one is in flight
   cmdProc.serviceLateBootBlank(); // 3e. Repeat the boot blank once, after the panels' PE window
+  cmdProc.serviceInventory(); // 3e. Fingerprint one panel, if a sweep is pending and the display is idle
   // net.flushResponses();       // 4a. Send queued responses over TCP
   serial.flushResponses();    // 4b. Send queued responses over USB CDC
 

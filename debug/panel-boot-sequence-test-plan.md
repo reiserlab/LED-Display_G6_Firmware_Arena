@@ -1,119 +1,124 @@
-# Panel boot-sequence gentler-startup — test plan
+# Panel boot sequence + panel inventory — test plan
 
-Covers the phase-1 change: `panel_power_settle_ms` delay in `SpiManager::begin()`
-plus the `CommandProcessor::logPanelBootScan()` fleet presence sweep (built on
-`IspController::checkPanelPresent`, which wraps the existing `pollPanelAlive`
-COMM_CHECK probe). No panel-firmware change, no wire-protocol change — this is
-entirely bench/hardware verification of the arena side.
+Covers, on branch `claude/panel-boot-sequence-n6rbg1`:
 
-Build for bench testing with the non-`-performance` task so the boot report is
-compiled in: `pixi run deploy-10-10` (or `deploy-12-18`), then
-`pixi run monitor-10-10` to watch the boot text.
+- **Power settle:** `panel_power_settle_ms` delay at the top of `SpiManager::begin()`.
+- **Presence scan:** `COMM_CHECK` per panel at every boot (`PanelInventory::scanPresence`).
+- **Fingerprint sweep:** `ISP_ENTER` + `ISP_VERIFY_CRC` per responding panel, run from
+  `loop()` one panel per pass while the display is `ALL_OFF`. Auto-starts only on a cold
+  power-on (`SRC_SRSR` = power-on reset and nothing else).
+- **`GET_PANEL_INVENTORY` (0xCF):** host-readable result, gated on 0xC2 capability bit 6.
+  Wire format: `src/PanelInventory.h`.
 
-## 1. Regression — nothing else moved
+No panel-firmware change. Build with the non-`-performance` task to get the boot log:
+`pixi run deploy-10-10` (or `deploy-12-18`), then `pixi run monitor-10-10`.
 
-- [ ] `pixi run build-10-10` and `pixi run build-12-18` both compile clean
-      (this session couldn't invoke PlatformIO — first thing to confirm on
-      the bench before anything else below).
-- [ ] `pixi run deploy-10-10-performance`: board boots and displays/streams
-      normally. Confirms `logPanelBootScan()` compiles to a true no-op outside
-      `DEBUG_SERIAL` and adds no behavior change to the production build path.
-- [ ] `pixi run test-serial` (full existing HIL suite) passes unchanged against
-      a `deploy-10-10` (debug) build. The suite connects to an already-running
-      board and never triggers a fresh boot, so this mainly confirms the new
-      code didn't regress anything reachable from normal command processing
-      (`isp_` still works for `G6_PROGRAM_PANEL_CMD`/`G6_VERIFY_PANEL_CMD`,
-      SPI clock restore doesn't leave the bus in a bad state, etc).
-- [ ] `g6-program-panel` (0xC8) and `g6-verify-panel` (0xC9) against one panel
-      still work end-to-end — confirms `checkPanelPresent`'s save/restore of
-      the SPI clock via `getSpiClockMhz()`/`setSpiClockMhz()` doesn't leave a
-      stale clock behind for the ISP driver's other entry points.
+## What was verified off-hardware (this session)
 
-## 2. The delay itself (electrical)
+PlatformIO and pixi downloads are blocked in the authoring sandbox, so nothing here has
+been compiled for Teensy. Instead:
 
-- [ ] Scope the target CS pin (any panel_sets[i].cs_pin) and SCK relative to
-      the panel's own 3.3 V/5 V rail on power-up. Confirm CS/SCK stay at
-      power-on-reset (floating/undriven) for the full `panel_power_settle_ms`
-      window and only start toggling after it — i.e. the delay is actually
-      landing before the first bus activity, not just before the log line.
-- [ ] With the delay in place, power-cycle the controller with the previously
-      problematic wiring restored (i.e. *without* the power-trace cut that
-      was the field workaround) and confirm the panel(s) no longer glitch
-      into the bad state. This is the actual pass/fail bar for the feature —
-      everything else here is supporting verification.
-- [ ] If it still glitches: capture the scope trace and increase
-      `panel_power_settle_ms` (constants.h) — 500 ms was picked as a
-      reasonable starting point, not measured against this board's actual
-      panel power-on time. Re-test at the new value.
-- [ ] Confirm no regression to overall boot-to-first-frame latency budget
-      (whatever the lab's tolerance is) — the settle delay plus the presence
-      sweep (below) are both extra, purely additive boot time versus today.
+- `g++ -fsyntax-only -Wall -Wextra -Wformat=2` against stub Arduino/Teensy headers for every
+  changed translation unit, in all four build configs (10-10 / 12-18 × debug / performance):
+  no errors, no warnings from changed code.
+- Host unit test of `PanelInventory` against a scripted fake `IspController`, both panel
+  counts: paging (32 + 8 and 32 + 16), byte layout, flags, sweep state machine (reference /
+  no reference / match / differ / ISP failure / absent), rescan cancelling a sweep,
+  warm-boot flag, zero-panel case, and the boot-log text.
+- `tests/test_panel_inventory.py`'s parser fed with pages dumped from the C++
+  `buildPage()`: agrees byte-for-byte.
 
-## 3. Presence sweep — populated arena (happy path)
+## 1. Build + regression
 
-- [ ] Full 40-panel arena_10-10 (or 48-panel arena_12-18), all panels present
-      and powered. `pixi run monitor-10-10` across a power cycle shows:
-      `[boot] panel scan: 40/40 panels responded` (or 48/48).
-- [ ] Time the sweep (timestamps are already in every `DBG_PRINTF`/sentinel
-      line via `[millis]`-style prefixing where used, or bracket it manually
-      with a scope on the frame-scan gate pin / a stopwatch on the monitor
-      log) — expect on the order of a few hundred ms for 40 populated panels
-      at `panel_boot_scan_poll_ms=5`. If it's meaningfully slower, that's a
-      signal `checkPanelPresent`'s per-panel round-trip is costing more than
-      assumed and the constants need retuning.
+- [ ] `pixi run build-10-10` and `pixi run build-12-18` compile clean. **First real compile.**
+- [ ] `pixi run deploy-10-10-performance`: boots, displays, streams normally.
+- [ ] `pixi run test-serial` passes — the existing suite plus the 10 new tests in
+      `tests/test_panel_inventory.py` (need at least one responding panel; the
+      reference/0xC9 cross-checks skip without `/firmware/panel.bin` on SD).
+- [ ] `g6-verify-panel` (0xC9) and `g6-program-panel` (0xC8) on one panel still work
+      end-to-end. 0xC9 now runs through the shared `fingerprintPanel()`; its reply text
+      should be unchanged.
 
-## 4. Presence sweep — missing/absent panels
+## 2. Power settle (electrical)
 
-- [ ] Physically unplug one panel (mid-chain, not just the last one) before
-      power-up. Confirm:
-  - The controller does **not** hang waiting on it — total boot time stays
-    bounded (roughly `panel_boot_scan_timeout_ms` extra for that one index,
-    not a multi-second stall).
-  - The log line correctly reports `N-1/N` and names the missing panel's
-    1-based index (matches the physical position pulled).
-  - Every OTHER panel still shows as responded — one absent panel doesn't
-    cascade into false negatives on its bus-mate (each `panel_sets[]` entry
-    gates two panels on independent SPI buses via one CS, see
-    `ArenaConfig.h` — worth specifically confirming the bus-mate of the
-    pulled panel still reports alive, since that's the one case where a
-    wiring/addressing mistake would be easy to miss).
-- [ ] Repeat with **all** panels absent (nothing plugged into the panel bus).
-      Confirm the sweep completes in roughly
-      `panel_count_per_frame * panel_boot_scan_timeout_ms` (≈2 s for 40
-      panels at the current constants) rather than hanging, and reports
-      `0/40 panels responded; no reply from: 1,2,3,...`.
-- [ ] Repeat with two non-adjacent panels absent (e.g. panel 7 and panel 32)
-      to confirm the missing-list formatting handles multiple entries
-      correctly (comma-separated, no off-by-one on the 1-based numbering).
+- [ ] Scope a CS pin and SCK against the panel supply rail at power-up: both stay
+      undriven for the full `panel_power_settle_ms`, then start.
+- [ ] Power-cycle with the original (uncut) wiring: panels no longer enter the bad state.
+      **This is the pass/fail bar for the delay.** If it still happens, capture the trace and
+      raise `panel_power_settle_ms`.
+- [ ] **Scenario B — Teensy on USB power, arena supply off** (the case a VUSB/VIN trace
+      cut would address, if that's the trace in question): the Teensy boots, waits 500 ms,
+      then drives CS into unpowered panels regardless. A fixed delay cannot cover this; it
+      would need a panel-power sense before driving CS. Confirm whether this scenario is the
+      original failure, so we know whether the delay alone is sufficient.
 
-## 5. Interaction with existing behavior
+## 3. Presence scan
 
-- [ ] Confirm `blinkStartupPattern()`'s LED_BUILTIN/D13 blink still completes
-      cleanly before `spi.begin()` — the new delay is additive time inside
-      `spi.begin()`, after the blink, so this should be unaffected, but worth
-      a visual check that the "OK" morse pattern still looks right (no
-      unexpected interaction if someone later moves the delay).
-- [ ] Confirm `SET_DIAG_OUTPUT` (0xC3) muting behavior is unaffected — the
-      boot scan prints unconditionally on a `DEBUG_SERIAL` build (by design,
-      since `g_dbg_on` isn't set yet at boot) but every *later* `DBG_PRINTF`
-      line should still honor the runtime mute/unmute as before.
-- [ ] Confirm a host (webDisplayTools Arena Console, or a plain serial
-      terminal) that connects mid-sweep or right after boot doesn't
-      misinterpret the sentinel-prefixed boot lines as a command response —
-      this is the same demux convention already used for the SRC_SRSR/
-      CrashReport dump, so this is mainly a "didn't regress the existing
-      convention" check, not new risk.
+- [ ] Full arena: `[boot] panel scan: 40/40 panels responded` (48/48 on 12-18).
+- [ ] Unplug one mid-chain panel: boot is not stalled, the log names that 1-based panel,
+      and its bus-mate on the same CS line still reports present.
+- [ ] Unplug several; then all (≈ panel_count × 50 ms, e.g. ~2 s for 40). Log reports
+      `0/40 … no reply from: 1,2,3,4,5,6,7,8,...` and boot continues.
 
-## Known gaps / explicitly out of scope for this change
+## 4. Fingerprint sweep
 
-- No per-panel firmware-version/hash readback yet (the `ISP_ENTER` `appcrc`
-  field discussed as the likely mechanism) — pending confirmation that
-  entering/exiting ISP mode on every panel at every boot has no side effect
-  worth paying for on every power-cycle (`ISP_EXIT_REBOOT`'s name suggests it
-  reboots the panel, which would be an unacceptable per-boot cost across a
-  full fleet if literal). Needs a look at the panel-firmware repo's
-  `isp.cpp` before that phase is designed, not just this repo.
-- No wire-protocol/host-visible surface for the scan result — it's a local
-  serial log only, `DEBUG_SERIAL` builds only. Deferred until this is folded
-  into the planned bidirectional-SPI/error-logging work so the wire format
-  is designed once, not twice.
+- [ ] **Cold power-on, homogeneous fleet, `panel.bin` on SD:** within a few seconds of boot
+      the log shows `[boot] panel fw: all 40 panels identical, crc 0x… over N B (= SD panel.bin)`.
+      Record the sweep duration (poll 0xCF for `fp_valid`, or stopwatch) — expected tens of
+      ms per panel. If it's much longer, VERIFY_CRC's XIP CRC is slower than assumed.
+- [ ] **Warm reset** (Teensy reflash, `SYSTEM_RESET` 0x01, reset button): the log shows
+      `not a cold power-on, fingerprint sweep skipped` and 0xCF flags have bit 5. This checks
+      the `SRC_SRSR` classification. If a real power-cycle is ever classified warm, the
+      sweep just doesn't auto-run (safe); if a warm reset is ever classified cold, that is a
+      bug to report.
+- [ ] **Record the reset bits on a true cold boot.** The existing `=== SRC_SRSR (reset
+      cause) = 0x… ===` boot line lists them. The rule in `main.cpp` assumes a power-up sets
+      only `IPP_RESET_B`. If the Teensy's bootloader chip also asserts another bit at
+      power-up (e.g. `IPP_USER_RESET_B`), every boot reads as warm and the sweep never
+      auto-runs — drop that bit from the exclusion mask, after confirming a reflash still
+      sets something that stays excluded.
+- [ ] **One panel on different firmware** (flash one panel with an older image): it appears
+      as its own `crc … (!= SD panel.bin): panels N` group, status 4 in 0xCF.
+- [ ] **No `/firmware/panel.bin` on SD:** fingerprints report `(prefix; no SD panel.bin)`,
+      `fp_len` = 65536, flag bit 4, per-panel status 5.
+- [ ] **Panel on pre-ISP firmware** (if one exists): status 6, `no ISP reply` group; costs
+      ~0.4 s of sweep time (the ENTER retry), doesn't stall anything else.
+- [ ] 0xCF CRC for a panel == the CRC in that panel's 0xC9 reply
+      (`test_fingerprint_agrees_with_verify_panel` automates this).
+
+## 5. Side effects I could not rule out from this repo (panel firmware not accessible)
+
+These are the reasons the sweep only auto-runs on a cold boot. Each needs a bench answer.
+
+- [ ] **Display after the sweep:** after a cold-boot sweep completes, ALL_ON, streaming and
+      SD pattern modes (2/3/4) look correct on every panel. The sweep leaves each panel after
+      `ISP_VERIFY_CRC` without an exit command — exactly what 0xC9 already does in the
+      field — but confirm no panel is stuck in an ISP state.
+- [ ] **PSRAM-resident frames:** `ISP_ENTER` can fail with a "PSRAM alloc" status, i.e. it
+      allocates a staging buffer in panel PSRAM. Load PSRAM frames (0x3A / 0x3B), run 0xCF
+      action 2, then replay the PSRAM frames. If they're corrupted, host-triggered sweeps must
+      be documented as destructive to PSRAM contents (or refused while frames are loaded).
+- [ ] **Post-flash smiley:** flash a panel (0xC8), then power-cycle. Note whether the boot
+      sweep retires the post-flash boot indicator (COMM_CHECK is exempt; ISP_ENTER may not
+      be). Cosmetic, but changes what the bench sees after a flash.
+
+## 6. Interaction with the running system
+
+- [ ] Start ALL_ON mid-sweep (right after a cold boot): the display works, 0xCF shows the
+      sweep paused (`fp_in_progress` still set). ALL_OFF: the sweep resumes and completes.
+- [ ] Commands stay responsive during the sweep: 0xC2 round-trip stays within roughly one
+      panel's fingerprint time (~0.1 s).
+- [ ] 0xCF action 1/2 while the display runs → status 10 (`CE_DISPLAY_ACTIVE`); action 0
+      still answers.
+- [ ] SET_DIAG_OUTPUT muting still works for everything after boot; host-triggered sweeps
+      print nothing (only the boot sweep writes its summary).
+
+## Open items outside this repo
+
+- `g6_03-controller.md` § Command Registry (docs repo `reiserlab/Modular-LED-Display`)
+  needs the 0xCF entry and capability bit 6. Not accessible from the authoring session.
+- Host decoder (webDisplayTools `js/arena-wire-g6.js`): add `GET_PANEL_INVENTORY: 0xcf`,
+  `[6, 'panel_inventory']` to `CAPABILITY_BITS`, and a page decoder. Left to the Studio
+  preflight work so the two efforts don't collide in that file.
+- Branch merge note: the controller-health branches advertise capability 0xA3 (bit 7);
+  merged with this branch it becomes 0xE3. That uses the last free bit in the byte.
