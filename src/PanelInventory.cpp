@@ -13,17 +13,21 @@ static void putU32(uint8_t *p, uint32_t v) {
 }
 
 FLASHMEM void PanelInventory::scanPresence() {
-  fp_active_ = false;
-  flags_ &= (uint8_t)~(kFlagFpValid | kFlagFpInProgress | kFlagRefPresent | kFlagFpPrefix);
-  ref_crc_ = 0;
-  fp_len_  = 0;
   present_count_ = 0;
   for (uint8_t i = 0; i < kPanels; ++i) {
-    crc_[i] = 0;
-    status_[i] = isp_.checkPanelPresent(i) ? kPresent : kAbsent;
-    if (status_[i] == kPresent) ++present_count_;
+    if (!isp_.checkPanelPresent(i)) {
+      status_[i] = kAbsent;
+      crc_[i] = 0;
+      continue;
+    }
+    ++present_count_;
+    if (status_[i] == kAbsent || status_[i] == kUnknown) status_[i] = kPresent;
   }
+  // A panel that reappeared behind the sweep cursor would otherwise stay
+  // kPresent until the next action 1; fingerprinted panels are skipped anyway.
+  if (fp_active_) fp_next_ = 0;
   presence_ms_ = millis();
+  ++scan_id_;
   flags_ |= kFlagPresenceValid;
 }
 
@@ -98,6 +102,7 @@ FLASHMEM size_t PanelInventory::buildPage(uint8_t first, uint8_t *out) const {
   putU32(out + o, ref_crc_); o += 4;
   putU32(out + o, fp_len_);  o += 4;
   putU32(out + o, age_ms);   o += 4;
+  out[o++] = scan_id_;
   for (uint8_t k = 0; k < n; ++k) {
     out[o++] = status_[first + k];
     putU32(out + o, crc_[first + k]);

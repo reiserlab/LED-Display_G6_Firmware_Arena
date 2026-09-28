@@ -62,7 +62,7 @@ enum ArenaCommands : uint8_t {
   GET_SD_INFO_CMD             = 0xCD,  // [01 CD] SD card identity + volume geometry: {ver, flags, card_type, fat_type, sectors u32, bytes_per_cluster u32, cid[16], sd_status_maint, sd_diag} = 30 bytes; O(1) (SdFat caches CID/CSD at mount); gate on 0xCB flags bit 5
   SET_SD_DIAG_CMD             = 0xCE,  // [02 CE flags] bench A/B switches for the SD fast path: bit0 legacy seek (skip contiguousRange at the NEXT pattern open → FAT-chain walk), bit1 no same-index skip (every 0x70 reads); reply echoes the flags; readback = GET_SD_INFO byte 29 (bit2 = applied); gate on 0xCB flags bit 6
   // 0xD0-0xDF: panel fleet (commands addressing the installed panels as a fleet).
-  PANEL_INVENTORY_SCAN_CMD    = 0xD0,  // [02 D0 action] re-probe the fleet: 0 presence, 1 presence + fingerprint sweep; replies with page 0 of 0xD1 (feature bit 0)
+  PANEL_INVENTORY_SCAN_CMD    = 0xD0,  // [02 D0 action] re-probe the fleet: 0 presence (keeps fingerprints of panels still present), 1 presence + fresh fingerprint sweep; replies with page 0 of 0xD1 (feature bit 0)
   GET_PANEL_INVENTORY_CMD     = 0xD1,  // [01 D1] | [02 D1 first] per-panel presence + firmware fingerprint, 32-panel pages (PanelInventory.h); no panel traffic (feature bit 0)
   // Panel firmware image transfer to the controller SD (g6_03 § Panel firmware update).
   SET_FIRMWARE_FILE_CMD       = 0xE0,  // [0xE0, len_b0..b7, data…] upload image → /firmware/panel.bin; reply u32 LE CRC-32

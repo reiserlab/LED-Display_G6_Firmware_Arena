@@ -27,12 +27,14 @@
 //
 // WIRE FORMAT (g6_03 § 0xD0 / 0xD1). Gate both on 0xC2 feature bit 0.
 //   PANEL_INVENTORY_SCAN (0xD0)  [02 D0 action]
-//     action 0 = rescan presence (blocking), then reply
-//            1 = rescan presence, restart the fingerprint sweep, reply at once
-//                (poll 0xD1 until flags.fp_valid)
+//     action 0 = rescan presence (blocking), then reply. Panels still present
+//                keep their fingerprint; panels that went absent lose it; a
+//                panel that (re)appears reads status 2 until the next action 1.
+//            1 = rescan presence, restart the fingerprint sweep (all
+//                fingerprints discarded), reply at once (poll 0xD1 until
+//                flags.fp_valid)
 //     Requires ALL_OFF (else status CE_DISPLAY_ACTIVE = 10) and no SD transfer
-//     (else status 1). Any rescan discards fingerprints. Reply: echo 0xD0,
-//     the page payload below for first = 0.
+//     (else status 1). Reply: echo 0xD0, the page payload below for first = 0.
 //   GET_PANEL_INVENTORY (0xD1)  [01 D1] | [02 D1 first]
 //     Read the stored inventory; no panel traffic, always allowed.
 //     first = 0-based index of the page's first panel (default 0). Entry k
@@ -47,8 +49,11 @@
 //     [5..8]   ref_crc32  u32       /firmware/panel.bin CRC (0 if none)
 //     [9..12]  fp_len     u32       app-flash bytes each fingerprint covers
 //     [13..16] age_ms     u32       ms since the presence scan finished
-//     [17..]   n x { status u8 (PanelStatus), crc32 u32 (0 unless fingerprinted) }
-//   Max 17 + 32*5 = 177 B, under byte_count_per_response_max; 40- and
+//     [17]     scan_id    u8        changes on every presence scan (boot or
+//                                   0xD0, either action); wraps. Pages of one
+//                                   read must agree, else re-read.
+//     [18..]   n x { status u8 (PanelStatus), crc32 u32 (0 unless fingerprinted) }
+//   Max 18 + 32*5 = 178 B, under byte_count_per_response_max; 40- and
 //   48-panel builds read in two pages (first = 0, then 32).
 class PanelInventory {
  public:
@@ -64,7 +69,8 @@ class PanelInventory {
 
   enum Flags : uint8_t {
     kFlagPresenceValid  = 0x01,  // a presence scan has completed
-    kFlagFpValid        = 0x02,  // the fingerprint sweep has completed
+    kFlagFpValid        = 0x02,  // the last fingerprint sweep completed (panels that appeared
+                                 // in a later presence-only rescan still read kPresent)
     kFlagFpInProgress   = 0x04,  // sweep running, or paused while the display runs
     kFlagRefPresent     = 0x08,  // sweep compared against /firmware/panel.bin
     kFlagFpPrefix       = 0x10,  // no reference: CRCs cover a fixed prefix only
@@ -73,18 +79,21 @@ class PanelInventory {
 
   static constexpr uint8_t kVersion      = 1;
   static constexpr uint8_t kPageEntryMax = 32;
-  static constexpr uint8_t kHeaderBytes  = 17;
+  static constexpr uint8_t kHeaderBytes  = 18;
   static constexpr uint8_t kEntryBytes   = 5;
   static constexpr size_t  kPageBytesMax = kHeaderBytes + kPageEntryMax * kEntryBytes;
 
   explicit PanelInventory(IspController &isp) : isp_(isp) {}
 
-  // Probe every panel; replaces all previous results and cancels any sweep.
+  // Probe every panel. Panels still present keep their fingerprint result;
+  // panels that went absent lose it. A running sweep continues and also
+  // covers panels that (re)appeared.
   void scanPresence();
 
   // (Re)arm the fingerprint sweep over the panels the last presence scan
-  // found. The SD reference is read on the first fingerprintStep(), so this
-  // is safe to call before the SD card is mounted.
+  // found, discarding every previous fingerprint. The SD reference is read on
+  // the first fingerprintStep(), so this is safe to call before the SD card
+  // is mounted.
   void startFingerprints(bool log_when_done);
 
   bool fingerprintActive() const { return fp_active_; }
@@ -113,6 +122,7 @@ class PanelInventory {
   uint8_t  status_[kPanels] = {};
   uint32_t crc_[kPanels]    = {};
   uint8_t  flags_           = 0;
+  uint8_t  scan_id_         = 0;
   uint8_t  present_count_   = 0;
   uint32_t presence_ms_     = 0;
   uint32_t ref_crc_         = 0;

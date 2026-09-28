@@ -50,7 +50,7 @@ GET_FIRMWARE_VERSION_CMD    = 0xCB   # [01 CB] build identity {ver, rows, cols, 
 GET_SD_INFO_CMD             = 0xCD   # [01 CD] SD card identity + geometry {ver, flags, card_type, fat_type, sectors u32, bytes_per_cluster u32, cid[16], maint, sd_diag} = 30 bytes; gate on 0xCB flags bit 5
 SET_SD_DIAG_CMD             = 0xCE   # [02 CE flags] bench A/B: bit0 legacy seek (next open), bit1 no same-index skip; echoes flags; readback 0xCD byte 29
 G6_VERIFY_PANEL_CMD         = 0xC9   # [02 C9 panel_number] CRC running app vs /firmware/panel.bin
-PANEL_INVENTORY_SCAN_CMD    = 0xD0   # [02 D0 action] 0 presence, 1 presence + fingerprints; replies with page 0 (src/PanelInventory.h)
+PANEL_INVENTORY_SCAN_CMD    = 0xD0   # [02 D0 action] 0 presence (keeps fingerprints), 1 presence + fresh fingerprints; replies with page 0 (src/PanelInventory.h)
 GET_PANEL_INVENTORY_CMD     = 0xD1   # [01 D1] | [02 D1 first] presence + fingerprint pages (src/PanelInventory.h)
 GET_FIRMWARE_INFO_CMD       = 0xE3   # 32-byte panel.bin footer {magic[8], version[16], crc32, size}
 ALL_ON_CMD                  = 0xFF

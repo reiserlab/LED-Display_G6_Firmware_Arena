@@ -35,18 +35,20 @@ FLAG_FP_PREFIX = 0x10
 ABSENT, PRESENT, FW_MATCH, FW_DIFFERS, FW_NO_REF, FW_FAILED = 1, 2, 3, 4, 5, 6
 FINGERPRINTED = {FW_MATCH, FW_DIFFERS, FW_NO_REF}
 
-HEADER = struct.Struct("<BBBBBIII")  # version, count, flags, first, n, ref_crc, fp_len, age_ms
+# version, count, flags, first, n, ref_crc, fp_len, age_ms, scan_id
+HEADER = struct.Struct("<BBBBBIIIB")
 
 
 def _parse_page(st, payload):
     if st != 0:
         return st, None, None
     assert len(payload) >= HEADER.size, payload.hex()
-    version, count, flags, first_echo, n, ref_crc, fp_len, age_ms = HEADER.unpack_from(payload)
+    (version, count, flags, first_echo, n, ref_crc, fp_len, age_ms,
+     scan_id) = HEADER.unpack_from(payload)
     entries = [struct.unpack_from("<BI", payload, HEADER.size + 5 * k) for k in range(n)]
     assert len(payload) == HEADER.size + 5 * n
     hdr = dict(version=version, count=count, flags=flags, first=first_echo, n=n,
-               ref_crc=ref_crc, fp_len=fp_len, age_ms=age_ms)
+               ref_crc=ref_crc, fp_len=fp_len, age_ms=age_ms, scan_id=scan_id)
     return st, hdr, entries
 
 
@@ -68,14 +70,22 @@ def build_panel_count(transport):
     return payload[1] * payload[2]  # rows x cols
 
 
-def read_all(transport):
-    st, hdr, entries = read_page(transport, 0)
-    assert st == 0
-    while len(entries) < hdr["count"]:
-        st, _, more = read_page(transport, len(entries))
-        assert st == 0 and more
-        entries += more
-    return hdr, entries
+def read_all(transport, retries=3):
+    """Read every page; re-read from the start when a scan lands between pages."""
+    for _ in range(retries):
+        st, hdr, entries = read_page(transport, 0)
+        assert st == 0
+        consistent = True
+        while len(entries) < hdr["count"]:
+            st, hdr2, more = read_page(transport, len(entries))
+            assert st == 0 and more
+            if hdr2["scan_id"] != hdr["scan_id"]:
+                consistent = False
+                break
+            entries += more
+        if consistent:
+            return hdr, entries
+    pytest.fail("scan_id kept changing between pages")
 
 
 @pytest.fixture
@@ -107,6 +117,7 @@ def test_pages_cover_every_panel_once(transport):
     assert len(entries) == hdr["count"]
     st, hdr2, past_end = read_page(transport, hdr["count"])
     assert st == 0 and hdr2["n"] == 0 and past_end == []
+    assert hdr2["scan_id"] == hdr["scan_id"], "a pure read must not change scan_id"
 
 
 def test_entries_are_well_formed(transport):
@@ -136,11 +147,34 @@ def test_rescan_refused_while_display_runs_but_read_allowed(transport, display_o
 
 
 def test_presence_rescan(transport, display_off):
+    before, _ = read_all(transport)
     st, hdr, _ = scan(transport, 0)
     assert st == 0 and hdr["first"] == 0
     assert hdr["flags"] & FLAG_PRESENCE_VALID
-    assert not hdr["flags"] & (FLAG_FP_VALID | FLAG_FP_IN_PROGRESS), "rescan discards fingerprints"
+    assert hdr["scan_id"] != before["scan_id"], "a presence scan must change scan_id"
     assert hdr["age_ms"] < 2000
+
+
+def test_presence_rescan_keeps_fingerprints(transport, display_off):
+    hdr0, before = fingerprint_sweep(transport)
+    st, hdr1, _ = scan(transport, 0)
+    assert st == 0
+    assert hdr1["flags"] & FLAG_FP_VALID, "action 0 must not discard a completed sweep"
+    assert not hdr1["flags"] & FLAG_FP_IN_PROGRESS
+    assert hdr1["ref_crc"] == hdr0["ref_crc"] and hdr1["fp_len"] == hdr0["fp_len"]
+    _, after = read_all(transport)
+    for i, ((s0, crc0), (s1, crc1)) in enumerate(zip(before, after)):
+        if s0 in FINGERPRINTED and s1 != ABSENT:
+            assert (s1, crc1) == (s0, crc0), f"panel {i + 1} lost its fingerprint"
+
+
+def test_fingerprint_rescan_discards_fingerprints(transport, display_off):
+    fingerprint_sweep(transport)
+    st, hdr, entries = scan(transport, 1)
+    assert st == 0
+    assert hdr["flags"] & FLAG_FP_IN_PROGRESS and not hdr["flags"] & FLAG_FP_VALID
+    for i, (status, crc) in enumerate(entries):
+        assert status in (ABSENT, PRESENT) and crc == 0, f"panel {i + 1}: stale {status}/{crc:#x}"
 
 
 def fingerprint_sweep(transport, timeout_s=90.0):
