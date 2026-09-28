@@ -938,6 +938,10 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
                                       "Stop display before analog calibration");
         break;
       }
+      if (dl_active_ || ul_active_ || ar_active_) {
+        current_source_->sendResponse(command_byte, 1, "SD transfer in progress");
+        break;
+      }
       uint8_t ch     = buf[pos++];
       uint8_t action = buf[pos++];
       if (ch != 1 && ch != 2) {
