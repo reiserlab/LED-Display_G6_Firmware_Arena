@@ -191,9 +191,28 @@ def test_get_analog_in_shape(transport, io_restore):
     st, echo, payload, _ = transport.command(GET_ANALOG_IN_CMD)
     assert st == 0, "GET_ANALOG_IN failed"
     assert echo == GET_ANALOG_IN_CMD
-    assert len(payload) == 4, f"expected two int16 LE mV, got {len(payload)}B"
-    a1, a2 = struct.unpack("<hh", bytes(payload))
-    # Front-end maps ±10 V full scale; calibration TBD — range-check only
-    # (floating inputs read an arbitrary mid value).
+    # F1: [ain1 int16 LE mV][ain2 int16 LE mV][flags u8]; the flags byte says
+    # the raw scale is 12-bit (0x04) and, once F2 lands, which channels carry a
+    # per-board calibration (0x01 / 0x02). Pre-F1 firmware sent 4 bytes.
+    assert len(payload) == 5, f"expected two int16 LE mV + flags, got {len(payload)}B"
+    a1, a2, flags = struct.unpack("<hhB", bytes(payload))
+    assert flags & 0x04, f"expected the 12-bit flag set, got flags=0x{flags:02x}"
+    assert not (flags & ~0x07), f"unknown flag bits set: 0x{flags:02x}"
+    # Front-end maps ±10 V full scale (nominal, uncalibrated) — range-check only
+    # (a floating input reads ≈ +10 V from the 10k pull-up to the 10 V reference;
+    # an un-reworked board (LAB-209) saturates high for any input above 0 V).
     assert -10500 <= a1 <= 10500, f"Analog In 1 out of range: {a1} mV"
     assert -10500 <= a2 <= 10500, f"Analog In 2 out of range: {a2} mV"
+
+
+def test_get_analog_in_repeatable(transport, io_restore):
+    """Two back-to-back averaged reads of a floating/steady input agree to within
+    a few LSB (12-bit + 16x averaging: 1 LSB ≈ 4.9 mV of BNC input)."""
+    reads = []
+    for _ in range(4):
+        st, _, payload, _ = transport.command(GET_ANALOG_IN_CMD)
+        assert st == 0
+        reads.append(struct.unpack("<hhB", bytes(payload))[:2])
+    for ch in (0, 1):
+        vals = [r[ch] for r in reads]
+        assert max(vals) - min(vals) <= 60, f"Analog In {ch + 1} noisy: {vals} mV"
