@@ -81,6 +81,14 @@ constexpr uint16_t frame_buf_byte_count_max = stream_frame_byte_count_gs16;
 // -----------------------------------------------------------------------------
 
 constexpr uint32_t spi_clock_speed = 25'000'000;
+
+// setup() blanks the panels at boot; loop() repeats the blank once this long
+// after reset (only while the display is still ALL_OFF). A reset can hand the
+// panels on one CS line a malformed message, which makes them show a PE glyph
+// and drop everything, the setup() blanks included, for their 3 s error window
+// (panel ERROR_DISPLAY_DURATION_US); without the repeat they stay lit.
+constexpr uint32_t panel_late_boot_blank_ms = 3500;
+
 constexpr uint8_t  spi_bit_order   = MSBFIRST;
 constexpr uint8_t  spi_data_mode   = SPI_MODE3;
 

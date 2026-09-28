@@ -9,6 +9,14 @@
 using namespace AC;
 using namespace AC::constants;
 
+void CommandProcessor::serviceLateBootBlank() {
+  if (!late_boot_blank_pending_) return;
+  if ((int32_t)(millis() - panel_late_boot_blank_ms) < 0) return;
+  late_boot_blank_pending_ = false;
+  // A display the host started before then is left alone.
+  if (state_ == ArenaState::ALL_OFF && !dl_active_ && !ul_active_ && !ar_active_) enterAllOff();
+}
+
 void CommandProcessor::begin() {
   Wire.begin();
   Wire.setClock(400000);
@@ -689,8 +697,13 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       net_.flushResponses();
       serial_.flushResponses();
       delay(10);
+      // Stop the refresh and never return: SYSRESETREQ takes effect a few µs
+      // after the write, long enough for loop() to start the next frame, which
+      // the reset then truncated on panel set 0 (PE03 on those two panels).
+      spi_.disarmRefreshTimer();
       SCB_AIRCR = 0x05FA0004;  // ARM AIRCR SYSRESETREQ
-      break;
+      __asm__ volatile("dsb" ::: "memory");
+      for (;;) {}
 
     case GET_DIGITAL_OUT_CMD: {
       uint8_t state1 = digitalRead(do1_data_pin) ? 1 : 0;
@@ -2229,6 +2242,9 @@ void CommandProcessor::enterAllOff() {
   // shared (wired-OR CIPO) bus; one dropped frame would otherwise stay lit.
   fillFrameBufferDark();
   for (uint8_t i = 0; i < 3; ++i) {
+    // Back-to-back frames reached a panel still busy with the previous one, which
+    // armed its receive late and dropped the first bytes (PE03 -> 3 s lockout).
+    if (i) delayMicroseconds(2000);
     spi_.transferFrame(frame_buf_, block_byte_count_);
   }
   state_ = ArenaState::ALL_OFF;
