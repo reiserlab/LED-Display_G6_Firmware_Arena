@@ -148,9 +148,14 @@ mismatch shows up as a failed `status == 0` assertion on the first
   "Soft reboot is not implemented for Win32" / "for OSX" elsewhere, since
   `teensy_loader_cli`'s own `-s` only exists in its libusb build), but the
   remedy is the same everywhere: press the Teensy's program button or
-  power-cycle it with the arena powered, then re-run the deploy task. A
-  first attempt right after manual HalfKay entry can still fail with
-  "error writing to Teensy"; running it again succeeds. `--upload-port`
+  power-cycle it with the arena powered, then re-run the deploy task. The
+  board only reaches the bootloader once the **arena is powered**, so an
+  unpowered arena also looks like this hang. Nothing else may hold the
+  serial port during the upload (Studio Web Serial, a `monitor-*` task,
+  a test run), or the soft reboot never happens. The first attempt
+  often ends in "error writing to Teensy" after the board has entered
+  HalfKay (seen on Windows and macOS); running the same task again finds
+  the bootloader already up and succeeds. `--upload-port`
   is ignored by the `teensy-cli` protocol on every OS. The `monitor-*`
   tasks find the arena's port themselves (`scripts/monitor.py`, by USB
   product string, then Teensy VID:PID) on every OS; pass
