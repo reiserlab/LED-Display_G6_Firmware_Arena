@@ -32,7 +32,12 @@ void CommandProcessor::serviceInventory() {
   // Same gate as 0xC8/0xC9: ISP traffic only while the display is stopped and
   // no SD transfer is in flight. A running display pauses the sweep.
   if (state_ != ArenaState::ALL_OFF || dl_active_ || ul_active_ || ar_active_) return;
-  if (inventory_.fingerprintStep() && inventory_.logWhenDone()) {
+  // One step on an unresponsive panel can take ~3.4 s (400 ms ENTER retry +
+  // 3 s VERIFY_CRC poll), past the 2 s watchdog: run it in the long-op window.
+  if (!Health::watchdogSuspend()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, PANEL_INVENTORY_SCAN_CMD);
+  const bool done = inventory_.fingerprintStep();
+  if (!Health::watchdogResume()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, PANEL_INVENTORY_SCAN_CMD);
+  if (done && inventory_.logWhenDone()) {
 #ifdef DEBUG_SERIAL
     SentinelPrint diag;
     inventory_.printFingerprints(diag);
@@ -192,7 +197,8 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
   // (SD format, panel ISP program/verify, ZIP entry collection over 258 files)
   // pause it for the dispatch; everything else must finish in well under 2 s.
   const bool long_op = command_byte == PURGE_MEMORY_CMD || command_byte == G6_PROGRAM_PANEL_CMD
-                    || command_byte == G6_VERIFY_PANEL_CMD || command_byte == GET_SD_ARCHIVE_CMD;
+                    || command_byte == G6_VERIFY_PANEL_CMD || command_byte == GET_SD_ARCHIVE_CMD
+                    || command_byte == PANEL_INVENTORY_SCAN_CMD;  // presence rescan: ~2.4 s with 48 panels absent
   if (long_op && !Health::watchdogSuspend()) {
     // The RTWDOG refused the 30 s window (unlock/RCS timeout; state unknown).
     // Proceed anyway, but leave a trace: STATE(telemetry, code 0xEE, arg opcode).
@@ -657,9 +663,16 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       handleVerifyPanel(cmd);
       break;
 
+    case PANEL_INVENTORY_SCAN_CMD:
+      if (claimed_len != 2) {
+        current_source_->sendResponse(command_byte, 1, "Expected [02 D0 action]");
+        break;
+      }
+      handlePanelInventoryScan(buf[pos]);
+      break;
+
     case GET_PANEL_INVENTORY_CMD:
-      handleGetPanelInventory((claimed_len >= 2) ? buf[pos] : 0,
-                              (claimed_len >= 3) ? buf[pos + 1] : 0);
+      handleGetPanelInventory((claimed_len >= 2) ? buf[pos] : 0);
       break;
 
     case GET_DIAG_OUTPUT_CMD: {
@@ -1088,15 +1101,22 @@ void CommandProcessor::handleGetControllerInfo() {
   // Ethernet link is down). Tolerant, additive extension: hosts that predate
   // it read only the first two bytes; webDisplayTools' decodeControllerInfo
   // reports mac:null when the payload is 2 bytes, so version stays 1.
-  uint8_t payload[8] = {
+  // The feature bitmap after the MAC is the same kind of extension:
+  // [N, features[N]], present iff the payload is >= 9 + N bytes.
+  uint8_t payload[9 + controller_feature_byte_count] = {
       controller_info_version,
       controller_capability_bitmap,
   };
   net_.macBytes(payload + 2);
+  payload[8] = controller_feature_byte_count;
+  for (uint8_t i = 0; i < controller_feature_byte_count; ++i) {
+    payload[9 + i] = (uint8_t)(controller_feature_bitmap >> (8 * i));
+  }
   current_source_->sendResponse(GET_CONTROLLER_INFO_CMD, 0, payload, sizeof(payload));
-  DBG_PRINTF("[cmd] controller-info v=%u cap=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
+  DBG_PRINTF("[cmd] controller-info v=%u cap=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X feat=0x%08lX\n",
              (unsigned)payload[0], (unsigned)payload[1], payload[2], payload[3],
-             payload[4], payload[5], payload[6], payload[7]);
+             payload[4], payload[5], payload[6], payload[7],
+             (unsigned long)controller_feature_bitmap);
 }
 
 // ---------------------------------------------------------------------------
@@ -2807,33 +2827,39 @@ void CommandProcessor::handleVerifyPanel(const ParsedCommand &cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// handleGetPanelInventory — get-panel-inventory (0xCF): per-panel presence +
-// firmware fingerprint, one 32-panel page per reply. Wire format lives in
-// PanelInventory.h. Action 0 is a pure read; rescans (1, 2) put COMM_CHECK /
-// ISP traffic on the panel bus, so they get the same gate as 0xC8/0xC9.
+// Panel inventory — per-panel presence + firmware fingerprint, one 32-panel
+// page per reply (wire format: PanelInventory.h). 0xD0 rescans (COMM_CHECK /
+// ISP traffic on the panel bus, so the same gate as 0xC8/0xC9) and replies
+// with page 0; 0xD1 is a pure read.
 // ---------------------------------------------------------------------------
-FLASHMEM void CommandProcessor::handleGetPanelInventory(uint8_t action, uint8_t first) {
-  if (action > 2) {
-    current_source_->sendResponse(GET_PANEL_INVENTORY_CMD, 1,
-                                  "action must be 0 read, 1 rescan, 2 rescan+fingerprint");
-    return;
-  }
-  if (action != 0) {
-    if (state_ != ArenaState::ALL_OFF) {
-      current_source_->sendResponse(GET_PANEL_INVENTORY_CMD, CE_DISPLAY_ACTIVE,
-                                    "Stop display before rescanning panels");
-      return;
-    }
-    if (dl_active_ || ul_active_ || ar_active_) {
-      current_source_->sendResponse(GET_PANEL_INVENTORY_CMD, 1, "SD transfer in progress");
-      return;
-    }
-    inventory_.scanPresence();
-    if (action == 2) inventory_.startFingerprints(/*log_when_done=*/false);
-  }
+FLASHMEM void CommandProcessor::sendInventoryPage(uint8_t echo_cmd, uint8_t first) {
   uint8_t payload[PanelInventory::kPageBytesMax];
   size_t len = inventory_.buildPage(first, payload);
-  current_source_->sendResponse(GET_PANEL_INVENTORY_CMD, 0, payload, len);
+  current_source_->sendResponse(echo_cmd, 0, payload, len);
+}
+
+FLASHMEM void CommandProcessor::handlePanelInventoryScan(uint8_t action) {
+  if (action > 1) {
+    current_source_->sendResponse(PANEL_INVENTORY_SCAN_CMD, 1,
+                                  "action must be 0 presence, 1 presence+fingerprint");
+    return;
+  }
+  if (state_ != ArenaState::ALL_OFF) {
+    current_source_->sendResponse(PANEL_INVENTORY_SCAN_CMD, CE_DISPLAY_ACTIVE,
+                                  "Stop display before rescanning panels");
+    return;
+  }
+  if (dl_active_ || ul_active_ || ar_active_) {
+    current_source_->sendResponse(PANEL_INVENTORY_SCAN_CMD, 1, "SD transfer in progress");
+    return;
+  }
+  inventory_.scanPresence();
+  if (action == 1) inventory_.startFingerprints(/*log_when_done=*/false);
+  sendInventoryPage(PANEL_INVENTORY_SCAN_CMD, 0);
+}
+
+FLASHMEM void CommandProcessor::handleGetPanelInventory(uint8_t first) {
+  sendInventoryPage(GET_PANEL_INVENTORY_CMD, first);
 }
 
 // Reads and discards a rejected/undelivered bulk payload so the host's

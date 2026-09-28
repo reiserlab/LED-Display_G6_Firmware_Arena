@@ -5,7 +5,7 @@
 #include "constants.h"
 
 // PanelInventory — per-panel presence + firmware fingerprint for the fleet,
-// filled at boot and served by GET_PANEL_INVENTORY (0xCF).
+// filled at boot and served by GET_PANEL_INVENTORY (0xD1).
 //
 // Presence: COMM_CHECK liveness probe per panel (IspController::
 // checkPanelPresent). Fast (~7 ms per responding panel, ~50 ms per absent
@@ -25,18 +25,20 @@
 // store), and ISP opcodes don't retire the post-flash smiley
 // (retires_boot_indicator, panel isp_logic.h).
 //
-// WIRE FORMAT — GET_PANEL_INVENTORY (0xCF). Gate on 0xC2 capability bit 6.
-//   Request  [01 CF] | [02 CF action] | [03 CF action first]
-//     action 0 = read cached inventory (no panel traffic; always allowed)
-//            1 = rescan presence (blocking), then reply
-//            2 = rescan presence, restart the fingerprint sweep, reply at once
-//                (poll with action 0 until flags.fp_valid)
-//            1 and 2 require ALL_OFF (else status CE_DISPLAY_ACTIVE = 10) and
-//            no SD transfer (else status 1). Any rescan discards fingerprints.
-//     first  = 0-based index of the page's first panel (default 0). Entry k
-//              of the page is panel NUMBER first+k+1 — the 1-based numbering
-//              0xC8/0xC9 and the panel map use.
-//   Reply payload (status 0), all multi-byte fields little-endian:
+// WIRE FORMAT (g6_03 § 0xD0 / 0xD1). Gate both on 0xC2 feature bit 0.
+//   PANEL_INVENTORY_SCAN (0xD0)  [02 D0 action]
+//     action 0 = rescan presence (blocking), then reply
+//            1 = rescan presence, restart the fingerprint sweep, reply at once
+//                (poll 0xD1 until flags.fp_valid)
+//     Requires ALL_OFF (else status CE_DISPLAY_ACTIVE = 10) and no SD transfer
+//     (else status 1). Any rescan discards fingerprints. Reply: echo 0xD0,
+//     the page payload below for first = 0.
+//   GET_PANEL_INVENTORY (0xD1)  [01 D1] | [02 D1 first]
+//     Read the stored inventory; no panel traffic, always allowed.
+//     first = 0-based index of the page's first panel (default 0). Entry k
+//             of the page is panel NUMBER first+k+1 — the 1-based numbering
+//             0xC8/0xC9 and the panel map use.
+//   Page payload (status 0), all multi-byte fields little-endian:
 //     [0]      version = 1
 //     [1]      panel_count          panels this build drives
 //     [2]      flags                see Flags below
@@ -92,7 +94,7 @@ class PanelInventory {
   // the call that completes the sweep.
   bool fingerprintStep();
 
-  // Fill `out` (>= kPageBytesMax bytes) with the 0xCF reply payload for the
+  // Fill `out` (>= kPageBytesMax bytes) with the 0xD0/0xD1 page payload for the
   // page starting at `first`; returns the payload length.
   size_t buildPage(uint8_t first, uint8_t *out) const;
 

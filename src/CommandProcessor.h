@@ -48,7 +48,7 @@ class CommandProcessor {
 
   // SPI in-system-programming driver for g6-program-panel (0xC8).
   IspController   isp_{spi_};
-  PanelInventory  inventory_{isp_};  // GET_PANEL_INVENTORY (0xCF); after isp_ (init order)
+  PanelInventory  inventory_{isp_};  // 0xD0/0xD1; after isp_ (init order)
 
   // Set by processCommand() to point at whichever MessageSource (net_ or
   // serial_) originated the command being handled. Handlers send their
@@ -315,7 +315,9 @@ class CommandProcessor {
   void handleGetFirmwareInfo();                          // get-firmware-info (0xE3)
   void handleProgramPanel(const ParsedCommand &cmd);     // g6-program-panel (0xC8) — SPI ISP
   void handleVerifyPanel(const ParsedCommand &cmd);      // g6-verify-panel (0xC9) — CRC running app flash
-  void handleGetPanelInventory(uint8_t action, uint8_t first);  // get-panel-inventory (0xCF)
+  void handlePanelInventoryScan(uint8_t action);  // panel-inventory-scan (0xD0)
+  void handleGetPanelInventory(uint8_t first);     // get-panel-inventory (0xD1)
+  void sendInventoryPage(uint8_t echo_cmd, uint8_t first);
   void drainBulkData(uint32_t remaining_bytes);
   void abortArchive();  // serviceArchive() teardown on a stalled/timed-out 0x8A stream
   void endDownload();   // serviceDownload() teardown: completion, timeout, error, or stall

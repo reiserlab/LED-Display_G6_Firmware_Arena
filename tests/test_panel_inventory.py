@@ -1,4 +1,5 @@
-"""GET_PANEL_INVENTORY (0xCF): per-panel presence + firmware fingerprint.
+"""PANEL_INVENTORY_SCAN (0xD0) / GET_PANEL_INVENTORY (0xD1): per-panel presence +
+firmware fingerprint.
 
 Wire format is specified in src/PanelInventory.h. Run against a flashed arena;
 the fingerprint tests need at least one responding panel.
@@ -14,13 +15,16 @@ from .commands import (
     ALL_OFF_CMD,
     ALL_ON_CMD,
     G6_VERIFY_PANEL_CMD,
+    FEATURE_PANEL_INVENTORY,
     GET_CONTROLLER_INFO_CMD,
     GET_FIRMWARE_INFO_CMD,
+    GET_FIRMWARE_VERSION_CMD,
     GET_PANEL_INVENTORY_CMD,
+    PANEL_INVENTORY_SCAN_CMD,
+    controller_features,
 )
 
 CE_DISPLAY_ACTIVE = 10
-CAP_PANEL_INVENTORY = 1 << 6
 
 FLAG_PRESENCE_VALID = 0x01
 FLAG_FP_VALID = 0x02
@@ -34,10 +38,7 @@ FINGERPRINTED = {FW_MATCH, FW_DIFFERS, FW_NO_REF}
 HEADER = struct.Struct("<BBBBBIII")  # version, count, flags, first, n, ref_crc, fp_len, age_ms
 
 
-def read_page(transport, action=0, first=0, timeout=5.0):
-    st, echo, payload, _ = transport.command(
-        GET_PANEL_INVENTORY_CMD, bytes([action, first]), timeout=timeout)
-    assert echo == GET_PANEL_INVENTORY_CMD
+def _parse_page(st, payload):
     if st != 0:
         return st, None, None
     assert len(payload) >= HEADER.size, payload.hex()
@@ -49,11 +50,29 @@ def read_page(transport, action=0, first=0, timeout=5.0):
     return st, hdr, entries
 
 
+def read_page(transport, first=0):
+    st, echo, payload, _ = transport.command(GET_PANEL_INVENTORY_CMD, bytes([first]))
+    assert echo == GET_PANEL_INVENTORY_CMD
+    return _parse_page(st, payload)
+
+
+def scan(transport, action, timeout=10.0):
+    st, echo, payload, _ = transport.command(PANEL_INVENTORY_SCAN_CMD, bytes([action]), timeout=timeout)
+    assert echo == PANEL_INVENTORY_SCAN_CMD
+    return _parse_page(st, payload)
+
+
+def build_panel_count(transport):
+    st, _, payload, _ = transport.command(GET_FIRMWARE_VERSION_CMD)
+    assert st == 0
+    return payload[1] * payload[2]  # rows x cols
+
+
 def read_all(transport):
-    st, hdr, entries = read_page(transport, 0, 0)
+    st, hdr, entries = read_page(transport, 0)
     assert st == 0
     while len(entries) < hdr["count"]:
-        st, _, more = read_page(transport, 0, len(entries))
+        st, _, more = read_page(transport, len(entries))
         assert st == 0 and more
         entries += more
     return hdr, entries
@@ -66,10 +85,11 @@ def display_off(transport):
     transport.command(ALL_OFF_CMD)
 
 
-def test_capability_bit_advertised(transport):
+def test_feature_bit_advertised(transport):
     st, _, payload, _ = transport.command(GET_CONTROLLER_INFO_CMD)
     assert st == 0
-    assert payload[1] & CAP_PANEL_INVENTORY
+    assert controller_features(payload) & (1 << FEATURE_PANEL_INVENTORY)
+    assert not payload[1] & 0x40, "capability bit 6 is ai_cal, not panel inventory"
 
 
 def test_default_request_reads_first_page(transport):
@@ -77,7 +97,7 @@ def test_default_request_reads_first_page(transport):
     assert st == 0 and echo == GET_PANEL_INVENTORY_CMD
     version, count, flags, first, n = payload[:5]
     assert version == 1
-    assert count in (40, 48)
+    assert count == build_panel_count(transport)
     assert flags & FLAG_PRESENCE_VALID, "boot presence scan should have run"
     assert first == 0 and n == min(32, count)
 
@@ -85,7 +105,7 @@ def test_default_request_reads_first_page(transport):
 def test_pages_cover_every_panel_once(transport):
     hdr, entries = read_all(transport)
     assert len(entries) == hdr["count"]
-    st, hdr2, past_end = read_page(transport, 0, hdr["count"])
+    st, hdr2, past_end = read_page(transport, hdr["count"])
     assert st == 0 and hdr2["n"] == 0 and past_end == []
 
 
@@ -97,29 +117,34 @@ def test_entries_are_well_formed(transport):
             assert crc == 0, f"panel {i + 1}: crc {crc:#x} with status {status}"
 
 
-def test_bad_action_rejected(transport):
-    st, _, _ = read_page(transport, action=3)
+def test_bad_action_rejected(transport, display_off):
+    st, _, _ = scan(transport, 2)
     assert st == 1
+
+
+def test_scan_requires_action_byte(transport, display_off):
+    st, echo, _, _ = transport.command(PANEL_INVENTORY_SCAN_CMD)
+    assert echo == PANEL_INVENTORY_SCAN_CMD and st == 1
 
 
 def test_rescan_refused_while_display_runs_but_read_allowed(transport, display_off):
     assert transport.command(ALL_ON_CMD)[0] == 0
-    st, _, _ = read_page(transport, action=1)
+    st, _, _ = scan(transport, 0)
     assert st == CE_DISPLAY_ACTIVE
-    st, hdr, _ = read_page(transport, action=0)
+    st, hdr, _ = read_page(transport)
     assert st == 0 and hdr["flags"] & FLAG_PRESENCE_VALID
 
 
 def test_presence_rescan(transport, display_off):
-    st, hdr, _ = read_page(transport, action=1, timeout=10.0)
-    assert st == 0
+    st, hdr, _ = scan(transport, 0)
+    assert st == 0 and hdr["first"] == 0
     assert hdr["flags"] & FLAG_PRESENCE_VALID
     assert not hdr["flags"] & (FLAG_FP_VALID | FLAG_FP_IN_PROGRESS), "rescan discards fingerprints"
     assert hdr["age_ms"] < 2000
 
 
 def fingerprint_sweep(transport, timeout_s=90.0):
-    st, hdr, _ = read_page(transport, action=2, timeout=10.0)
+    st, hdr, _ = scan(transport, 1)
     assert st == 0 and hdr["flags"] & FLAG_FP_IN_PROGRESS
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:

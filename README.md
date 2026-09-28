@@ -84,7 +84,7 @@ All source files live in `src/`.
 | `SdManager.h/.cpp` | SD mount, `/patterns/*.pat` listing, v2 header + frame CRC validation |
 | `CommandProcessor.h/.cpp` | Arena state machine, command dispatch, Mode 2/3/4/5 service, refresh timer |
 | `IspController.h/.cpp` | Single-panel SPI in-system programming, verify, presence probe, fingerprint |
-| `PanelInventory.h/.cpp` | Boot fleet inventory (presence + firmware fingerprint); `GET_PANEL_INVENTORY` (0xCF) wire format |
+| `PanelInventory.h/.cpp` | Boot fleet inventory (presence + firmware fingerprint); `0xD0`/`0xD1` wire format |
 | `BootDiag.h` | Sentinel-prefixed boot diagnostics that can't corrupt the USB-CDC response stream |
 | `Crc.h` | CRC-8/AUTOSAR (header) + CRC-16/CCITT (per-frame) |
 | `ErrorGlyph.h/.cpp` | Composes the 20x20 "CE / NN" controller error frame |
@@ -120,12 +120,14 @@ tracks it and is updated alongside firmware changes.
 3. **Fingerprint sweep.** From the main loop, one panel per pass, and only
    while the display is stopped: `ISP_ENTER` + `ISP_VERIFY_CRC` CRCs each panel's running app
    flash, over `/firmware/panel.bin`'s length when that image is on SD (so it doubles as a
-   match check), else over a 64 KB prefix. No panel reboot.
+   match check), else over a 64 KB prefix. No panel reboot. Each step runs inside the
+   long-operation watchdog window (a step on an unresponsive panel can take ~3.4 s).
 
 `DEBUG_SERIAL` builds log the result at boot, e.g.
 `[boot] panel fw: all 40 panels identical, crc 0x1A2B3C4D over 131072 B (= SD panel.bin)`.
-Hosts read it with **`GET_PANEL_INVENTORY` (0xCF)**, gated on `GET_CONTROLLER_INFO` capability
-bit 6; the request/reply layout is specified in `src/PanelInventory.h`.
+Hosts read it with **`GET_PANEL_INVENTORY` (0xD1)** and rescan with **`PANEL_INVENTORY_SCAN`
+(0xD0)**, both gated on feature bit 0 (`panel_inventory`) of the `GET_CONTROLLER_INFO` feature
+bitmap; the request/reply layout is specified in `src/PanelInventory.h`.
 
 ### Display modes
 
