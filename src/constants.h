@@ -181,6 +181,17 @@ constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // Advertises g6_mode + v2_local_storage + io_ext + health.
 constexpr uint8_t controller_capability_bitmap = 0xA3;
 
+// Feature bitmap, appended to the 0xC2 reply after the MAC as
+// [controller_feature_byte_count, features[0..N)]; bit k = feature k, LSB of
+// features[0] first (g6_03 § 0xC2). The capability byte above is full, so new
+// command families are advertised here only. Bits are never reused.
+constexpr uint8_t controller_feature_byte_count = 4;
+constexpr uint8_t feature_bit_panel_inventory = 0;  // 0xD0/0xD1 panel inventory
+constexpr uint8_t feature_bit_qwiic_i2c       = 1;  // 0xB0/0xB1, only on builds with the jack
+constexpr uint8_t feature_bit_ai_stream       = 2;  // reserved: sampled analog-in stream
+constexpr uint32_t controller_feature_bitmap =
+    qwiic_present ? (1u << feature_bit_qwiic_i2c) : 0u;
+
 // -----------------------------------------------------------------------------
 // SD pattern backend — Modes 2/3/4 load .pat files from the built-in SD slot.
 // File format per g6_04-pattern-file-format.md (v2 18-byte G6PT header).
@@ -257,6 +268,10 @@ constexpr uint32_t qwiic_i2c_clock_hz         = 100'000;
 constexpr uint8_t  qwiic_i2c_addr_min         = 0x08;   // 0x00-0x07 reserved
 constexpr uint8_t  qwiic_i2c_addr_max         = 0x77;   // 0x78-0x7F reserved
 constexpr uint8_t  qwiic_i2c_read_byte_count_max = 64;  // < Wire BUFFER_LENGTH (136) and response max
+// Wire's own timeouts cost up to ~66 ms per address on a stuck bus (16 ms
+// idle wait + 50 ms transfer), so a 112-address scan could outlast the 2 s
+// watchdog. The scan stops at the first bus error or after this budget.
+constexpr uint32_t qwiic_i2c_scan_budget_ms   = 500;
 
 // -----------------------------------------------------------------------------
 // Controller error display (g6_03 § 6) — "CE / NN" glyph held >= this long.

@@ -43,12 +43,13 @@ def test_stop_display_acks(transport):
 
 
 def test_get_controller_info(transport):
-    # {version, capability, mac[6]} — MAC bytes are the tolerant extension
-    # (webDisplayTools #135); capability bit 5 = io_ext (0xAC/0xAD/0xA3/0xA4).
+    # {version, capability, mac[6], N, features[N]} — MAC and feature bitmap are
+    # tolerant extensions; capability bit 5 = io_ext (0xAC/0xAD/0xA3/0xA4).
     st, echo, payload, _ = transport.command(GET_CONTROLLER_INFO_CMD)
     assert st == 0
     assert echo == GET_CONTROLLER_INFO_CMD
-    assert len(payload) == 8
+    assert len(payload) == 13, "version, capability, mac[6], N = 4, features[4]"
+    assert payload[8] == 4
     version, capability = payload[0], payload[1]
     assert version == 1
     assert capability & 0x01, "g6_mode bit must be set"

@@ -41,7 +41,7 @@ GET_I2C_SCAN_CMD            = 0xB0   # [01 B0] Qwiic (Wire1) bus scan; returns [
 I2C_TRANSFER_CMD            = 0xB1   # [len B1 addr wlen w... rlen] Qwiic write-then-read (repeated start); returns rlen bytes
 SET_ETHERNET_IP_ADDRESS_CMD = 0xC0   # reserved, not yet implemented
 GET_ETHERNET_IP_ADDRESS_CMD = 0xC1
-GET_CONTROLLER_INFO_CMD     = 0xC2   # returns {version, capability_bitmap, mac[6]} (bit5 = io_ext, bit7 = health)
+GET_CONTROLLER_INFO_CMD     = 0xC2   # returns {version, capability_bitmap, mac[6], N, features[N]} (bit5 = io_ext, bit7 = health)
 SET_DIAG_OUTPUT_CMD         = 0xC3
 GET_DIAG_OUTPUT_CMD         = 0xC4   # returns 0 or 1
 SET_SPI_CLOCK_CMD           = 0xC5   # [len=3,0xC5,lo,hi] uint16 LE MHz; echoes applied MHz
@@ -52,3 +52,20 @@ GET_FIRMWARE_VERSION_CMD    = 0xCB   # [01 CB] build identity {ver, rows, cols, 
 GET_SD_INFO_CMD             = 0xCD   # [01 CD] SD card identity + geometry {ver, flags, card_type, fat_type, sectors u32, bytes_per_cluster u32, cid[16], maint, sd_diag} = 30 bytes; gate on 0xCB flags bit 5
 SET_SD_DIAG_CMD             = 0xCE   # [02 CE flags] bench A/B: bit0 legacy seek (next open), bit1 no same-index skip; echoes flags; readback 0xCD byte 29
 ALL_ON_CMD                  = 0xFF
+
+
+# 0xC2 feature bitmap (after the MAC): bit k = feature k.
+FEATURE_PANEL_INVENTORY = 0
+FEATURE_QWIIC_I2C       = 1
+FEATURE_AI_STREAM       = 2
+
+
+def controller_features(payload) -> int:
+    """Feature bitmap from a 0xC2 payload as an int; 0 when absent or truncated."""
+    payload = bytes(payload)
+    if len(payload) < 9:
+        return 0
+    n = payload[8]
+    if len(payload) < 9 + n:
+        return 0
+    return int.from_bytes(payload[9:9 + n], "little")

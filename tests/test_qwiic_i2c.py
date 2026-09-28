@@ -12,7 +12,7 @@ Run:
 
 import pytest
 
-from .commands import I2C_TRANSFER_CMD
+from .commands import FEATURE_QWIIC_I2C, GET_CONTROLLER_INFO_CMD, I2C_TRANSFER_CMD, controller_features
 from .qwiic_sensors import (
     AS7343,
     MCP4725_ADDR,
@@ -50,6 +50,14 @@ def _find(devices, addr):
 
 
 # ── Bus level (no sensors required) ──────────────────────────────────────────
+
+def test_qwiic_feature_bit_advertised(transport, scan):
+    # The scan fixture only gets here on a build with the jack; that build must
+    # advertise it so hosts never have to probe 0xB0 blind.
+    st, echo, payload, _ = transport.command(GET_CONTROLLER_INFO_CMD)
+    assert st == 0 and echo == GET_CONTROLLER_INFO_CMD
+    assert controller_features(payload) & (1 << FEATURE_QWIIC_I2C), "feature bit 1 (qwiic_i2c) must be set"
+
 
 def test_scan_payload_shape(scan):
     assert scan == sorted(set(scan)), f"addresses must be ascending and unique: {scan}"

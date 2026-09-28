@@ -877,15 +877,35 @@ void CommandProcessor::handleBinaryCommand(const ParsedCommand &cmd) {
       // (Wire1) that ACKs a zero-length write. Bench check that the jack,
       // cable and sensor power are good before any register traffic. Blocks
       // the loop for the scan (~12 ms at 100 kHz when the bus is empty).
+      // A bus error, or running past qwiic_i2c_scan_budget_ms, aborts with
+      // status 4 so a stuck bus cannot hold the loop past the watchdog.
       if (!qwiic_present) {
         current_source_->sendResponse(command_byte, 1, "No Qwiic jack on this hardware variant");
         break;
       }
       uint8_t payload[1 + (qwiic_i2c_addr_max - qwiic_i2c_addr_min + 1)];
       uint8_t count = 0;
+      uint8_t bus_err = 0;
+      const uint32_t scan_start_ms = millis();
       for (uint8_t addr = qwiic_i2c_addr_min; addr <= qwiic_i2c_addr_max; ++addr) {
         Wire1.beginTransmission(addr);
-        if (Wire1.endTransmission() == 0) payload[1 + count++] = addr;
+        const uint8_t err = Wire1.endTransmission();
+        if (err == 0) {
+          payload[1 + count++] = addr;
+        } else if (err != 2 && err != 3) {
+          bus_err = err;
+          break;
+        }
+        if ((uint32_t)(millis() - scan_start_ms) >= qwiic_i2c_scan_budget_ms) {
+          bus_err = 0xFF;
+          break;
+        }
+      }
+      if (bus_err != 0) {
+        current_source_->sendResponse(command_byte, 4, "I2C bus error/timeout during scan");
+        DBG_PRINTF("[cmd] i2c-scan aborted err=%u after %u device(s)\n",
+                   (unsigned)bus_err, (unsigned)count);
+        break;
       }
       payload[0] = count;
       current_source_->sendResponse(command_byte, 0, payload, (size_t)1 + count);
@@ -1144,15 +1164,22 @@ void CommandProcessor::handleGetControllerInfo() {
   // Ethernet link is down). Tolerant, additive extension: hosts that predate
   // it read only the first two bytes; webDisplayTools' decodeControllerInfo
   // reports mac:null when the payload is 2 bytes, so version stays 1.
-  uint8_t payload[8] = {
+  // The feature bitmap after the MAC is the same kind of extension:
+  // [N, features[N]], present iff the payload is >= 9 + N bytes.
+  uint8_t payload[9 + controller_feature_byte_count] = {
       controller_info_version,
       controller_capability_bitmap,
   };
   net_.macBytes(payload + 2);
+  payload[8] = controller_feature_byte_count;
+  for (uint8_t i = 0; i < controller_feature_byte_count; ++i) {
+    payload[9 + i] = (uint8_t)(controller_feature_bitmap >> (8 * i));
+  }
   current_source_->sendResponse(GET_CONTROLLER_INFO_CMD, 0, payload, sizeof(payload));
-  DBG_PRINTF("[cmd] controller-info v=%u cap=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
+  DBG_PRINTF("[cmd] controller-info v=%u cap=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X feat=0x%08lX\n",
              (unsigned)payload[0], (unsigned)payload[1], payload[2], payload[3],
-             payload[4], payload[5], payload[6], payload[7]);
+             payload[4], payload[5], payload[6], payload[7],
+             (unsigned long)controller_feature_bitmap);
 }
 
 // ---------------------------------------------------------------------------

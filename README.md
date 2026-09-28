@@ -765,12 +765,15 @@ on it (the breakouts carry 10k each); the firmware runs it at 100 kHz. Two comma
 bus to a host so sensors can be validated without sensor-specific firmware:
 
 - `GET_I2C_SCAN` (0xB0): `[01 B0]` → `[count, addr...]`, the 7-bit addresses (0x08–0x77) that ACK.
+  A bus error, or a scan running past 500 ms, returns `status = 4` instead.
 - `I2C_TRANSFER` (0xB1): `[len B1 addr wlen w... rlen]` → the `rlen` bytes read. Writes `wlen`
   bytes, then reads `rlen` under a repeated start; `wlen = 0` is a plain read, `rlen = 0` a plain
   write, both zero an ACK probe. `rlen ≤ 64`. Status: 1 bad framing, 2 address NACK, 3 data NACK,
   4 bus error/timeout, 5 short read.
 
-arena_10-10 builds (no jack) answer both with `status = 1`. Both block the control loop for the
+Builds with the jack set feature bit 1 (`qwiic_i2c`) in the `0xC2` feature bitmap; hosts gate
+0xB0/0xB1 on it. arena_10-10 and 2x10 builds (no jack) leave it clear and answer both with
+`status = 1`. Both block the control loop for the
 transaction (≲ 12 ms for a full scan) — bench use, not the display hot path. `pixi run qwiic-probe`
 (`scripts/qwiic_probe.py`) scans the bus, maps PCA9548 mux channels, identifies the LAB-211 sensors
 (AS7343, TSL2591, VEML7700) and takes readings; `pixi run qwiic-read` streams all of them
