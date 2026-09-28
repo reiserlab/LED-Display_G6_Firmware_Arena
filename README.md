@@ -521,7 +521,7 @@ the *panel* image on the SD card, not the controller). Request `[01 CB]`; framed
 | 22 | char[24] | `branch` | git branch, truncated to 24; `detached` for a detached HEAD; `unknown` when unavailable |
 
 How it gets in: `scripts/build_version.py` is a PlatformIO `pre:` extra script (listed in
-`platformio.ini` after the USB-string and port-finder scripts). On every `pio run` it runs
+`platformio.ini` after the USB-string script). On every `pio run` it runs
 `git rev-parse --short=8 HEAD`, `git rev-parse --abbrev-ref HEAD`, and
 `git status --porcelain --untracked-files=no` (untracked files do not make a build dirty), stamps
 the UTC date, and appends `FW_GIT_SHA` / `FW_GIT_BRANCH` / `FW_BUILD_DATE` / `FW_GIT_DIRTY` as
