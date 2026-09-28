@@ -10,12 +10,32 @@
 using namespace AC;
 using namespace AC::constants;
 
+// Late boot step: once panel_late_boot_blank_ms after reset, and only while the
+// display is idle, blank again (reaches panels that dropped the setup() blanks
+// during a PE window), then run the boot presence scan + fingerprint sweep. A
+// display the host started before then is left alone; the step waits for the
+// next ALL_OFF. If panels are still absent, blank and rescan once more,
+// panel_boot_inventory_retry_ms later. A host 0xD0 in the meantime replaces the
+// boot scan.
 void CommandProcessor::serviceLateBootBlank() {
   if (!late_boot_blank_pending_) return;
-  if ((int32_t)(millis() - panel_late_boot_blank_ms) < 0) return;
-  late_boot_blank_pending_ = false;
-  // A display the host started before then is left alone.
-  if (state_ == ArenaState::ALL_OFF && !dl_active_ && !ul_active_ && !ar_active_) enterAllOff();
+  if ((int32_t)(millis() - late_boot_due_ms_) < 0) return;
+  if (state_ != ArenaState::ALL_OFF || dl_active_ || ul_active_ || ar_active_) return;
+  ++late_boot_tries_;
+  enterAllOff();
+  if (late_boot_tries_ == 1 && inventory_.presenceValid()) {
+    late_boot_blank_pending_ = false;
+    return;
+  }
+  // Presence scan: ~2.4 s with 48 panels absent, past the 2 s watchdog.
+  if (!Health::watchdogSuspend()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, PANEL_INVENTORY_SCAN_CMD);
+  beginPanelInventory();
+  if (!Health::watchdogResume()) Telemetry::state(Telemetry::ST_TELEMETRY, 0xEE, PANEL_INVENTORY_SCAN_CMD);
+  if (inventory_.anyAbsent() && late_boot_tries_ < 2) {
+    late_boot_due_ms_ = millis() + panel_boot_inventory_retry_ms;
+  } else {
+    late_boot_blank_pending_ = false;
+  }
 }
 
 FLASHMEM void CommandProcessor::beginPanelInventory() {

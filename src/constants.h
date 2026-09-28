@@ -88,6 +88,9 @@ constexpr uint32_t spi_clock_speed = 25'000'000;
 // and drop everything, the setup() blanks included, for their 3 s error window
 // (panel ERROR_DISPLAY_DURATION_US); without the repeat they stay lit.
 constexpr uint32_t panel_late_boot_blank_ms = 3500;
+// The boot panel-inventory scan runs right after that late blank; if it finds
+// panels absent, blank + rescan once more this much later.
+constexpr uint32_t panel_boot_inventory_retry_ms = 4000;
 
 constexpr uint8_t  spi_bit_order   = MSBFIRST;
 constexpr uint8_t  spi_data_mode   = SPI_MODE3;

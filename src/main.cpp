@@ -100,11 +100,6 @@ void setup() {
   serial.begin();
   cmdProc.begin();
   spi.begin();  // waits out panel_power_settle_ms before driving any CS line
-  // Fleet presence scan now; the fingerprint sweep runs from loop() so it
-  // never delays boot. Must follow spi.begin() (CS lines configured and
-  // deselected). The sweep reads the SD reference lazily, after sd.begin()
-  // below has mounted the card.
-  cmdProc.beginPanelInventory();
   sd.begin();  // mounts BUILTIN_SDCARD for Modes 2/3/4; safe with no card
 
   // A watchdog or software reset restarts the controller in ALL_OFF, but the
@@ -159,8 +154,8 @@ void loop() {
   cmdProc.serviceDownload();  // 3b. Stream one 0x84 download chunk, if one is in flight
   cmdProc.serviceUpload();    // 3c. Stream one 0x85 upload chunk, if one is in flight
   cmdProc.serviceArchive();   // 3d. Stream one 0x8A archive step, if one is in flight
-  cmdProc.serviceLateBootBlank(); // 3e. Repeat the boot blank once, after the panels' PE window
-  cmdProc.serviceInventory(); // 3e. Fingerprint one panel, if a sweep is pending and the display is idle
+  cmdProc.serviceLateBootBlank(); // 3e. Late boot blank + presence scan (once, retried once), after the panels' PE window
+  cmdProc.serviceInventory(); // 3f. Fingerprint one panel, if a sweep is pending and the display is idle
   // net.flushResponses();       // 4a. Send queued responses over TCP
   serial.flushResponses();    // 4b. Send queued responses over USB CDC
 

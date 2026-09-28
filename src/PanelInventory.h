@@ -88,6 +88,11 @@ class PanelInventory {
   void startFingerprints(bool log_when_done);
 
   bool fingerprintActive() const { return fp_active_; }
+  bool presenceValid() const { return flags_ & kFlagPresenceValid; }
+  bool anyAbsent() const {
+    for (uint8_t i = 0; i < kPanels; ++i) if (status_[i] == kAbsent) return true;
+    return false;
+  }
   bool logWhenDone() const { return log_when_done_; }
 
   // One unit of sweep work (reference read, or one panel). Returns true on
