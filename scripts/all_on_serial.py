@@ -8,8 +8,9 @@ sends "all on" and captures the CIPO stream -- no separate `pio device monitor`
 (which would fight for the exclusive port).
 
 Requires a diagnostic arena build: the `[spi] CIPO` rows are gated on
--DDEBUG_SERIAL (env teensy41-printf; flash via `pixi run deploy-printf`). The
-default `pixi run deploy-10-10` (env teensy41-10-10) compiles them out and nothing matches.
+-DDEBUG_SERIAL (env teensy41-10-10; flash via `pixi run deploy-10-10`). The
+`pixi run deploy-10-10-performance` build (env teensy41-10-10-performance)
+compiles them out and nothing matches.
 
     pixi run python scripts/all_on_serial.py --port /dev/cu.usbmodem121699401 \
         --label A --duration 50

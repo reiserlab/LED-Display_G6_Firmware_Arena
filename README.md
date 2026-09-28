@@ -66,6 +66,10 @@ pixi run monitor-2-10    # USB serial monitor (logs to log/)
 Each hardware target also has a `-performance` variant (`deploy-10-10-performance`,
 `deploy-12-18-performance`, `deploy-2-10-performance`) that builds without `DEBUG_SERIAL`.
 
+The `monitor-*` tasks work on Linux, macOS and Windows and pick the arena's serial port
+automatically. If more than one Teensy is attached, name the port explicitly:
+`pixi run monitor-10-10 -- --port COM5` (or `/dev/cu.usbmodem*`, `/dev/ttyACM*`).
+
 ## Source files
 
 All source files live in `src/`.
@@ -517,7 +521,7 @@ the *panel* image on the SD card, not the controller). Request `[01 CB]`; framed
 | 22 | char[24] | `branch` | git branch, truncated to 24; `detached` for a detached HEAD; `unknown` when unavailable |
 
 How it gets in: `scripts/build_version.py` is a PlatformIO `pre:` extra script (listed in
-`platformio.ini` after the USB-string and port-finder scripts). On every `pio run` it runs
+`platformio.ini` after the USB-string script). On every `pio run` it runs
 `git rev-parse --short=8 HEAD`, `git rev-parse --abbrev-ref HEAD`, and
 `git status --porcelain --untracked-files=no` (untracked files do not make a build dirty), stamps
 the UTC date, and appends `FW_GIT_SHA` / `FW_GIT_BRANCH` / `FW_BUILD_DATE` / `FW_GIT_DIRTY` as

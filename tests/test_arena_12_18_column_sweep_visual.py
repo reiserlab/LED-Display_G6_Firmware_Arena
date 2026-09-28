@@ -103,10 +103,15 @@ def _stream_led_column(transport, panel_col, local_col):
 def _pause(message: str, settle_s: float = 5.0):
     print("\n" + message)
     if sys.stdin is not None and sys.stdin.isatty():
-        input("    >>> press Enter when you've confirmed... ")
-    else:
-        print(f"    (no interactive TTY -- pausing {settle_s:.0f}s; pass -s for prompts)")
-        time.sleep(settle_s)
+        try:
+            input("    >>> press Enter when you've confirmed... ")
+            return
+        except EOFError:
+            # isatty() can lie under a non-interactive runner; fall through
+            # to the timed pause instead of failing an otherwise-good sweep.
+            pass
+    print(f"    (no interactive TTY -- pausing {settle_s:.0f}s; pass -s for prompts)")
+    time.sleep(settle_s)
 
 
 @pytest.fixture(autouse=True)

@@ -40,6 +40,8 @@ void SpiManager::begin() {
   }
 
   // Drive every CS line HIGH (deselected) before any transaction can run.
+  // This covers all panel_set_count CS lines, so every column's MISO
+  // OE-decode AND (see ArenaConfig.h) starts at all-HIGH / Hi-Z.
   for (uint8_t i = 0; i < panel_set_count; ++i) {
     // Preload HIGH before switching the pin to OUTPUT: the output register
     // resets to LOW, so pinMode-first drives a brief CS-low pulse on every
