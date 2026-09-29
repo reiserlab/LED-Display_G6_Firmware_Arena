@@ -261,12 +261,23 @@ class TSL2591:
         self.write_reg(self.REG_ENABLE, self.ENABLE_PON | self.ENABLE_AEN)
         time.sleep(atime_ms / 1000 * 1.2 + 0.05)
 
+    @staticmethod
+    def ceiling_for(atime_ms: int) -> int:
+        """ADC full scale: 36863 (0x8FFF) at the 100 ms integration time, 65535 otherwise
+        (datasheet § ALS ADC)."""
+        return 36863 if atime_ms == 100 else 65535
+
+    @property
+    def ceiling(self) -> int:
+        return self.ceiling_for(self.atime_ms)
+
     def read(self) -> dict:
         status = self.read_reg(self.REG_STATUS)[0]
         full, ir = struct.unpack("<HH", self.read_reg(self.REG_C0DATAL, 4))
-        out = {"full": full, "ir": ir, "visible": full - ir,
+        sat = full >= self.ceiling or ir >= self.ceiling
+        out = {"full": full, "ir": ir, "visible": full - ir, "sat": sat,
                "valid": bool(status & self.STATUS_AVALID), "lux_approx": None}
-        if full > 0 and full < 0xFFFF:
+        if full > 0 and not sat:
             cpl = (self.atime_ms * self.GAIN[self.gain][1]) / 408.0
             out["lux_approx"] = ((full - ir) * (1.0 - ir / full)) / cpl
         return out
@@ -473,10 +484,10 @@ class Sampler:
 def flatten(sensor, r: dict) -> dict:
     """Reading dict -> ordered {metric: value} for tables; None = unusable."""
     if isinstance(sensor, TSL2591):
-        return {"full": r["full"], "ir": r["ir"],
-                "lux~": None if r["lux_approx"] is None else r["lux_approx"], "sat": int(r["full"] >= 0xFFFF or r["lux_approx"] is None)}
+        return {"full": r["full"], "ir": r["ir"], "lux~": r["lux_approx"], "sat": int(r["sat"])}
     if isinstance(sensor, VEML7700):
-        return {"als": r["als"], "white": r["white"], "lux~": r["lux_approx"], "sat": int(r["als"] >= 0xFFFF)}
+        return {"als": r["als"], "white": r["white"], "lux~": r["lux_approx"],
+                "sat": int(r["als"] >= 0xFFFF or r["white"] >= 0xFFFF)}
     out = {k: v for k, v in r["spectral"].items()}
     out["VIS"] = r["vis"]
     out["sat"] = int(r["sat"])

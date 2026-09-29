@@ -72,7 +72,7 @@ def stats(values):
 def sensor_header(s, settings) -> str:
     if isinstance(s, TSL2591):
         g = settings["tsl_gain"]
-        return f"gain {g} (x{TSL2591.GAIN[g][1]:g}), {settings['tsl_atime']} ms, ceiling {36863 if settings['tsl_atime'] == 100 else 65535}"
+        return f"gain {g} (x{TSL2591.GAIN[g][1]:g}), {settings['tsl_atime']} ms, ceiling {TSL2591.ceiling_for(settings['tsl_atime'])}"
     if isinstance(s, VEML7700):
         return "gain x1, 100 ms, ceiling 65535"
     return f"gain x{settings['as_gain']:g}, {s.tint_ms:.0f} ms x 3 cycles, full scale {s.full_scale}"
@@ -80,7 +80,7 @@ def sensor_header(s, settings) -> str:
 
 def headroom_line(s, settings, peak_metric, peak) -> str:
     if isinstance(s, TSL2591):
-        full = 36863 if settings["tsl_atime"] == 100 else 65535
+        full = TSL2591.ceiling_for(settings["tsl_atime"])
         order = list(TSL2591.GAIN)
         cur = order.index(settings["tsl_gain"])
         frac = peak / full
@@ -224,7 +224,7 @@ def mode_live(sampler, args):
                         out.append(f"  {k.split('_')[1]:>3s} nm  {bar(v, top)} {v:6d}")
                     out.append(f"  VIS {r['vis']:6.0f}   full scale {s.full_scale}")
                 elif isinstance(s, TSL2591):
-                    ceil = 36863 if sampler.settings["tsl_atime"] == 100 else 65535
+                    ceil = s.ceiling
                     out.append(f"  full {bar(flat['full'], ceil)} {flat['full']:6d}")
                     out.append(f"  ir   {bar(flat['ir'], ceil)} {flat['ir']:6d}")
                     out.append(f"  lux~ {flat['lux~']:.1f}" if flat['lux~'] is not None else "  lux~ n/a (saturated)")

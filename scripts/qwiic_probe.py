@@ -36,17 +36,7 @@ from tests.qwiic_sensors import (  # noqa: E402
     reach,
 )
 from tests.transport import SerialTransport, TcpTransport  # noqa: E402
-
-
-def find_ports() -> list[str]:
-    from serial.tools import list_ports
-    ports = list(list_ports.comports())
-    named = [p.device for p in ports
-             if any(s and ("Arena" in s or "Reiser" in s)
-                    for s in (p.manufacturer, p.product, p.description))]
-    if named:
-        return named
-    return [p.device for p in ports if p.vid == 0x16C0]  # PJRC
+from scripts.arena_port import describe_usb_ports, list_arena_ports  # noqa: E402
 
 
 def open_transport(args):
@@ -56,11 +46,13 @@ def open_transport(args):
         return t, f"tcp {args.ip}"
     port = args.port
     if not port:
-        ports = find_ports()
+        # Fail closed on more than one candidate: these scripts write sensor registers,
+        # so probing the wrong controller silently is worse than stopping (issue #61).
+        ports = list_arena_ports()
         if not ports:
-            sys.exit("no Arena USB-CDC port found — pass --port or --ip")
+            sys.exit(f"no G6 arena USB-CDC port found (saw: {describe_usb_ports()}) — pass --port or --ip")
         if len(ports) > 1:
-            print(f"several candidate ports {ports}; using {ports[0]}")
+            sys.exit(f"several arena/Teensy ports: {', '.join(ports)} — pass --port")
         port = ports[0]
     t = SerialTransport(port)
     t.open()
