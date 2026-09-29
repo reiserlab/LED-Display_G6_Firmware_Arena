@@ -21,6 +21,8 @@ CAPABILITY_BITS = [
     (2, "mode_1_tsi"),
     (3, "v3_triggered"),
     (4, "v3_gated"),
+    (5, "io_ext"),
+    (6, "ai_cal"),
 ]
 
 

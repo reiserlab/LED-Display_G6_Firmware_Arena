@@ -39,7 +39,15 @@ enum ArenaCommands : uint8_t {
   GET_AO_VOLTAGE_CMD          = 0xA1,  // [01 A1] returns hardware DAC readback as uint16 LE mV
   SET_AO_LUT_CMD              = 0xA2,  // [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
   SET_AO_MODE_CMD             = 0xA3,  // [02 A3 mode] 0=programmable (0xA0/0xA2) | 1=frame_number (DAC tracks frame index, 0-5V normalized)
-  GET_ANALOG_IN_CMD           = 0xA4,  // [01 A4] returns Analog In 1 + Analog In 2 as two int16 LE mV (±10V front-end, calibration TBD)
+  GET_ANALOG_IN_CMD           = 0xA4,  // [01 A4] returns Analog In 1 + 2 as two int16 LE mV (calibrated when a per-board record exists) + flags byte (bit0/1 ch cal applied, bit2 12-bit)
+  // 0xA_ block layout (g6_03 § G4 opcode compatibility): 0xA0-0xA3 analog OUT,
+  // 0xA4-0xA7 analog IN, 0xA8/0xA9 telemetry ring, 0xAA-0xAD digital I/O,
+  // 0xAE/0xAF reserved for the sampled analog-in block stream (feature bit 2).
+  // Set/get pairs sit on adjacent even/odd opcodes (A0/A1, A6/A7, A8/A9,
+  // AA/AB, AC/AD). G4 never used 0xA0-0xAF.
+  GET_ANALOG_IN_RAW_CMD       = 0xA5,  // [01 A5] → raw ADC counts of Analog In 1 + 2 as two uint16 LE (one averaged read each)
+  SET_ANALOG_CAL_CMD          = 0xA6,  // [len A6 ch action (mv_lo mv_hi)] ch 1|2; action 0 = sample 0 V point (ground cap), 1 = sample +10 V point (open input), 2 = set deadband mV, 0xFF = clear; replies with the record (as 0xA7)
+  GET_ANALOG_CAL_CMD          = 0xA7,  // [01 A7] → [version adc_bits source flags] + 2×[valid raw_open(u16) raw_gnd(u16) deadband_mv(u16)] (18 B)
   SET_TELEMETRY_CMD           = 0xA8,  // [04 A8 flags rate_lo rate_hi] (or [02 A8 flags]) telemetry ring: flags bit0 = record events (default ON at boot), bit7 = synthetic producer (cmd 0xFE records at `rate`/s, T1 bench); bit4 = watchdog bits present, then bit6 = watchdog OFF, bit5 = starve (bench test, Health.h); bits 1-3 reserved
   GET_TELEMETRY_BLOCK_CMD     = 0xA9,  // [08 A9 ack_seq(u32) max_bytes(u16) flags] free records with seq <= ack_seq, then reply 18-byte header + whole records from the read cursor (not freed until acked); layout in src/Telemetry.h + README § Telemetry ring
   SET_DIGITAL_OUT_CMD         = 0xAA,  // [03 AA channel state] drive "Digital IO 1/2 (5V)" BNC HIGH/LOW (requires role out_programmable; off auto-promotes)

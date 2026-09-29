@@ -30,7 +30,10 @@ SET_AO_VOLTAGE_CMD          = 0xA0   # [03 A0 mv_lo mv_hi] set BNC J27 (MCP4725)
 GET_AO_VOLTAGE_CMD          = 0xA1   # [01 A1] returns hardware DAC readback as uint16 LE mV
 SET_AO_LUT_CMD              = 0xA2   # [len A2 mode step_hz_lo step_hz_hi count_lo count_hi mv...] upload+start AO LUT
 SET_AO_MODE_CMD             = 0xA3   # [02 A3 mode] 0=programmable | 1=frame_number (DAC tracks frame index, 0-5V)
-GET_ANALOG_IN_CMD           = 0xA4   # [01 A4] returns Analog In 1+2 as two int16 LE mV (±10V front-end)
+GET_ANALOG_IN_CMD           = 0xA4   # [01 A4] returns Analog In 1+2 as two int16 LE mV + flags byte
+GET_ANALOG_IN_RAW_CMD       = 0xA5   # [01 A5] → raw ADC counts, two uint16 LE
+SET_ANALOG_CAL_CMD          = 0xA6   # [len A6 ch action (mv_lo mv_hi)] two-point cal / deadband / clear
+GET_ANALOG_CAL_CMD          = 0xA7   # [01 A7] → 18-byte calibration record
 SET_TELEMETRY_CMD           = 0xA8   # [04 A8 flags rate_lo rate_hi] or [02 A8 flags]; bit0 = record events (default ON), bit7 = synthetic producer at rate/s; bit4 = watchdog bits present (bit6 off, bit5 starve)
 GET_TELEMETRY_BLOCK_CMD     = 0xA9   # [08 A9 ack_seq(u32) max_bytes(u16) flags] ack cursor + framed chunk of ring records; see telemetry_codec.py
 SET_DIGITAL_OUT_CMD         = 0xAA   # [03 AA ch state] drive "Digital IO 1/2 (5V)" BNC (role-gated, #135)
@@ -39,7 +42,7 @@ SET_DIO_ROLE_CMD            = 0xAC   # [03 AC port role] 0=off 1=in_trigger 2=ou
 GET_DIO_ROLE_CMD            = 0xAD   # [01 AD] returns [role1, level1, role2, level2]
 SET_ETHERNET_IP_ADDRESS_CMD = 0xC0   # reserved, not yet implemented
 GET_ETHERNET_IP_ADDRESS_CMD = 0xC1
-GET_CONTROLLER_INFO_CMD     = 0xC2   # returns {version, capability_bitmap, mac[6]} (bit5 = io_ext, bit7 = health)
+GET_CONTROLLER_INFO_CMD     = 0xC2   # returns {version, capability_bitmap, mac[6]} (bit5 = io_ext, bit6 = ai_cal, bit7 = health)
 SET_DIAG_OUTPUT_CMD         = 0xC3
 GET_DIAG_OUTPUT_CMD         = 0xC4   # returns 0 or 1
 SET_SPI_CLOCK_CMD           = 0xC5   # [len=3,0xC5,lo,hi] uint16 LE MHz; echoes applied MHz
