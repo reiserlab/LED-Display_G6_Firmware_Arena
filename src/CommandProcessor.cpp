@@ -2314,7 +2314,11 @@ float CommandProcessor::ainMv(uint8_t ch, int raw) const {
 }
 
 uint8_t CommandProcessor::ainFlags() const {
-  uint8_t f = (adc_resolution_bits == 12) ? ain_flag_12bit : 0;
+  // The bit tells a host this build's raw scale is 12-bit (vs the 10-bit F0
+  // firmware, which sent no flags byte at all); the resolution is a build
+  // constant, so the bit is always set here.
+  static_assert(adc_resolution_bits == 12, "ain_flag_12bit advertises a 12-bit raw scale");
+  uint8_t f = ain_flag_12bit;
   if (ain_cal_.ch[0].valid) f |= ain_flag_ch1_calibrated;
   if (ain_cal_.ch[1].valid) f |= ain_flag_ch2_calibrated;
   return f;
@@ -2348,7 +2352,10 @@ void CommandProcessor::serviceClosedLoop() {
 
   // Bipolar BNC input volts (ainVoltsFromRaw; per-board calibration is F2),
   // smoothed with the G3-style EWMA so one noisy conversion cannot step a
-  // frame. The first sample after trial start seeds the filter.
+  // frame. Same alpha as G3, but G3 sampled at 400 Hz and this loop runs at
+  // 500 Hz, so the time constant (-dt/ln(1-alpha)) is ~20 % shorter:
+  // ~3.9 ms here vs ~4.9 ms on G3 at alpha 0.4.
+  // The first sample after trial start seeds the filter.
   float v_raw = ainMv(1, analogRead(mode4_ain_pin)) / 1000.0f;  // calibrated when a record exists
   if (!ain_filter_primed_) {
     ain_filtered_v_ = v_raw;
