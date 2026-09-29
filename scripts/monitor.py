@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 
-from arena_port import describe_usb_ports, find_arena_port
+from arena_port import AmbiguousArenaPort, describe_usb_ports, find_arena_port
 
 
 def main():
@@ -28,7 +28,10 @@ def main():
     ap.add_argument("-p", "--port", help="serial port; auto-detected when omitted")
     args, passthrough = ap.parse_known_args()
 
-    port = args.port or find_arena_port()
+    try:
+        port = args.port or find_arena_port()
+    except AmbiguousArenaPort as e:
+        sys.exit(f"monitor.py: {e}")
     if not port:
         sys.exit(
             "monitor.py: no G6 arena found; pass --port <device>. "
@@ -53,7 +56,15 @@ def main():
                 log.write(chunk)
                 log.flush()
         except KeyboardInterrupt:
-            pass
+            # Ctrl-C reaches this process; pio may not see it (Windows, or a
+            # detached child), and a monitor left running holds the serial port
+            # so the next deploy/test cannot open it. Stop it, then make sure.
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            return 130
         return proc.wait()
 
 

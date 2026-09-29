@@ -16,7 +16,7 @@ The session-scoped `transport` fixture opens/closes the selected backend.
 
 import pytest
 
-from scripts.arena_port import describe_usb_ports, find_arena_port
+from scripts.arena_port import AmbiguousArenaPort, describe_usb_ports, find_arena_port
 
 from .transport import SerialTransport, TcpTransport
 
@@ -95,7 +95,10 @@ def pytest_collection_modifyitems(config, items):
 def transport(pytestconfig):
     tr = pytestconfig.getoption("--transport")
     if tr == "serial":
-        port = pytestconfig.getoption("--port") or find_arena_port()
+        try:
+            port = pytestconfig.getoption("--port") or find_arena_port()
+        except AmbiguousArenaPort as e:
+            pytest.fail(str(e))  # never run the HIL suite against a guessed controller
         if not port:
             pytest.fail(
                 "No G6 arena USB-CDC port found; pass --port <device>. "
