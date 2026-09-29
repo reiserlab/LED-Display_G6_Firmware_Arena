@@ -2243,6 +2243,18 @@ void CommandProcessor::ainCalLoad() {
     r.adc_bits = adc_resolution_bits;
   }
   if (ok) {
+    // A stored record is only as trustworthy as its points: re-check them so a
+    // half-done or otherwise implausible calibration written earlier never
+    // steers Mode 4 after a reboot.
+    for (int i = 0; i < 2; ++i) {
+      if (r.ch[i].valid && !ainCalValidate(r.ch[i])) {
+        DBG_PRINTF("[ain] cal ch%d points implausible (open=%u gnd=%u) — dropped\n", i + 1,
+                   (unsigned)r.ch[i].raw_open, (unsigned)r.ch[i].raw_gnd);
+        r.ch[i].valid = 0;
+      }
+    }
+  }
+  if (ok) {
     ain_cal_ = r;
     ain_cal_source_ = ai_cal_source_eeprom;
     ain_cal_mirror_ok_ = false;  // unknown until the next save
@@ -2289,11 +2301,17 @@ bool CommandProcessor::ainCalMirrorSd() {
   return true;
 }
 
-bool CommandProcessor::ainCalValidate(AinCalChannel &c) const {
-  // Both points sampled (raw_open is never 0 on a live board: the pull-up sits
-  // at +10 V) and the span is real. An un-reworked board (LAB-209) saturates
-  // near full scale for BOTH points → span ≈ 0 → stays invalid, by design.
-  return c.raw_open > c.raw_gnd &&
+bool CommandProcessor::ainCalValidate(const AinCalChannel &c) const {
+  // Both points sampled AND plausible — the same bands the sample actions
+  // enforce, plus the ADC range — so a half-done calibration (open point
+  // taken, raw_gnd still 0 from init: the span looks real but the zero is
+  // ~2000 counts off) or a corrupt stored record never applies. An
+  // un-reworked board (LAB-209) saturates near full scale for BOTH points →
+  // span ≈ 0 → stays invalid, by design. A channel calibrated one point at a
+  // time can still pair an old point with a new one; that is the AIC1 model.
+  return c.raw_gnd >= ai_cal_gnd_min_counts && c.raw_gnd <= ai_cal_gnd_max_counts &&
+         c.raw_open >= ai_cal_open_min_counts && c.raw_open <= adc_full_scale_counts &&
+         c.raw_open > c.raw_gnd &&
          (uint16_t)(c.raw_open - c.raw_gnd) >= ai_cal_min_span_counts;
 }
 
@@ -2357,6 +2375,12 @@ void CommandProcessor::serviceClosedLoop() {
   // ~3.9 ms here vs ~4.9 ms on G3 at alpha 0.4.
   // The first sample after trial start seeds the filter.
   float v_raw = ainMv(1, analogRead(mode4_ain_pin)) / 1000.0f;  // calibrated when a record exists
+  // The calibrated line extrapolates: keep the loop input finite and inside
+  // the front-end's range, or one bad conversion/record would poison the EWMA
+  // state for the rest of the trial (frame_accum_ is guarded below; the
+  // filter is not otherwise).
+  if (!isfinite(v_raw)) v_raw = 0.0f;
+  v_raw = fmaxf(-mode4_ain_input_range_volts, fminf(mode4_ain_input_range_volts, v_raw));
   if (!ain_filter_primed_) {
     ain_filtered_v_ = v_raw;
     ain_filter_primed_ = true;

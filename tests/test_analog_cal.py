@@ -53,6 +53,10 @@ def test_get_analog_cal_shape(transport):
         if c["valid"]:
             assert c["raw_open"] > c["raw_gnd"] + 99, "a valid channel has a real span"
             assert c["raw_open"] <= 4095 and c["raw_gnd"] <= 4095
+            # Both points inside the plausibility bands the sampler enforces (constants.h):
+            # a half-done calibration (open only, gnd still 0) must never read valid.
+            assert 1024 <= c["raw_gnd"] <= 3072, f"valid channel with implausible ground point {c['raw_gnd']}"
+            assert c["raw_open"] >= 3072, f"valid channel with implausible open point {c['raw_open']}"
 
 
 def test_get_analog_in_raw_shape(transport):
@@ -121,10 +125,17 @@ def test_two_point_calibration_channel2(transport):
     reference), then the test pauses for the ground cap? No — pytest cannot pause,
     so this samples the open point only and checks the record stays INVALID
     (one point), then clears. The full two-point run is the Studio's job (S2)."""
+    st, _, _, _ = transport.command(SET_ANALOG_CAL_CMD, bytes([2, ACTION_CLEAR]))  # start from no points
+    assert st == 0
     st, _, payload, _ = transport.command(SET_ANALOG_CAL_CMD, bytes([2, ACTION_SAMPLE_OPEN]))
+    if st == 1:
+        # The firmware refused the point as implausible: the BNC is not open (a cable is
+        # attached) or the board lacks the LAB-209 rework. Bench precondition, not a bug.
+        pytest.skip("open-input point refused: " + bytes(payload).decode(errors="replace"))
     assert st == 0
     rec = read_record(transport)
     assert rec["ch"][1]["raw_open"] > 3000, "an open input sits near +10 V (top of the 12-bit range)"
+    assert rec["ch"][1]["valid"] == 0, "one point (ground still 0 from init) must not make the channel valid"
     st, _, _, _ = transport.command(SET_ANALOG_CAL_CMD, bytes([2, ACTION_CLEAR]))
     assert st == 0
     rec = read_record(transport)

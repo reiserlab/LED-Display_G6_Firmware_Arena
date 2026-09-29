@@ -109,7 +109,7 @@ class CommandProcessor {
   void     ainCalLoad();
   bool     ainCalSave();
   bool     ainCalMirrorSd();
-  bool     ainCalValidate(AinCalChannel &c) const;
+  bool     ainCalValidate(const AinCalChannel &c) const;
   uint16_t ainSampleRawAveraged(uint8_t pin, uint16_t n) const;
   float    ainMv(uint8_t ch, int raw) const;   // calibrated mV when valid, nominal otherwise
   uint8_t  ainFlags() const;                    // the 0xA4 flags byte
