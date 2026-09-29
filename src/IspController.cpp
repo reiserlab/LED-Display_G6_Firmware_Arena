@@ -160,24 +160,34 @@ FLASHMEM bool IspController::checkPanelPresent(uint8_t panel_index) {
   return alive;
 }
 
+// /firmware/panel.bin ends in a 32-byte G6PANFW footer: [24..27] image_crc32,
+// [28..31] image_size, both u32 LE. The image itself is the file minus the
+// footer, so image_size must equal file size - 32 — a truncated or concatenated
+// upload otherwise yields a CRC span that does not match the file.
+FLASHMEM static bool readImageFooter(File &f, uint32_t *image_crc32, uint32_t *image_size,
+                                     const char **err) {
+  const uint32_t file_size = (uint32_t)f.size();
+  constexpr uint8_t FOOT = AC::constants::firmware_footer_byte_count;  // 32
+  if (file_size <= FOOT) { *err = "firmware too small"; return false; }
+  uint8_t footer[FOOT];
+  f.seek(file_size - FOOT);
+  if (f.read(footer, FOOT) != (size_t)FOOT) { *err = "footer read failed"; return false; }
+  if (memcmp(footer, "G6PANFW", 7) != 0) { *err = "bad footer magic"; return false; }
+  memcpy(image_crc32, footer + 24, 4);
+  memcpy(image_size,  footer + 28, 4);
+  if (*image_size != file_size - FOOT) { *err = "footer size mismatch"; return false; }
+  return true;
+}
+
 FLASHMEM bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len) {
   auto setMsg = [&](const char *m) { snprintf(msg, msg_len, "%s", m); };
 
   // --- 1. Open image + validate the 32-byte footer ---------------------------
   File f = SD.open(AC::constants::firmware_path, FILE_READ);
   if (!f) { setMsg("no firmware on SD"); return false; }
-  uint32_t file_size = (uint32_t)f.size();
-  constexpr uint8_t FOOT = AC::constants::firmware_footer_byte_count;  // 32
-  if (file_size <= FOOT) { f.close(); setMsg("firmware too small"); return false; }
-
-  uint8_t footer[FOOT];
-  f.seek(file_size - FOOT);
-  if (f.read(footer, FOOT) != (size_t)FOOT) { f.close(); setMsg("footer read failed"); return false; }
-  if (memcmp(footer, "G6PANFW", 7) != 0) { f.close(); setMsg("bad footer magic"); return false; }
   uint32_t image_crc32, image_size;
-  memcpy(&image_crc32, footer + 24, 4);  // u32 LE
-  memcpy(&image_size,  footer + 28, 4);  // u32 LE
-  if (image_size != file_size - FOOT) { f.close(); setMsg("footer size mismatch"); return false; }
+  const char *ferr = "";
+  if (!readImageFooter(f, &image_crc32, &image_size, &ferr)) { f.close(); setMsg(ferr); return false; }
 
   // --- 2. Save the caller's SPI clock (per-phase clocks are set inside
   //        sendCmd/readResp; see kIspClockAMhz/kIspClockBMhz) ------------------
@@ -378,18 +388,9 @@ FLASHMEM bool IspController::readReferenceFooter(uint32_t *image_crc32, uint32_t
   // Read the SD footer (expected image_size + CRC) — no need to stream the image.
   File f = SD.open(AC::constants::firmware_path, FILE_READ);
   if (!f) { *err = "no firmware on SD"; return false; }
-  uint32_t file_size = (uint32_t)f.size();
-  constexpr uint8_t FOOT = AC::constants::firmware_footer_byte_count;  // 32
-  if (file_size <= FOOT) { f.close(); *err = "firmware too small"; return false; }
-  uint8_t footer[FOOT];
-  f.seek(file_size - FOOT);
-  size_t got_n = f.read(footer, FOOT);
+  const bool ok = readImageFooter(f, image_crc32, image_size, err);
   f.close();
-  if (got_n != (size_t)FOOT) { *err = "footer read failed"; return false; }
-  if (memcmp(footer, "G6PANFW", 7) != 0) { *err = "bad footer magic"; return false; }
-  memcpy(image_crc32, footer + 24, 4);
-  memcpy(image_size,  footer + 28, 4);
-  return true;
+  return ok;
 }
 
 FLASHMEM bool IspController::fingerprintPanel(uint8_t panel_index, uint32_t len,

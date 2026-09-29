@@ -21,8 +21,11 @@ from .commands import (
     GET_FIRMWARE_VERSION_CMD,
     GET_PANEL_INVENTORY_CMD,
     PANEL_INVENTORY_SCAN_CMD,
+    SYSTEM_RESET_CMD,
     controller_features,
 )
+
+BOOT_SCAN_WINDOW_S = 30.0  # constants.h panel_boot_inventory_window_ms
 
 CE_DISPLAY_ACTIVE = 10
 
@@ -175,6 +178,39 @@ def test_fingerprint_rescan_discards_fingerprints(transport, display_off):
     assert hdr["flags"] & FLAG_FP_IN_PROGRESS and not hdr["flags"] & FLAG_FP_VALID
     for i, (status, crc) in enumerate(entries):
         assert status in (ABSENT, PRESENT) and crc == 0, f"panel {i + 1}: stale {status}/{crc:#x}"
+
+
+def _reconnect_after_reset(transport, deadline_s=20.0):
+    transport.close()
+    time.sleep(1.0)
+    deadline = time.monotonic() + deadline_s
+    while True:
+        try:
+            transport.open()
+            transport.command(GET_CONTROLLER_INFO_CMD)
+            return
+        except Exception:  # noqa: BLE001 — the CDC node comes and goes during a reboot
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.3)
+
+
+def test_boot_scan_dropped_when_display_busy_past_window(transport, display_off):
+    """A display started right after boot must not carry the pending boot scan into a later
+    ALL_OFF (it would stall the next trial). Past the window the scan is dropped: 0xD1 reads
+    presence_valid clear until the host rescans. ~40 s."""
+    st, _, payload, _ = transport.command(SYSTEM_RESET_CMD)
+    assert st == 0 and bytes(payload) == b"rebooting"
+    _reconnect_after_reset(transport)
+    assert transport.command(ALL_ON_CMD)[0] == 0  # busy before the 3.5 s late boot step
+    time.sleep(BOOT_SCAN_WINDOW_S + 6.0)
+    assert transport.command(ALL_OFF_CMD)[0] == 0
+    time.sleep(3.0)  # long enough for a deferred scan to have run, had it not been dropped
+    st, hdr, _ = read_page(transport)
+    assert st == 0
+    assert not hdr["flags"] & FLAG_PRESENCE_VALID, "boot scan ran after the window"
+    st, hdr, _ = scan(transport, 0)
+    assert st == 0 and hdr["flags"] & FLAG_PRESENCE_VALID, "host rescan must still work"
 
 
 def fingerprint_sweep(transport, timeout_s=90.0):

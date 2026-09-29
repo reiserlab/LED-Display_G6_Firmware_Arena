@@ -27,9 +27,9 @@ class CommandProcessor {
       : net_(net), serial_(serial), spi_(spi), sd_(sd) {}
 
   void begin();
-  // Boot fleet inventory (PanelInventory.h): presence scan now, then arm the
-  // background fingerprint sweep. Call once from setup() AFTER spi.begin()
-  // (CS lines configured/deselected, power settled).
+  // Fleet inventory (PanelInventory.h): presence scan now, then arm the
+  // background fingerprint sweep. Run by serviceLateBootBlank() in the late
+  // boot step and by a host 0xD0.
   void beginPanelInventory();
   void serviceInventory();  // one fingerprint-sweep step per loop() while idle
   void processCommand();

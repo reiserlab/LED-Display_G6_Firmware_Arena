@@ -73,7 +73,8 @@ class IspController {
 
   // Read /firmware/panel.bin's 32-byte footer: the reference image for
   // verifyPanel and the panel inventory. Returns false (with *err) when the
-  // SD card has no usable image.
+  // SD card has no usable image — missing, no G6PANFW magic, or a footer
+  // image_size that does not equal the file size minus the footer.
   bool readReferenceFooter(uint32_t *image_crc32, uint32_t *image_size,
                            const char **err);
 

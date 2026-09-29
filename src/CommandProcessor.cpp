@@ -13,13 +13,20 @@ using namespace AC::constants;
 // Late boot step: once panel_late_boot_blank_ms after reset, and only while the
 // display is idle, blank again (reaches panels that dropped the setup() blanks
 // during a PE window), then run the boot presence scan + fingerprint sweep. A
-// display the host started before then is left alone; the step waits for the
-// next ALL_OFF. If panels are still absent, blank and rescan once more,
-// panel_boot_inventory_retry_ms later. A host 0xD0 in the meantime replaces the
-// boot scan.
+// display the host started before then is left alone; the step waits for an
+// ALL_OFF within panel_boot_inventory_window_ms of reset and is dropped after
+// that (the host rescans with 0xD0 when idle). If panels are still absent,
+// blank and rescan once more, panel_boot_inventory_retry_ms later. A host 0xD0
+// in the meantime replaces the boot scan.
 void CommandProcessor::serviceLateBootBlank() {
   if (!late_boot_blank_pending_) return;
   if ((int32_t)(millis() - late_boot_due_ms_) < 0) return;
+  if (millis() > panel_late_boot_blank_ms + panel_boot_inventory_window_ms) {
+    late_boot_blank_pending_ = false;
+    DBG_PRINTF("[boot] panel scan skipped: display busy for %lu s after reset (rescan with 0xD0)\n",
+               (unsigned long)(panel_boot_inventory_window_ms / 1000));
+    return;
+  }
   if (state_ != ArenaState::ALL_OFF || dl_active_ || ul_active_ || ar_active_) return;
   ++late_boot_tries_;
   enterAllOff();
