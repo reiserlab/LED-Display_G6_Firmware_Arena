@@ -47,12 +47,15 @@ constexpr uint16_t panel_pixel_count
 #if defined(ARENA_HW_10_10)
 constexpr uint8_t panel_count_per_frame_row = 4;   // G6_4x10 arena (arena_10-10)
 constexpr uint8_t panel_count_per_frame_col = 10;
+constexpr bool    qwiic_present = false;           // no Qwiic/STEMMA QT jack on arena_10-10
 #elif defined(ARENA_HW_12_18)
 constexpr uint8_t panel_count_per_frame_row = 4;   // G6_4x12 arena (arena_12-18)
 constexpr uint8_t panel_count_per_frame_col = 12;
+constexpr bool    qwiic_present = true;            // J2 Qwiic/STEMMA QT jack (arena_12-18 v1.0)
 #elif defined(ARENA_HW_2_10)
 constexpr uint8_t panel_count_per_frame_row = 2;   // G6_2x10 arena — the CSHL course controllers
 constexpr uint8_t panel_count_per_frame_col = 10;
+constexpr bool    qwiic_present = false;           // no Qwiic/STEMMA QT jack on the 2x10 board
 #else
 #error "Define ARENA_HW_10_10, ARENA_HW_12_18 or ARENA_HW_2_10 in build_flags (see platformio.ini)"
 #endif
@@ -186,6 +189,17 @@ constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // Advertises g6_mode + v2_local_storage + io_ext + health.
 constexpr uint8_t controller_capability_bitmap = 0xA3;
 
+// Feature bitmap, appended to the 0xC2 reply after the MAC as
+// [controller_feature_byte_count, features[0..N)]; bit k = feature k, LSB of
+// features[0] first (g6_03 § 0xC2). The capability byte above is full, so new
+// command families are advertised here only. Bits are never reused.
+constexpr uint8_t controller_feature_byte_count = 4;
+constexpr uint8_t feature_bit_panel_inventory = 0;  // 0xD0/0xD1 panel inventory
+constexpr uint8_t feature_bit_qwiic_i2c       = 1;  // 0xB0/0xB1, only on builds with the jack
+constexpr uint8_t feature_bit_ai_stream       = 2;  // reserved: sampled analog-in stream
+constexpr uint32_t controller_feature_bitmap =
+    qwiic_present ? (1u << feature_bit_qwiic_i2c) : 0u;
+
 // -----------------------------------------------------------------------------
 // SD pattern backend — Modes 2/3/4 load .pat files from the built-in SD slot.
 // File format per g6_04-pattern-file-format.md (v2 18-byte G6PT header).
@@ -245,6 +259,27 @@ constexpr float    adc_ref_volts        = 3.3f;
 // Bipolar BNC input range that the OPA2277 front-end maps onto the ADC span
 // (midscale = 0 V). Hardware calibration value — flagged TBD in g6_03 § Mode 4.
 constexpr float    mode4_ain_input_range_volts = 10.0f;
+
+// -----------------------------------------------------------------------------
+// Qwiic / STEMMA QT jack (J2 on arena_12-18 v1.0, net-traced from
+// teensy.kicad_sch): pin 1 GND, pin 2 +3.3V, pin 3 SDA -> Teensy D17 (SDA1),
+// pin 4 SCL -> Teensy D16 (SCL1) — i.e. Wire1, a separate bus from the MCP4725
+// DAC on Wire (D18/D19). The board has no pull-ups on this bus; the Teensy's
+// 22k pad pull-ups keep it idle-high when nothing is plugged in, and the
+// Adafruit breakouts carry 10k each. 100 kHz for bring-up: tolerant of long
+// (200 mm) cables and a PCA9548 mux in the chain.
+// -----------------------------------------------------------------------------
+
+constexpr uint8_t  qwiic_sda_pin              = 17;
+constexpr uint8_t  qwiic_scl_pin              = 16;
+constexpr uint32_t qwiic_i2c_clock_hz         = 100'000;
+constexpr uint8_t  qwiic_i2c_addr_min         = 0x08;   // 0x00-0x07 reserved
+constexpr uint8_t  qwiic_i2c_addr_max         = 0x77;   // 0x78-0x7F reserved
+constexpr uint8_t  qwiic_i2c_read_byte_count_max = 64;  // < Wire BUFFER_LENGTH (136) and response max
+// Wire's own timeouts cost up to ~66 ms per address on a stuck bus (16 ms
+// idle wait + 50 ms transfer), so a 112-address scan could outlast the 2 s
+// watchdog. The scan stops at the first bus error or after this budget.
+constexpr uint32_t qwiic_i2c_scan_budget_ms   = 500;
 
 // -----------------------------------------------------------------------------
 // Controller error display (g6_03 § 6) — "CE / NN" glyph held >= this long.
