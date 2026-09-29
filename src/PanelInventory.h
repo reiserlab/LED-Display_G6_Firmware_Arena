@@ -5,11 +5,15 @@
 #include "constants.h"
 
 // PanelInventory — per-panel presence + firmware fingerprint for the fleet,
-// filled at boot and served by GET_PANEL_INVENTORY (0xD1).
+// filled in the late boot step (CommandProcessor::serviceLateBootBlank) and
+// served by GET_PANEL_INVENTORY (0xD1). A host that starts a display before
+// that step cancels the boot scan and owns the inventory from then on
+// (PANEL_INVENTORY_SCAN 0xD0 when idle); 0xD1 reports presence_valid clear
+// until it does.
 //
 // Presence: COMM_CHECK liveness probe per panel (IspController::
 // checkPanelPresent). Fast (~7 ms per responding panel, ~50 ms per absent
-// one), no ISP mode, no display-state change. Runs at every boot.
+// one), no ISP mode, no display-state change.
 //
 // Fingerprint: ISP_ENTER + ISP_VERIFY_CRC per responding panel
 // (IspController::fingerprintPanel) — the same exchange g6-verify-panel
@@ -19,7 +23,7 @@
 // panel_fingerprint_prefix_bytes prefix. Tens of ms per panel, so it runs one
 // panel per loop() pass (CommandProcessor::serviceInventory), only while the
 // display is ALL_OFF and no SD transfer is in flight; a running display just
-// pauses it. Runs at every boot. Safe on a panel that stayed powered through a
+// pauses it. Safe on a panel that stayed powered through a
 // controller-only reset: ENTER only arms a session (the PSRAM staging buffer
 // is reserved once at panel boot, Isp::init, apart from the PSRAM frame
 // store), and ISP opcodes don't retire the post-flash smiley

@@ -25,8 +25,6 @@ from .commands import (
     controller_features,
 )
 
-BOOT_SCAN_WINDOW_S = 30.0  # constants.h panel_boot_inventory_window_ms
-
 CE_DISPLAY_ACTIVE = 10
 
 FLAG_PRESENCE_VALID = 0x01
@@ -180,35 +178,55 @@ def test_fingerprint_rescan_discards_fingerprints(transport, display_off):
         assert status in (ABSENT, PRESENT) and crc == 0, f"panel {i + 1}: stale {status}/{crc:#x}"
 
 
-def _reconnect_after_reset(transport, deadline_s=20.0):
+def _reconnect_after_reset(transport, first_cmd, deadline_s=20.0):
+    """Reopen the port after SYSTEM_RESET and make `first_cmd` the first command the controller
+    processes. The controller answers nothing until setup() ends (~4 s on the 2x10), so probes
+    sent before that are answered late; those replies are drained afterwards so the transport
+    stays in sync (a stale reply would otherwise shift every later echo by one)."""
     transport.close()
-    time.sleep(1.0)
+    time.sleep(0.5)
     deadline = time.monotonic() + deadline_s
     while True:
         try:
             transport.open()
-            transport.command(GET_CONTROLLER_INFO_CMD)
-            return
+            st, echo, _, _ = transport.command(first_cmd, timeout=0.5)
+            if st == 0 and echo == first_cmd:
+                break
         except Exception:  # noqa: BLE001 — the CDC node comes and goes during a reboot
-            if time.monotonic() > deadline:
-                raise
-            time.sleep(0.3)
+            pass
+        try:
+            transport.close()
+        except Exception:  # noqa: BLE001
+            pass
+        if time.monotonic() > deadline:
+            raise RuntimeError("controller did not come back after SYSTEM_RESET")
+        time.sleep(0.2)
+    time.sleep(0.5)  # late replies to the probes that timed out arrive now
+    transport._ser.reset_input_buffer()
+    st, echo, _, _ = transport.command(GET_CONTROLLER_INFO_CMD)
+    assert st == 0 and echo == GET_CONTROLLER_INFO_CMD, "transport out of sync after reset"
 
 
-def test_boot_scan_dropped_when_display_busy_past_window(transport, display_off):
-    """A display started right after boot must not carry the pending boot scan into a later
-    ALL_OFF (it would stall the next trial). Past the window the scan is dropped: 0xD1 reads
-    presence_valid clear until the host rescans. ~40 s."""
+def test_display_started_before_boot_scan_cancels_it(transport, display_off):
+    """A display the host starts before the 3.5 s late boot step must cancel the boot scan —
+    otherwise the scan lands in the display's first inter-trial ALL_OFF and delays the next
+    trial. presence_valid stays clear until the host rescans with 0xD0. ~8 s."""
     st, _, payload, _ = transport.command(SYSTEM_RESET_CMD)
     assert st == 0 and bytes(payload) == b"rebooting"
-    _reconnect_after_reset(transport)
-    assert transport.command(ALL_ON_CMD)[0] == 0  # busy before the 3.5 s late boot step
-    time.sleep(BOOT_SCAN_WINDOW_S + 6.0)
-    assert transport.command(ALL_OFF_CMD)[0] == 0
-    time.sleep(3.0)  # long enough for a deferred scan to have run, had it not been dropped
+    _reconnect_after_reset(transport, ALL_ON_CMD)  # ALL_ON is the first command processed
     st, hdr, _ = read_page(transport)
     assert st == 0
-    assert not hdr["flags"] & FLAG_PRESENCE_VALID, "boot scan ran after the window"
+    if hdr["flags"] & FLAG_PRESENCE_VALID:
+        # setup() (power settle, SD, Ethernet) outlasted the 3.5 s late-boot mark: the boot
+        # scan ran on the first loop() pass, before ALL_ON was processed (2x10 performance
+        # build: first reply ~4.0 s after reset). Nothing to cancel on this build.
+        pytest.skip("boot scan ran before the controller processed its first command")
+    time.sleep(2.0)  # past the late boot step while the display runs
+    assert transport.command(ALL_OFF_CMD)[0] == 0
+    time.sleep(1.0)  # a still-pending scan would run here
+    st, hdr, _ = read_page(transport)
+    assert st == 0
+    assert not hdr["flags"] & FLAG_PRESENCE_VALID, "boot scan ran after the display started"
     st, hdr, _ = scan(transport, 0)
     assert st == 0 and hdr["flags"] & FLAG_PRESENCE_VALID, "host rescan must still work"
 

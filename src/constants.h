@@ -89,14 +89,12 @@ constexpr uint32_t spi_clock_speed = 25'000'000;
 // (panel ERROR_DISPLAY_DURATION_US); without the repeat they stay lit.
 constexpr uint32_t panel_late_boot_blank_ms = 3500;
 // The boot panel-inventory scan runs right after that late blank; if it finds
-// panels absent, blank + rescan once more this much later.
+// panels absent, blank + rescan once more this much later. A display the host
+// started before either step cancels it: the host owns the inventory from
+// then on (0xD0 when idle), because a deferred scan would land in the
+// display's first inter-trial ALL_OFF and delay the next trial by up to
+// ~2.4 s (48 absent panels). 0xD1 reports presence_valid clear meanwhile.
 constexpr uint32_t panel_boot_inventory_retry_ms = 4000;
-// Both wait for ALL_OFF, but only this long after reset. A display the host
-// started right after boot would otherwise carry the pending scan into its
-// first inter-trial ALL_OFF, hours later, and stall the next trial by up to
-// ~2.4 s (48 absent panels). Past the window the boot scan is dropped:
-// 0xD1 reports presence_valid clear and the host rescans (0xD0) when idle.
-constexpr uint32_t panel_boot_inventory_window_ms = 30000;
 
 constexpr uint8_t  spi_bit_order   = MSBFIRST;
 constexpr uint8_t  spi_data_mode   = SPI_MODE3;
