@@ -5,6 +5,7 @@
 #include "SpiManager.h"
 #include "SdManager.h"
 #include "IspController.h"
+#include "PanelInventory.h"
 #include "G6PanelProtocol.h"
 #include "commands.h"
 
@@ -26,13 +27,18 @@ class CommandProcessor {
       : net_(net), serial_(serial), spi_(spi), sd_(sd) {}
 
   void begin();
+  // Fleet inventory (PanelInventory.h): presence scan now, then arm the
+  // background fingerprint sweep. Run by serviceLateBootBlank() in the late
+  // boot step and by a host 0xD0.
+  void beginPanelInventory();
+  void serviceInventory();  // one fingerprint-sweep step per loop() while idle
   void processCommand();
   void serviceDisconnects();  // PR #27 review point 5: abort a transfer whose source went away
   void serviceDisplay();
   void serviceDownload();
   void serviceUpload();
   void serviceArchive();
-  void serviceLateBootBlank();  // once, panel_late_boot_blank_ms after reset
+  void serviceLateBootBlank();  // late boot blank + presence scan, panel_late_boot_blank_ms after reset
 
  private:
   NetworkManager &net_;
@@ -42,6 +48,7 @@ class CommandProcessor {
 
   // SPI in-system-programming driver for g6-program-panel (0xC8).
   IspController   isp_{spi_};
+  PanelInventory  inventory_{isp_};  // 0xD0/0xD1; after isp_ (init order)
 
   // Set by processCommand() to point at whichever MessageSource (net_ or
   // serial_) originated the command being handled. Handlers send their
@@ -308,6 +315,9 @@ class CommandProcessor {
   void handleGetFirmwareInfo();                          // get-firmware-info (0xE3)
   void handleProgramPanel(const ParsedCommand &cmd);     // g6-program-panel (0xC8) — SPI ISP
   void handleVerifyPanel(const ParsedCommand &cmd);      // g6-verify-panel (0xC9) — CRC running app flash
+  void handlePanelInventoryScan(uint8_t action);  // panel-inventory-scan (0xD0)
+  void handleGetPanelInventory(uint8_t first);     // get-panel-inventory (0xD1)
+  void sendInventoryPage(uint8_t echo_cmd, uint8_t first);
   void drainBulkData(uint32_t remaining_bytes);
   void abortArchive();  // serviceArchive() teardown on a stalled/timed-out 0x8A stream
   void endDownload();   // serviceDownload() teardown: completion, timeout, error, or stall
@@ -320,7 +330,9 @@ class CommandProcessor {
   // software reset go dark with the controller's ALL_OFF state (persistent panels
   // keep their last frame; a power-on starts dark anyway, so this is harmless then).
   void blankPanelsAtBoot() { enterAllOff(); }
-  bool late_boot_blank_pending_ = true;
+  bool     late_boot_blank_pending_ = true;
+  uint8_t  late_boot_tries_         = 0;
+  uint32_t late_boot_due_ms_        = AC::constants::panel_late_boot_blank_ms;
  private:
   void enterAllOn();
   void enterStreamingFrame(uint16_t block_byte_count);

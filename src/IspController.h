@@ -62,6 +62,31 @@ class IspController {
   // no reboot. Useful to confirm an OTA flash actually took.
   bool verifyPanel(uint8_t panel_index, char *msg, size_t msg_len);
 
+  // Boot-time presence probe: non-disruptive per-panel liveness check
+  // (COMM_CHECK, same wire exchange as pollPanelAlive) tuned for a fast sweep
+  // across every panel at startup rather than a post-OTA-reboot wait. Safe to
+  // call for every panel_count_per_frame index regardless of whether that
+  // panel is actually wired/populated -- an absent panel simply times out
+  // after panel_boot_scan_timeout_ms and the caller moves on to the next
+  // index. Never enters ISP mode and never touches display state.
+  bool checkPanelPresent(uint8_t panel_index);
+
+  // Read /firmware/panel.bin's 32-byte footer: the reference image for
+  // verifyPanel and the panel inventory. Returns false (with *err) when the
+  // SD card has no usable image — missing, no G6PANFW magic, or a footer
+  // image_size that does not equal the file size minus the footer.
+  bool readReferenceFooter(uint32_t *image_crc32, uint32_t *image_size,
+                           const char **err);
+
+  // ISP_ENTER + ISP_VERIFY_CRC over the panel's RUNNING app flash [0, len).
+  // The VERIFY_CRC reply carries the panel-computed CRC-32 whether or not it
+  // equals expected_crc, so this doubles as a firmware fingerprint. Like
+  // verifyPanel (which is built on it) it never sends ISP_EXIT_REBOOT, so the
+  // panel does not reboot. Returns false (with *err) on no valid ENTER or
+  // VERIFY_CRC reply; otherwise sets *crc_out and *match_out.
+  bool fingerprintPanel(uint8_t panel_index, uint32_t len, uint32_t expected_crc,
+                        uint32_t *crc_out, bool *match_out, const char **err);
+
  private:
   SpiManager &spi_;
 

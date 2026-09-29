@@ -83,6 +83,9 @@ All source files live in `src/`.
 | `SpiManager.h/.cpp` | Dual SPI bus setup, panel-set table iteration, parallel transfers |
 | `SdManager.h/.cpp` | SD mount, `/patterns/*.pat` listing, v2 header + frame CRC validation |
 | `CommandProcessor.h/.cpp` | Arena state machine, command dispatch, Mode 2/3/4/5 service, refresh timer |
+| `IspController.h/.cpp` | Single-panel SPI in-system programming, verify, presence probe, fingerprint |
+| `PanelInventory.h/.cpp` | Boot fleet inventory (presence + firmware fingerprint); `0xD0`/`0xD1` wire format |
+| `BootDiag.h` | Sentinel-prefixed boot diagnostics that can't corrupt the USB-CDC response stream |
 | `Crc.h` | CRC-8/AUTOSAR (header) + CRC-16/CCITT (per-frame) |
 | `ErrorGlyph.h/.cpp` | Composes the 20x20 "CE / NN" controller error frame |
 | `G6PanelProtocol.h` | G6 v1 header/parity, opcodes, block sizes |
@@ -107,6 +110,27 @@ The full, current opcode list (host→controller and controller→panel) lives i
 § Command Registry — not duplicated here, so it can't drift out of sync with `commands.h` the
 way an inline table would. `commands.h` is the source of truth for opcode values; the spec doc
 tracks it and is updated alongside firmware changes.
+
+### Boot sequence and panel inventory
+
+1. **Power settle.** `SpiManager::begin()` waits `panel_power_settle_ms` before touching the SPI
+   peripherals or any CS line, so panel supplies are up before the controller drives the bus.
+2. **Presence scan.** About 3.5 s after reset (with the late boot blank), every panel gets a
+   `COMM_CHECK` liveness probe; an absent panel costs ~50 ms, not a stall. A host that starts
+   a display before that step cancels the boot scan and owns the inventory from then on: `0xD1`
+   reports `presence_valid` clear until the host rescans with `0xD0` when idle, so a pending
+   boot scan never lands in an inter-trial gap.
+3. **Fingerprint sweep.** From the main loop, one panel per pass, and only
+   while the display is stopped: `ISP_ENTER` + `ISP_VERIFY_CRC` CRCs each panel's running app
+   flash, over `/firmware/panel.bin`'s length when that image is on SD (so it doubles as a
+   match check), else over a 64 KB prefix. No panel reboot. Each step runs inside the
+   long-operation watchdog window (a step on an unresponsive panel can take ~3.4 s).
+
+`DEBUG_SERIAL` builds log the result at boot, e.g.
+`[boot] panel fw: all 40 panels identical, crc 0x1A2B3C4D over 131072 B (= SD panel.bin)`.
+Hosts read it with **`GET_PANEL_INVENTORY` (0xD1)** and rescan with **`PANEL_INVENTORY_SCAN`
+(0xD0)**, both gated on feature bit 0 (`panel_inventory`) of the `GET_CONTROLLER_INFO` feature
+bitmap; the request/reply layout is specified in `src/PanelInventory.h`.
 
 ### Display modes
 

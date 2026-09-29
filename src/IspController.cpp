@@ -8,12 +8,15 @@
 #include "G6PanelProtocol.h"
 #include "constants.h"
 
+// Every function here is FLASHMEM: ISP is paced by >= 500 us gaps and ms polls,
+// so running from flash costs nothing measurable and keeps it out of RAM1/ITCM.
+
 // Out-of-class definitions for the static constexpr members (needed when their
 // address is taken, e.g. memcpy of kSentinel/kUnlock).
 constexpr char    IspController::kSentinel[17];
 constexpr uint8_t IspController::kUnlock[4];
 
-size_t IspController::buildMsg(uint8_t *out, uint8_t cmd,
+FLASHMEM size_t IspController::buildMsg(uint8_t *out, uint8_t cmd,
                                const uint8_t *payload, size_t plen) {
   out[0] = G6::header_version_v1;  // parity stamped below
   out[1] = cmd;
@@ -23,7 +26,7 @@ size_t IspController::buildMsg(uint8_t *out, uint8_t cmd,
   return len;
 }
 
-bool IspController::sendCmd(uint8_t panel, const uint8_t *msg, size_t len,
+FLASHMEM bool IspController::sendCmd(uint8_t panel, const uint8_t *msg, size_t len,
                             uint32_t gap_us) {
   // Let the panel settle back into its receive loop (parked waiting for CS)
   // before we assert CS for this command. A command sent immediately after the
@@ -39,7 +42,7 @@ bool IspController::sendCmd(uint8_t panel, const uint8_t *msg, size_t len,
   return spi_.transferSinglePanel(panel, msg, nullptr, len);
 }
 
-bool IspController::readResp(uint8_t panel, uint8_t *resp, size_t resp_len,
+FLASHMEM bool IspController::readResp(uint8_t panel, uint8_t *resp, size_t resp_len,
                              uint8_t *status, uint32_t wait_us) {
   // Give the panel time to finish processing the phase-A command and park in
   // panel_spi_drive_response() with its TX FIFO pre-loaded, BEFORE we drop CS
@@ -77,7 +80,7 @@ bool IspController::readResp(uint8_t panel, uint8_t *resp, size_t resp_len,
   return false;
 }
 
-bool IspController::pollResp(uint8_t panel, uint8_t *resp, size_t resp_len,
+FLASHMEM bool IspController::pollResp(uint8_t panel, uint8_t *resp, size_t resp_len,
                              uint8_t *status, uint32_t poll_ms,
                              uint32_t timeout_ms, uint32_t *polls_out) {
   uint32_t t0 = millis();
@@ -104,7 +107,7 @@ bool IspController::pollResp(uint8_t panel, uint8_t *resp, size_t resp_len,
   return false;
 }
 
-bool IspController::pollPanelAlive(uint8_t panel, uint32_t poll_ms,
+FLASHMEM bool IspController::pollPanelAlive(uint8_t panel, uint32_t poll_ms,
                                    uint32_t timeout_ms) {
   // Canonical COMM_CHECK frame: [hdr][0x01][0..199], parity-stamped.
   uint8_t cc[2 + 200];
@@ -148,24 +151,43 @@ bool IspController::pollPanelAlive(uint8_t panel, uint32_t poll_ms,
   }
 }
 
-bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len) {
+FLASHMEM bool IspController::checkPanelPresent(uint8_t panel_index) {
+  uint16_t saved_mhz = spi_.getSpiClockMhz();
+  bool alive = pollPanelAlive(panel_index,
+                              AC::constants::panel_boot_scan_poll_ms,
+                              AC::constants::panel_boot_scan_timeout_ms);
+  spi_.setSpiClockMhz(saved_mhz);  // restore the caller's SPI clock
+  return alive;
+}
+
+// /firmware/panel.bin ends in a 32-byte G6PANFW footer: [24..27] image_crc32,
+// [28..31] image_size, both u32 LE. The image itself is the file minus the
+// footer, so image_size must equal file size - 32 — a truncated or concatenated
+// upload otherwise yields a CRC span that does not match the file.
+FLASHMEM static bool readImageFooter(File &f, uint32_t *image_crc32, uint32_t *image_size,
+                                     const char **err) {
+  const uint32_t file_size = (uint32_t)f.size();
+  constexpr uint8_t FOOT = AC::constants::firmware_footer_byte_count;  // 32
+  if (file_size <= FOOT) { *err = "firmware too small"; return false; }
+  uint8_t footer[FOOT];
+  f.seek(file_size - FOOT);
+  if (f.read(footer, FOOT) != (size_t)FOOT) { *err = "footer read failed"; return false; }
+  if (memcmp(footer, "G6PANFW", 7) != 0) { *err = "bad footer magic"; return false; }
+  memcpy(image_crc32, footer + 24, 4);
+  memcpy(image_size,  footer + 28, 4);
+  if (*image_size != file_size - FOOT) { *err = "footer size mismatch"; return false; }
+  return true;
+}
+
+FLASHMEM bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len) {
   auto setMsg = [&](const char *m) { snprintf(msg, msg_len, "%s", m); };
 
   // --- 1. Open image + validate the 32-byte footer ---------------------------
   File f = SD.open(AC::constants::firmware_path, FILE_READ);
   if (!f) { setMsg("no firmware on SD"); return false; }
-  uint32_t file_size = (uint32_t)f.size();
-  constexpr uint8_t FOOT = AC::constants::firmware_footer_byte_count;  // 32
-  if (file_size <= FOOT) { f.close(); setMsg("firmware too small"); return false; }
-
-  uint8_t footer[FOOT];
-  f.seek(file_size - FOOT);
-  if (f.read(footer, FOOT) != (size_t)FOOT) { f.close(); setMsg("footer read failed"); return false; }
-  if (memcmp(footer, "G6PANFW", 7) != 0) { f.close(); setMsg("bad footer magic"); return false; }
   uint32_t image_crc32, image_size;
-  memcpy(&image_crc32, footer + 24, 4);  // u32 LE
-  memcpy(&image_size,  footer + 28, 4);  // u32 LE
-  if (image_size != file_size - FOOT) { f.close(); setMsg("footer size mismatch"); return false; }
+  const char *ferr = "";
+  if (!readImageFooter(f, &image_crc32, &image_size, &ferr)) { f.close(); setMsg(ferr); return false; }
 
   // --- 2. Save the caller's SPI clock (per-phase clocks are set inside
   //        sendCmd/readResp; see kIspClockAMhz/kIspClockBMhz) ------------------
@@ -361,36 +383,33 @@ bool IspController::programPanel(uint8_t panel_index, char *msg, size_t msg_len)
   return ok;
 }
 
-bool IspController::verifyPanel(uint8_t panel_index, char *msg, size_t msg_len) {
-  auto setMsg = [&](const char *m) { snprintf(msg, msg_len, "%s", m); };
-
+FLASHMEM bool IspController::readReferenceFooter(uint32_t *image_crc32, uint32_t *image_size,
+                                        const char **err) {
   // Read the SD footer (expected image_size + CRC) — no need to stream the image.
   File f = SD.open(AC::constants::firmware_path, FILE_READ);
-  if (!f) { setMsg("no firmware on SD"); return false; }
-  uint32_t file_size = (uint32_t)f.size();
-  constexpr uint8_t FOOT = AC::constants::firmware_footer_byte_count;  // 32
-  if (file_size <= FOOT) { f.close(); setMsg("firmware too small"); return false; }
-  uint8_t footer[FOOT];
-  f.seek(file_size - FOOT);
-  size_t got_n = f.read(footer, FOOT);
+  if (!f) { *err = "no firmware on SD"; return false; }
+  const bool ok = readImageFooter(f, image_crc32, image_size, err);
   f.close();
-  if (got_n != (size_t)FOOT) { setMsg("footer read failed"); return false; }
-  if (memcmp(footer, "G6PANFW", 7) != 0) { setMsg("bad footer magic"); return false; }
-  uint32_t image_crc32, image_size;
-  memcpy(&image_crc32, footer + 24, 4);
-  memcpy(&image_size,  footer + 28, 4);
+  return ok;
+}
 
+FLASHMEM bool IspController::fingerprintPanel(uint8_t panel_index, uint32_t len,
+                                     uint32_t expected_crc, uint32_t *crc_out,
+                                     bool *match_out, const char **err) {
   uint16_t saved_mhz = spi_.getSpiClockMhz();
   spi_.setSpiClockMhz(kIspClockBMhz);  // safe default between phases
 
   bool ok = false;
   uint8_t resp[20];
   uint8_t status = 0xFF;
-  uint8_t msgbuf[2 + 3 + 4 + kPageBytes + 4];
+  uint8_t msgbuf[2 + 20];  // largest message here = ISP_ENTER
   size_t mlen;
 
   do {
-    // ISP_ENTER (get session nonce; no reboot, panel keeps running)
+    // ISP_ENTER (get session nonce; no reboot, panel keeps running). Its reply
+    // also carries an `appcrc` field, deliberately not used: the panel answers
+    // within ~500 us, too fast to have CRC'd its whole app, and the documented
+    // aligned reply (programPanel) shows that field as zero.
     uint8_t ep[20];
     memcpy(ep, kSentinel, 16);
     memcpy(ep + 16, kUnlock, 4);
@@ -405,37 +424,53 @@ bool IspController::verifyPanel(uint8_t panel_index, char *msg, size_t msg_len) 
       memset(resp, 0, sizeof(resp));
       crc_ok = readResp(panel_index, resp, 19, &status);
     }
-    if (!send_ok) { setMsg("panel not in arena map"); break; }
+    if (!send_ok) { *err = "panel not in arena map"; break; }
     if (!crc_ok || status != 0) {
-      setMsg("ISP_ENTER: no valid reply (is the panel running this ISP firmware?)");
+      *err = "ISP_ENTER: no valid reply (is the panel running this ISP firmware?)";
       break;
     }
     memcpy(&session_nonce_, resp + 1, 4);
 
-    // ISP_VERIFY_CRC over the RUNNING app region [0, image_size) (read via XIP).
+    // ISP_VERIFY_CRC over the RUNNING app region [0, len) (read via XIP).
     uint8_t pl[3 + 3 + 4 + 4];
     pl[0] = 0; pl[1] = 0; pl[2] = 0;  // start = 0
-    pl[3] = image_size & 0xFF; pl[4] = (image_size >> 8) & 0xFF; pl[5] = (image_size >> 16) & 0xFF;
+    pl[3] = len & 0xFF; pl[4] = (len >> 8) & 0xFF; pl[5] = (len >> 16) & 0xFF;
     memcpy(pl + 6, &session_nonce_, 4);
-    memcpy(pl + 10, &image_crc32, 4);
+    memcpy(pl + 10, &expected_crc, 4);
     mlen = buildMsg(msgbuf, AC::ISP_VERIFY_CRC, pl, sizeof(pl));
-    if (!sendCmd(panel_index, msgbuf, mlen)) { setMsg("verify-crc send failed"); break; }
+    if (!sendCmd(panel_index, msgbuf, mlen)) { *err = "verify-crc send failed"; break; }
     // Panel CRCs the app region via XIP before replying; poll for the receipt.
     if (!pollResp(panel_index, resp, 6, &status, kVerifyPollMs, kVerifyTimeoutMs)) {
-      setMsg("verify-crc: no/garbled reply");
+      *err = "verify-crc: no/garbled reply";
       break;
     }
-    uint32_t got = (uint32_t)resp[1] | ((uint32_t)resp[2] << 8) |
-                   ((uint32_t)resp[3] << 16) | ((uint32_t)resp[4] << 24);
-    bool match = (status == 0);
-    snprintf(msg, msg_len,
-             "panel %u running-app CRC=0x%08lX expected=0x%08lX -> %s",
-             (unsigned)(panel_index + 1), (unsigned long)got, (unsigned long)image_crc32,  // 1-based
-             match ? "MATCH (this firmware is installed)"
-                   : "MISMATCH (a different firmware is running)");
-    ok = match;
+    *crc_out = (uint32_t)resp[1] | ((uint32_t)resp[2] << 8) |
+               ((uint32_t)resp[3] << 16) | ((uint32_t)resp[4] << 24);
+    *match_out = (status == 0);
+    ok = true;
   } while (false);
 
   spi_.setSpiClockMhz(saved_mhz);
   return ok;
+}
+
+FLASHMEM bool IspController::verifyPanel(uint8_t panel_index, char *msg, size_t msg_len) {
+  const char *err = "";
+  uint32_t image_crc32 = 0, image_size = 0;
+  if (!readReferenceFooter(&image_crc32, &image_size, &err)) {
+    snprintf(msg, msg_len, "%s", err);
+    return false;
+  }
+  uint32_t got = 0;
+  bool match = false;
+  if (!fingerprintPanel(panel_index, image_size, image_crc32, &got, &match, &err)) {
+    snprintf(msg, msg_len, "%s", err);
+    return false;
+  }
+  snprintf(msg, msg_len,
+           "panel %u running-app CRC=0x%08lX expected=0x%08lX -> %s",
+           (unsigned)(panel_index + 1), (unsigned long)got, (unsigned long)image_crc32,  // 1-based
+           match ? "MATCH (this firmware is installed)"
+                 : "MISMATCH (a different firmware is running)");
+  return match;
 }

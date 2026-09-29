@@ -88,6 +88,13 @@ constexpr uint32_t spi_clock_speed = 25'000'000;
 // and drop everything, the setup() blanks included, for their 3 s error window
 // (panel ERROR_DISPLAY_DURATION_US); without the repeat they stay lit.
 constexpr uint32_t panel_late_boot_blank_ms = 3500;
+// The boot panel-inventory scan runs right after that late blank; if it finds
+// panels absent, blank + rescan once more this much later. A display the host
+// started before either step cancels it: the host owns the inventory from
+// then on (0xD0 when idle), because a deferred scan would land in the
+// display's first inter-trial ALL_OFF and delay the next trial by up to
+// ~2.4 s (48 absent panels). 0xD1 reports presence_valid clear meanwhile.
+constexpr uint32_t panel_boot_inventory_retry_ms = 4000;
 
 constexpr uint8_t  spi_bit_order   = MSBFIRST;
 constexpr uint8_t  spi_data_mode   = SPI_MODE3;
@@ -117,6 +124,36 @@ constexpr uint32_t cs_setup_delay_ns
     = (uint32_t)((1'000'000'000ULL * cs_setup_sck_periods) / spi_clock_speed);
 constexpr uint32_t cs_hold_delay_ns
     = (uint32_t)((1'000'000'000ULL * cs_hold_sck_periods)  / spi_clock_speed);
+
+// Panel power-up settle delay: how long SpiManager::begin() waits, before
+// touching the SPI peripherals or any CS line, so panel-side supplies have
+// time to come up. Closes the electrical issue where the controller starts
+// driving CS (and bringing up SPI/SCK) before an unpowered/still-rising panel
+// is ready for it, putting the panel into an undefined state (bench
+// workaround to date has been cutting a power trace). 500 ms is a starting
+// value, not a measured minimum -- bench-verify against the panel's own
+// power-on time (see the boot-sequence test plan) and adjust.
+constexpr uint32_t panel_power_settle_ms = 500;
+
+// Boot-time panel presence sweep (IspController::checkPanelPresent): poll
+// cadence and per-panel ceiling for the one-shot COMM_CHECK liveness probe
+// run once at startup across every panel_count_per_frame index. Deliberately
+// much shorter than kAlivePollMs/kAliveTimeoutMs (IspController.h), which
+// waits out a panel's post-OTA reboot -- here a missing/unpopulated panel
+// should cost this sweep only tens of ms, not seconds, so 40+ absent panels
+// still finish in about a second. Starting values; bench-tune if the sweep
+// either misses populated panels or runs longer than desired.
+constexpr uint32_t panel_boot_scan_poll_ms    = 5;
+constexpr uint32_t panel_boot_scan_timeout_ms = 50;
+
+// Panel firmware fingerprint length when the SD card has no reference image
+// (/firmware/panel.bin): CRC only this prefix of each panel's app flash. Kept
+// well under every panel image seen to date (~96-130 KB), so the range is a
+// subset of what g6-verify-panel already CRCs and never runs past the end of
+// the installed image into stale flash. A prefix CRC is one-sided evidence:
+// differing CRCs prove different firmware, equal CRCs only suggest the same.
+// With a reference image present the full image length is used instead.
+constexpr uint32_t panel_fingerprint_prefix_bytes = 64UL * 1024UL;
 
 // Two SPI buses (B0 = Teensy SPI, B1 = Teensy SPI1).
 constexpr uint8_t region_count_per_frame = 2;
@@ -185,6 +222,16 @@ constexpr uint8_t controller_info_version = 1;  // G6 controller protocol v1
 // by GET_FIRMWARE_VERSION (0xCB) flags bit 2 instead — hosts gate 0xA8 on that.
 // Advertises g6_mode + v2_local_storage + io_ext + health.
 constexpr uint8_t controller_capability_bitmap = 0xA3;
+
+// Feature bitmap, appended to the 0xC2 reply after the MAC as
+// [controller_feature_byte_count, features[0..N)]; bit k = feature k, LSB of
+// features[0] first (g6_03 § 0xC2). The capability byte above is full, so new
+// command families are advertised here only. Bits are never reused.
+constexpr uint8_t controller_feature_byte_count = 4;
+constexpr uint8_t feature_bit_panel_inventory = 0;  // 0xD0/0xD1 panel inventory
+constexpr uint8_t feature_bit_qwiic_i2c       = 1;  // 0xB0/0xB1, only on builds with the jack
+constexpr uint8_t feature_bit_ai_stream       = 2;  // reserved: sampled analog-in stream
+constexpr uint32_t controller_feature_bitmap = (1u << feature_bit_panel_inventory);
 
 // -----------------------------------------------------------------------------
 // SD pattern backend — Modes 2/3/4 load .pat files from the built-in SD slot.
