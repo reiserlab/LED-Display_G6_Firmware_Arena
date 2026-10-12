@@ -757,6 +757,45 @@ events are disabled. Ring capacity: 65,504 B ≈ 3,000–4,000 records ≈ 6 s a
 record as a JSON line, tracks seq gaps, and summarises on Ctrl-C (`--raw-out` also writes the raw
 blocks with a host receive stamp — the proposal's § 7 sidecar); `tests/telemetry_codec.py` is the
 decoder both it and the HIL tests use.
+### Qwiic / STEMMA QT jack (I2C bridge)
+
+arena_12-18 has a Qwiic jack, J2: GND, +3.3 V, SDA → Teensy D17 (SDA1), SCL → D16 (SCL1),
+i.e. `Wire1` — separate from the MCP4725 AO DAC on `Wire` (D18/D19). The board has no pull-ups
+on it (the breakouts carry 10k each); the firmware runs it at 100 kHz. Two commands expose the
+bus to a host so sensors can be validated without sensor-specific firmware:
+
+- `GET_I2C_SCAN` (0xB0): `[01 B0]` → `[count, addr...]`, the 7-bit addresses (0x08–0x77) that ACK.
+  A bus error, or a scan running past 500 ms, returns `status = 4` instead.
+- `I2C_TRANSFER` (0xB1): `[len B1 addr wlen w... rlen]` → the `rlen` bytes read. Writes `wlen`
+  bytes, then reads `rlen` under a repeated start; `wlen = 0` is a plain read, `rlen = 0` a plain
+  write, both zero an ACK probe. `rlen ≤ 64`. Status: 1 bad framing, 2 address NACK, 3 data NACK,
+  4 bus error/timeout, 5 short read.
+
+Builds with the jack set feature bit 1 (`qwiic_i2c`) in the `0xC2` feature bitmap; hosts gate
+0xB0/0xB1 on it. arena_10-10 and 2x10 builds (no jack) leave it clear and answer both with
+`status = 1`. Both block the control loop for the
+transaction (≲ 12 ms for a full scan) — bench use, not the display hot path. `pixi run qwiic-probe`
+(`scripts/qwiic_probe.py`) scans the bus, maps PCA9548 mux channels, identifies the LAB-211 sensors
+(AS7343, TSL2591, VEML7700) and takes readings; `pixi run qwiic-read` streams all of them
+continuously (paced to the slowest integration, ~6.7 Hz with the AS7343, Ctrl-C for stats);
+`tests/test_qwiic_i2c.py` covers the same under pytest and skips whatever is not plugged in.
+
+The LAB-214 peripherals are host-side too — register maps in `tests/qwiic_peripherals.py`, nothing
+sensor-specific in firmware: SHT4x temperature/humidity (0x44), LSM6DSOX 6-axis IMU (0x6A; tilt
+from the gravity vector plus a latched "bumped since last read" flag via the wake-up detector), and
+the PCA9685 servo driver (0x40; also answers all-call 0x70, reads included, until `configure()`
+clears it, which collides with a PCA9548 mux's default — `locate_devices()` reads MODE1 to tell them
+apart; the SparkFun pHAT's logic needs its own USB-C power, it is not fed by the Qwiic 3.3 V). `pixi run qwiic-probe` identifies and reads them alongside
+the light sensors; `pixi run qwiic-env` is a 1 Hz temperature / humidity / tilt / bump readout
+(`-- --csv`); `pixi run qwiic-servo -- --channel 0 --us 1500` positions a servo (servo power from
+the driver board's own supply, never the Qwiic 3.3 V); `pixi run qwiic-soak` hammers every attached
+device with read-only transfers and reports error counts, latency and the controller's
+`loop_max_1s_us` — the bus-limit check for device count, cable length and clock; `pixi run
+qwiic-display-soak` runs the same traffic against an ALL_ON display and reports frames pushed
+vs. expected (bench 2026-10-12: 400 fps held, no frame lost, loop gap grows by the wire time).
+`tests/test_qwiic_peripherals.py` covers all of it under pytest. The bus clock is a build-time
+constant with an override for bench work: `PLATFORMIO_BUILD_FLAGS=-DQWIIC_I2C_CLOCK_HZ=400000
+pixi run deploy-12-18`. Bench results: `docs/development/qwiic-bench-2026-10-12.md`.
 
 ## SD pattern playback (Modes 2/3/4)
 
