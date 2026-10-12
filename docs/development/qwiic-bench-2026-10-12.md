@@ -145,6 +145,11 @@ the arena (own USB-C). The controller board itself idles near 620 mA
 (Teensy 4.1 + Ethernet PHY + board logic). Current is not what limits the
 device count; the pull-up stack is.
 
+Side observation (not Qwiic): during the ALL_ON phases the 12 panels on the
+bench 12-18 drew **3.20–3.26 A** on the panel supply (Michael's meter), i.e.
+≈ 270 mA per panel at full white with this firmware; the display is stopped
+(ALL_OFF) at the end of the script.
+
 ### What bounds the device count
 
 The firmware has no limit (the scan returns up to 112 addresses). The bus does:
