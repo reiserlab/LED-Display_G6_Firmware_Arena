@@ -24,6 +24,14 @@ void SpiManager::refreshISR() {
   Health::isrExit(p);
 }
 
+// CS and CS-decode pads: output with a 22k pull-up. A warm reset (software,
+// watchdog) resets GPIO direction but not the IOMUXC pad config, so with
+// pinMode()'s plain DSE(7) pad every CS line floats (no keeper, no pull) from
+// the reset until begin() drives it again, ~3.5 s later; the pull-up keeps
+// them deselected through that window.
+static constexpr uint32_t cs_pad_config =
+    IOMUXC_PAD_DSE(7) | IOMUXC_PAD_PKE | IOMUXC_PAD_PUE | IOMUXC_PAD_PUS(3) | IOMUXC_PAD_HYS;
+
 void SpiManager::begin() {
   instance_ = this;
 
@@ -49,6 +57,7 @@ void SpiManager::begin() {
     // raise PE02/PE03 glyphs).
     digitalWriteFast(panel_sets[i].cs_pin, HIGH);
     pinMode(panel_sets[i].cs_pin, OUTPUT);
+    *(digital_pin_to_info_PGM[panel_sets[i].cs_pin].pad) = cs_pad_config;
   }
 
   // Hold the 2nd pair of per-column MISO OE-decode inputs HIGH. Without this
@@ -59,6 +68,7 @@ void SpiManager::begin() {
   for (uint8_t i = 0; i < cs_decode_tie_high_count; ++i) {
     pinMode(cs_decode_tie_high_pins[i], OUTPUT);
     digitalWriteFast(cs_decode_tie_high_pins[i], HIGH);
+    *(digital_pin_to_info_PGM[cs_decode_tie_high_pins[i]].pad) = cs_pad_config;
   }
 }
 
@@ -134,10 +144,24 @@ void SpiManager::setSpiClockMhz(uint16_t mhz) {
 #endif
 }
 
+// The first transfer after a bus's SCK rate changes (25 MHz frames vs the
+// 2 MHz ISP/COMM_CHECK readback) reached the first panel on that bus shifted by
+// 3 bits (G6_2x10 bench, panel SPI_DIAG: GS2 blank 0x11 received as 0x88,
+// parity fail -> PE02 -> 3 s lockout; panels 1 and 6 after every reset). So
+// after a rate change the bus clocks one throwaway byte while every CS is still
+// HIGH; callers begin the transaction before asserting any CS.
+void SpiManager::beginBus(uint8_t r, const SPISettings &settings) {
+  region_spi_[r]->beginTransaction(settings);
+  if (bus_clock_hz_[r] != spi_clock_hz_) {
+    region_spi_[r]->transfer((uint8_t)0x00);
+    bus_clock_hz_[r] = spi_clock_hz_;
+  }
+}
+
 void SpiManager::beginPanelSetTransaction() {
   SPISettings settings(spi_clock_hz_, spi_bit_order, spi_data_mode);
   for (uint8_t r = 0; r < region_count_per_frame; ++r) {
-    region_spi_[r]->beginTransaction(settings);
+    beginBus(r, settings);
   }
 }
 
@@ -217,7 +241,7 @@ bool SpiManager::transferSinglePanel(uint8_t panel_index, const uint8_t *copi,
   const uint8_t cs = panel_sets[set].cs_pin;
 
   SPISettings settings(spi_clock_hz_, spi_bit_order, spi_data_mode);
-  region->beginTransaction(settings);
+  beginBus(bus, settings);
   digitalWriteFast(cs, LOW);
   delayNanoseconds(cs_setup_delay_ns_);
   // Blocking full-duplex: copi clocked out, cipo captured in lock-step. The

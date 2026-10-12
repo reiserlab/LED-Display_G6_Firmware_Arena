@@ -32,6 +32,7 @@ class CommandProcessor {
   void serviceDownload();
   void serviceUpload();
   void serviceArchive();
+  void serviceLateBootBlank();  // once, panel_late_boot_blank_ms after reset
 
  private:
   NetworkManager &net_;
@@ -319,6 +320,7 @@ class CommandProcessor {
   // software reset go dark with the controller's ALL_OFF state (persistent panels
   // keep their last frame; a power-on starts dark anyway, so this is harmless then).
   void blankPanelsAtBoot() { enterAllOff(); }
+  bool late_boot_blank_pending_ = true;
  private:
   void enterAllOn();
   void enterStreamingFrame(uint16_t block_byte_count);

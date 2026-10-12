@@ -74,6 +74,9 @@ class SpiManager {
   // Runtime SPI timing — all derived from spi_clock_hz_; updated together by
   // setSpiClockMhz() so the invariant (delays == f(clock)) always holds.
   uint32_t spi_clock_hz_      = AC::constants::spi_clock_speed;
+  // SCK rate each bus last ran at; 0 = never (see beginBus).
+  uint32_t bus_clock_hz_[AC::constants::region_count_per_frame] = {};
+  void beginBus(uint8_t r, const SPISettings &settings);
   uint32_t cs_setup_delay_ns_ = AC::constants::cs_setup_delay_ns;
   uint32_t cs_hold_delay_ns_  = AC::constants::cs_hold_delay_ns;
   uint32_t frames_sent_       = 0;
