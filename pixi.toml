@@ -51,6 +51,8 @@ qwiic-eval = "python scripts/qwiic_eval.py"
 qwiic-env = "python scripts/qwiic_env.py"
 qwiic-soak = "python scripts/qwiic_soak.py"
 qwiic-servo = "python scripts/qwiic_servo.py"
+# Display + sensor-traffic interference check (ALL_ON refresh vs. bus soak / 1 Hz env poll).
+qwiic-display-soak = "python scripts/qwiic_display_soak.py"
 test-diag    = "pytest tests/test_serial_only.py -v --transport=serial"
 # Automated suite excludes guided visual tests (they need a human at the arena).
 test-serial  = "pytest tests -v --transport=serial -m 'not visual'"

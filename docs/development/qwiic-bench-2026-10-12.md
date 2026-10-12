@@ -116,10 +116,41 @@ overhead; nothing accumulates across devices. The 9–12 ms outlier is
 `GET_I2C_SCAN` (112 addresses), which Studio should issue only at setup, never
 while a display runs. USB round trip (~0.2 ms) is now the floor at 400 kHz.
 
+### Sensor traffic against a running display (`pixi run qwiic-display-soak`)
+
+Controller in ALL_ON (refresh timer pushing a frame to the panel bus every
+tick, 400 Hz on the 12-18 build), six boards on the chain, 10 s phases:
+
+| Phase | Frames | fps | Loop max per 1 s window (median / max) | Transfers | Errors |
+|---|---|---|---|---|---|
+| A display alone | 4002 | 399.98 | 1.87 / 1.87 ms (the SPI frame push) | — | — |
+| B display + bus soak (every device, back-to-back) | 4004 | 400.00 | 2.53 / 2.53 ms | 639 | 0 |
+| C display + 1 Hz env poll (SHT4x + IMU + bump) | 4017 | 400.00 | 3.46 / 3.46 ms | 10 | 0 |
+
+No frame was lost in any phase. The cost is loop latency only: a transfer
+that lands in the same loop pass as a frame push extends that pass by its
+wire time (phase C's 3.5 ms is push + the SHT4x read leg), so a frame can
+leave up to ~1.5 ms late but is never skipped — the refresh timer is
+free-running. Frame *jitter* was not measured directly (a static ALL_ON frame
+produces no FRAME telemetry records); if a future application needs sub-ms
+frame timing with sensors polled, measure it with a changing pattern and the
+telemetry ring, and prefer 400 kHz.
+
+### Current drawn from the arena
+
+Power meter on the arena controller's USB supply (5.19 V): 0.623 A with the
+five-breakout chain attached, 0.618 A with it unplugged — **≈ 5 mA, ≈ 1 mA per
+board** (mostly the breakouts' power LEDs). The Servo pHAT draws nothing from
+the arena (own USB-C). The controller board itself idles near 620 mA
+(Teensy 4.1 + Ethernet PHY + board logic). Current is not what limits the
+device count; the pull-up stack is.
+
 ### What bounds the device count
 
 The firmware has no limit (the scan returns up to 112 addresses). The bus does:
 
+- **Current:** ≈ 1 mA per board from the Teensy's 3.3 V regulator (measured,
+  above) — not a constraint.
 - **Pull-up stacking.** Adafruit QT boards carry 10 kΩ on SDA/SCL each, the
   Teensy pads 22 kΩ; the five boards here give ≈ 1.8 kΩ. The I²C 3 mA sink
   floor at 3.3 V is ≈ 1 kΩ, so ~9 Adafruit-class boards is the ceiling.
@@ -173,7 +204,6 @@ The firmware has no limit (the scan returns up to 112 addresses). The bus does:
 ## Open items
 
 - PCA9548 mux with a second SHT4x behind it; 200 mm cable position in the chain.
-- Hand test of the bump latch (tap the IMU while `qwiic-env` runs).
 - Confirm the IMU breakout: LSM6DSOX (±2–16 g) vs LSM6DSO32 (±4–32 g) — same
   WHO_AM_I; only the full-scale table differs (driver assumes LSM6DSOX).
 - AD3 SCL rise-time measurement before changing the default clock.
@@ -186,6 +216,7 @@ The firmware has no limit (the scan returns up to 112 addresses). The bus does:
 pixi run qwiic-probe -- --port /dev/cu.usbmodem208523401            # scan, identify, one reading each
 pixi run qwiic-env   -- --port /dev/cu.usbmodem208523401 --csv      # 1 Hz T/RH/tilt/bump log
 pixi run qwiic-soak  -- --port /dev/cu.usbmodem208523401 --seconds 30
+pixi run qwiic-display-soak -- --port /dev/cu.usbmodem208523401        # ALL_ON refresh vs. sensor traffic
 pixi run pytest tests/test_qwiic_peripherals.py tests/test_qwiic_i2c.py -v --transport=serial -s
 PLATFORMIO_BUILD_FLAGS=-DQWIIC_I2C_CLOCK_HZ=400000 pixi run deploy-12-18   # 400 kHz bench build
 ```

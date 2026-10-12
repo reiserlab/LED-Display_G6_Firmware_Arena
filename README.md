@@ -790,7 +790,9 @@ the light sensors; `pixi run qwiic-env` is a 1 Hz temperature / humidity / tilt 
 (`-- --csv`); `pixi run qwiic-servo -- --channel 0 --us 1500` positions a servo (servo power from
 the driver board's own supply, never the Qwiic 3.3 V); `pixi run qwiic-soak` hammers every attached
 device with read-only transfers and reports error counts, latency and the controller's
-`loop_max_1s_us` — the bus-limit check for device count, cable length and clock.
+`loop_max_1s_us` — the bus-limit check for device count, cable length and clock; `pixi run
+qwiic-display-soak` runs the same traffic against an ALL_ON display and reports frames pushed
+vs. expected (bench 2026-10-12: 400 fps held, no frame lost, loop gap grows by the wire time).
 `tests/test_qwiic_peripherals.py` covers all of it under pytest. The bus clock is a build-time
 constant with an override for bench work: `PLATFORMIO_BUILD_FLAGS=-DQWIIC_I2C_CLOCK_HZ=400000
 pixi run deploy-12-18`. Bench results: `docs/development/qwiic-bench-2026-10-12.md`.
