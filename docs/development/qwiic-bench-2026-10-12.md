@@ -138,17 +138,19 @@ telemetry ring, and prefer 400 kHz.
 
 ### Current drawn from the arena
 
-Power meter on the arena controller's USB supply (5.19 V): 0.623 A with the
-five-breakout chain attached, 0.618 A with it unplugged — **≈ 5 mA, ≈ 1 mA per
+Power meter on the bench 12-18's 5.19 V supply (controller and panels share
+it; display off): 0.623 A with the five-breakout chain attached, 0.618 A with
+it unplugged — **≈ 5 mA, ≈ 1 mA per
 board** (mostly the breakouts' power LEDs). The Servo pHAT draws nothing from
 the arena (own USB-C). The controller board itself idles near 620 mA
 (Teensy 4.1 + Ethernet PHY + board logic). Current is not what limits the
 device count; the pull-up stack is.
 
-Side observation (not Qwiic): during the ALL_ON phases the 12 panels on the
-bench 12-18 drew **3.20–3.26 A** on the panel supply (Michael's meter), i.e.
-≈ 270 mA per panel at full white with this firmware; the display is stopped
-(ALL_OFF) at the end of the script.
+Side observation (not Qwiic): during the ALL_ON phases the bench 12-18's
+single supply (controller + 12 panels) read **3.20–3.26 A**, back to 0.62 A
+with the display stopped — so the 12 panels at full white draw ≈ 2.6 A,
+≈ 215 mA per panel with this firmware. ALL_OFF blanks them (0.62 A is the
+controller alone, see § Current drawn from the arena).
 
 ### What bounds the device count
 
