@@ -108,7 +108,10 @@ def is_mux(addr) -> bool:
 def describe(addr) -> str:
     if is_mux(addr):
         return f"PCA9548 8-ch mux (A2..A0 = {addr - 0x70:03b})"
-    return _KNOWN.get(addr, "unknown")
+    if addr in _KNOWN:
+        return _KNOWN[addr]
+    from .qwiic_peripherals import KNOWN_PERIPHERALS  # LAB-214 parts live in their own module
+    return KNOWN_PERIPHERALS.get(addr, "unknown")
 
 
 # ── PCA9548 mux ──────────────────────────────────────────────────────────────
@@ -163,11 +166,26 @@ class Located:
         return f"mux 0x{self.mux:02X} ch{self.channel}"
 
 
+def mux_responds(transport, addr) -> bool:
+    """A PCA9548 answers a 1-byte read of its control register. Something else
+    in 0x70-0x77 that only ACKs writes -- a PCA9685's all-call address, for
+    one -- does not, and must not be mapped as a mux."""
+    try:
+        i2c_xfer(transport, addr, b"", 1)
+        return True
+    except I2CError:
+        return False
+
+
 def locate_devices(transport) -> list[Located]:
-    """Everything reachable: root-bus devices plus each mux channel's devices."""
+    """Everything reachable: root-bus devices plus each mux channel's devices.
+    Addresses in the mux range that do not behave like a mux -- or that a
+    PCA9685 is shadowing with its all-call address -- stay root devices."""
     root = i2c_scan(transport)
     found = [Located(a) for a in root]
-    for mux_addr in (a for a in root if is_mux(a)):
+    from .qwiic_peripherals import pca9685_allcall_shadow  # LAB-214 part; avoids an import cycle
+    shadow = pca9685_allcall_shadow(transport, root)
+    for mux_addr in (a for a in root if is_mux(a) and a != shadow and mux_responds(transport, a)):
         for ch, addrs in PCA9548(transport, mux_addr).channel_map().items():
             found.extend(Located(a, mux_addr, ch) for a in addrs)
     return found

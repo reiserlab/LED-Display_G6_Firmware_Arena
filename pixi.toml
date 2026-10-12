@@ -45,6 +45,12 @@ qwiic-read = "python scripts/qwiic_read.py"
 # Evaluate the daisy-chained sensors: timed capture -> noise/headroom/spectrum report,
 # `-- --ab` for a before/after light change, `-- --live` for an in-place dashboard.
 qwiic-eval = "python scripts/qwiic_eval.py"
+# LAB-214 peripherals: 1 Hz environmental / tilt / bump readout (SHT4x + LSM6DSOX, `-- --csv`),
+# bus-limit soak (every device, read-only registers, error counts + loop_max_1s_us),
+# and a PCA9685 servo check (`-- --channel 0 --us 1500`, `-- --sweep`).
+qwiic-env = "python scripts/qwiic_env.py"
+qwiic-soak = "python scripts/qwiic_soak.py"
+qwiic-servo = "python scripts/qwiic_servo.py"
 test-diag    = "pytest tests/test_serial_only.py -v --transport=serial"
 # Automated suite excludes guided visual tests (they need a human at the arena).
 test-serial  = "pytest tests -v --transport=serial -m 'not visual'"

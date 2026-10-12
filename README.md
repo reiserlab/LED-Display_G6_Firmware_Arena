@@ -780,6 +780,21 @@ transaction (≲ 12 ms for a full scan) — bench use, not the display hot path.
 continuously (paced to the slowest integration, ~6.7 Hz with the AS7343, Ctrl-C for stats);
 `tests/test_qwiic_i2c.py` covers the same under pytest and skips whatever is not plugged in.
 
+The LAB-214 peripherals are host-side too — register maps in `tests/qwiic_peripherals.py`, nothing
+sensor-specific in firmware: SHT4x temperature/humidity (0x44), LSM6DSOX 6-axis IMU (0x6A; tilt
+from the gravity vector plus a latched "bumped since last read" flag via the wake-up detector), and
+the PCA9685 servo driver (0x40; also answers all-call 0x70, reads included, until `configure()`
+clears it, which collides with a PCA9548 mux's default — `locate_devices()` reads MODE1 to tell them
+apart; the SparkFun pHAT's logic needs its own USB-C power, it is not fed by the Qwiic 3.3 V). `pixi run qwiic-probe` identifies and reads them alongside
+the light sensors; `pixi run qwiic-env` is a 1 Hz temperature / humidity / tilt / bump readout
+(`-- --csv`); `pixi run qwiic-servo -- --channel 0 --us 1500` positions a servo (servo power from
+the driver board's own supply, never the Qwiic 3.3 V); `pixi run qwiic-soak` hammers every attached
+device with read-only transfers and reports error counts, latency and the controller's
+`loop_max_1s_us` — the bus-limit check for device count, cable length and clock.
+`tests/test_qwiic_peripherals.py` covers all of it under pytest. The bus clock is a build-time
+constant with an override for bench work: `PLATFORMIO_BUILD_FLAGS=-DQWIIC_I2C_CLOCK_HZ=400000
+pixi run deploy-12-18`. Bench results: `docs/development/qwiic-bench-2026-10-12.md`.
+
 ## SD pattern playback (Modes 2/3/4)
 
 Patterns are `/patterns/*.pat` files on the built-in SD card, in the v2 `G6PT` format

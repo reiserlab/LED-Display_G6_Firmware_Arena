@@ -1,8 +1,9 @@
 """Bench probe for the Qwiic / STEMMA QT jack (J2) on arena_12-18.
 
 Scans the controller's Wire1 bus through GET_I2C_SCAN (0xB0), maps any
-PCA9548 mux channels, identifies the LAB-211 sensors (AS7343, TSL2591,
-VEML7700) and takes one raw light reading from each. Optionally repeats the
+PCA9548 mux channels, identifies the LAB-211 light sensors (AS7343, TSL2591,
+VEML7700) and the LAB-214 peripherals (SHT4x, LSM6DSOX, PCA9685) and takes
+one reading from each. Optionally repeats the
 readings so you can wave a hand / toggle the arena LEDs and watch them move.
 
     pixi run qwiic-probe                         # auto-detect the USB-CDC port
@@ -22,6 +23,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests.commands import GET_CONTROLLER_INFO_CMD  # noqa: E402
+from tests.qwiic_peripherals import (  # noqa: E402
+    LSM6DSOX,
+    PCA9685,
+    SHT4x,
+    pca9685_allcall_shadow,
+)
 from tests.qwiic_sensors import (  # noqa: E402
     AS7343,
     MCP4725_ADDR,
@@ -63,11 +70,13 @@ def identify_all(t, devices) -> tuple[list, list[str]]:
     """Returns (sensors, failures): sensors = [(Located, driver)]."""
     sensors, failures = [], []
     for dev in devices:
-        cls = {VEML7700.ADDR: VEML7700, TSL2591.ADDR: TSL2591, AS7343.ADDR: AS7343}.get(dev.addr)
+        cls = {VEML7700.ADDR: VEML7700, TSL2591.ADDR: TSL2591, AS7343.ADDR: AS7343,
+               SHT4x.ADDR: SHT4x, LSM6DSOX.ADDR: LSM6DSOX, LSM6DSOX.ADDR_ALT: LSM6DSOX,
+               PCA9685.ADDR: PCA9685}.get(dev.addr)
         if cls is None:
             continue
         with reach(t, dev):
-            s = cls(t)
+            s = cls(t, dev.addr)
             try:
                 ident = s.identify()
             except I2CError as e:
@@ -80,6 +89,16 @@ def identify_all(t, devices) -> tuple[list, list[str]]:
                 ok = ident["id_ok"]
                 detail = (f"ID 0x{ident['id']:02X} (expect 0x81) rev 0x{ident['revid']:02X}"
                           f" aux 0x{ident['auxid']:02X}")
+            elif isinstance(s, SHT4x):
+                ok = ident["crc_ok"]
+                detail = f"serial 0x{ident['serial']:08X}" + ("" if ok else " (CRC FAIL)")
+            elif isinstance(s, LSM6DSOX):
+                ok = ident["id_ok"]
+                detail = f"WHO_AM_I 0x{ident['who_am_i']:02X} (expect 0x6C)"
+            elif isinstance(s, PCA9685):
+                ok = True  # no ID register; MODE1/PRESCALE are reported instead
+                detail = (f"MODE1 0x{ident['mode1']:02X} prescale {ident['prescale']} ({ident['freq_hz']:.0f} Hz)"
+                          + (" SLEEP" if ident["sleeping"] else "") + (" ALLCALL" if ident["allcall"] else ""))
             else:
                 ok = True  # early VEML7700 silicon has no ID register
                 detail = (f"ID reg 0x{ident['id_raw']:04X}"
@@ -103,6 +122,14 @@ def configure_all(t, sensors):
                 if not s.enable_roundtrip():
                     print(f"  AS7343 @ {dev.where()}: ENABLE.PON did not read back")
                 s.configure(gain=64)
+            elif isinstance(s, LSM6DSOX):
+                # Tilt only: arming the bump latch here would consume events that
+                # qwiic-env or a Studio logger is waiting for.
+                s.configure(odr_hz=104)
+                if not s.ctrl_roundtrip():
+                    print(f"  LSM6DSOX @ {dev.where()}: CTRL1_XL did not read back")
+            elif isinstance(s, PCA9685):
+                pass  # read-only here: configure() would start the PWM outputs
 
 
 def read_all(t, sensors) -> list[str]:
@@ -117,6 +144,20 @@ def read_all(t, sensors) -> list[str]:
                 r = s.read()
                 cells.append(f"VEML7700[{dev.where()}] als={r['als']:5d} white={r['white']:5d}"
                              f" ~{r['lux_approx']:.1f} lx")
+            elif isinstance(s, SHT4x):
+                r = s.read()
+                cells.append(f"SHT4x[{dev.where()}] {r['temp_c']:.2f} C  {r['rh_pct']:.1f} %RH"
+                             + ("" if r["crc_ok"] else "  CRC FAIL"))
+            elif isinstance(s, LSM6DSOX):
+                r = s.read()
+                ax, ay, az = r["accel_g"]
+                cells.append(f"LSM6DSOX[{dev.where()}] a=({ax:+.3f},{ay:+.3f},{az:+.3f}) g |a|={r['accel_norm_g']:.3f}"
+                             f"  tilt from vertical {r['from_vertical_deg']:.1f} deg  (pitch {r['pitch_deg']:+.1f},"
+                             f" roll {r['roll_deg']:+.1f})  T={r['temp_c']:.1f} C")
+            elif isinstance(s, PCA9685):
+                ident = s.identify()
+                cells.append(f"PCA9685[{dev.where()}] MODE1 0x{ident['mode1']:02X} {ident['freq_hz']:.0f} Hz"
+                             + (" SLEEP" if ident["sleeping"] else "") + " (outputs untouched)")
             elif isinstance(s, AS7343):
                 r = s.read()
                 cells.append(f"AS7343[{dev.where()}] gain64 "
@@ -151,6 +192,10 @@ def main():
         print(f"\nQwiic bus scan ({len(root)} device{'s' if len(root) != 1 else ''}):")
         for a in root:
             print(f"  0x{a:02X}  {describe(a)}")
+        shadow = pca9685_allcall_shadow(t, root)
+        if shadow is not None:
+            print(f"  !! 0x{shadow:02X} is the PCA9685's all-call address (MODE1.ALLCALL set), not a PCA9548 mux —"
+                  " PCA9685.configure() clears it; re-strap a mux that needs 0x70")
         if not root:
             print("  (nothing ACKed — check the cable, sensor power LED, and jack orientation)")
         if MCP4725_ADDR in root:
@@ -169,21 +214,23 @@ def main():
         print("\nIdentify:")
         sensors, failures = identify_all(t, devices)
         if not sensors and not failures:
-            print("  no LAB-211 sensors found")
+            print("  no LAB-211 / LAB-214 parts found")
 
         if sensors:
-            configure_all(t, sensors)
-            print("\nReadings:")
-            for i in range(args.loop):
-                stamp = time.strftime("%H:%M:%S")
-                for cell in read_all(t, sensors):
-                    print(f"  {stamp}  {cell}")
-                if i + 1 < args.loop:
-                    time.sleep(args.interval)
-            for dev, s in sensors:
-                if isinstance(s, (TSL2591, AS7343)):
-                    with reach(t, dev):
-                        s.power_off()
+            try:
+                configure_all(t, sensors)
+                print("\nReadings:")
+                for i in range(args.loop):
+                    stamp = time.strftime("%H:%M:%S")
+                    for cell in read_all(t, sensors):
+                        print(f"  {stamp}  {cell}")
+                    if i + 1 < args.loop:
+                        time.sleep(args.interval)
+            finally:
+                for dev, s in sensors:
+                    if isinstance(s, (TSL2591, AS7343, LSM6DSOX)):
+                        with reach(t, dev):
+                            s.power_off()
 
         print()
         if failures:

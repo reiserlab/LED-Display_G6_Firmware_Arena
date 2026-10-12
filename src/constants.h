@@ -272,7 +272,14 @@ constexpr float    mode4_ain_input_range_volts = 10.0f;
 
 constexpr uint8_t  qwiic_sda_pin              = 17;
 constexpr uint8_t  qwiic_scl_pin              = 16;
-constexpr uint32_t qwiic_i2c_clock_hz         = 100'000;
+// Build-time override for bench work on the bus speed, e.g.
+//   PLATFORMIO_BUILD_FLAGS=-DQWIIC_I2C_CLOCK_HZ=400000 pixi run deploy-12-18
+// Every LAB-211/214 part supports 400 kHz; the default stays 100 kHz until the
+// long-cable / many-device case is measured (docs/development/qwiic-bench-*.md).
+#ifndef QWIIC_I2C_CLOCK_HZ
+#define QWIIC_I2C_CLOCK_HZ 100000
+#endif
+constexpr uint32_t qwiic_i2c_clock_hz         = QWIIC_I2C_CLOCK_HZ;
 constexpr uint8_t  qwiic_i2c_addr_min         = 0x08;   // 0x00-0x07 reserved
 constexpr uint8_t  qwiic_i2c_addr_max         = 0x77;   // 0x78-0x7F reserved
 constexpr uint8_t  qwiic_i2c_read_byte_count_max = 64;  // < Wire BUFFER_LENGTH (136) and response max

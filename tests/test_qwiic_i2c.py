@@ -101,8 +101,15 @@ def test_ack_probe_matches_scan(transport, scan):
 
 # ── PCA9548 mux ──────────────────────────────────────────────────────────────
 
+def _real_muxes(transport, scan):
+    """PCA9548s in the scan, minus a PCA9685's all-call shadow at 0x70 (LAB-214)."""
+    from .qwiic_peripherals import pca9685_allcall_shadow
+    shadow = pca9685_allcall_shadow(transport, scan)
+    return [a for a in scan if is_mux(a) and a != shadow]
+
+
 def test_mux_control_register_roundtrip(transport, scan):
-    muxes = [a for a in scan if is_mux(a)]
+    muxes = _real_muxes(transport, scan)
     if not muxes:
         pytest.skip("no PCA9548 on the bus")
     mux = PCA9548(transport, muxes[0])
@@ -117,7 +124,7 @@ def test_mux_control_register_roundtrip(transport, scan):
 
 
 def test_mux_channel_map_is_reported(transport, scan, devices):
-    if not any(is_mux(a) for a in scan):
+    if not _real_muxes(transport, scan):
         pytest.skip("no PCA9548 on the bus")
     downstream = [d for d in devices if d.mux is not None]
     print("\nmux channel map:", ", ".join(f"ch{d.channel}:0x{d.addr:02X}" for d in downstream) or "empty")
