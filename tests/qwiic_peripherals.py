@@ -11,7 +11,8 @@ timeline).
 Parts:
   0x44        SHT4x      temperature / humidity  (Adafruit 5776 SHT41, 5665 SHT45)
   0x6A/0x6B   LSM6DSOX   6-axis IMU: tilt + latched "was it bumped" flag
-                         (Adafruit 4438; WHO_AM_I 0x6C, shared with LSM6DSO32)
+                         (Adafruit 4438; WHO_AM_I 0x6C -- the LSM6DSO32 answers
+                         the same but has a different g-range table)
   0x40..0x7F  PCA9685    16-channel PWM / servo driver (SparkFun Servo pHAT
                          DEV-15316, Adafruit 815). NOTE: it also ACKs the
                          "all call" address 0x70 (reads too) until MODE1.ALLCALL

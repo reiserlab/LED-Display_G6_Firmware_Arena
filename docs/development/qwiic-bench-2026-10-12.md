@@ -25,13 +25,13 @@ the controller, and settle how sensors are configured and logged. Follows
 | Addr | Part | Identify | Reading on the bench |
 |---|---|---|---|
 | 0x44 | SHT4x (Adafruit 5776/5665) | serial 0x14DCF709, CRC-8 OK on serial and data | 22.7 °C, 59–61 %RH; high/med/low precision 13.9 / 9.2 / 5.0 ms host round trip (mostly the mandated wait) |
-| 0x6A | LSM6DSOX-class IMU | WHO_AM_I 0x6C (LSM6DSOX and LSM6DSO32 share it — check the breakout label) | at rest \|a\| = 0.997–1.001 g, tilt 10.5° from vertical (board on its cable), die 22.8 °C; 14-byte temp+gyro+accel block read 1.8 ms |
+| 0x6A | LSM6DSOX (Adafruit 4438, label confirmed) | WHO_AM_I 0x6C | at rest \|a\| = 0.997–1.001 g, tilt 10.5° from vertical (board on its cable), die 22.8 °C; 14-byte temp+gyro+accel block read 1.8 ms |
 
 | 0x40 (+0x70 all-call) | PCA9685, SparkFun Pi Servo pHAT | MODE1 0x11 / prescale 30 at power-on, as the datasheet says | `configure(50)`: prescale 121 = 50.03 Hz, wake + auto-increment, ALLCALL cleared; ch0 1500 µs → OFF count 307 reads back; full-OFF bit sets |
 
-The ticket's accelerometer was the LIS3DH (0x18); the part on the bench is an
-LSM6DSOX (0x6A). The driver is written for what arrived; 0x18/0x19 are in the
-address book without a driver.
+The ticket listed the LIS3DH (0x18); Michael chose the LSM6DSOX (0x6A) instead
+— similar specs, cheaper. The driver targets the LSM6DSOX (±2 g table, 31 mg
+wake-up step); 0x18/0x19 stay in the address book without a driver.
 
 ### LSM6DSOX latched "was it bumped" flag — what actually works
 
@@ -211,8 +211,6 @@ The firmware has no limit (the scan returns up to 112 addresses). The bus does:
 ## Open items
 
 - PCA9548 mux with a second SHT4x behind it; 200 mm cable position in the chain.
-- Confirm the IMU breakout: LSM6DSOX (±2–16 g) vs LSM6DSO32 (±4–32 g) — same
-  WHO_AM_I; only the full-scale table differs (driver assumes LSM6DSOX).
 - AD3 SCL rise-time measurement before changing the default clock.
 - Docs repo `g6_03-controller.md`: nothing new to register (no new opcodes);
   note the `QWIIC_I2C_CLOCK_HZ` build flag if the clock becomes a host concern.
