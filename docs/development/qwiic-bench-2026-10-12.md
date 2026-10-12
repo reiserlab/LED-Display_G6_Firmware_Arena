@@ -80,6 +80,15 @@ line then clear.
   idle (PCA9685 + LEDs + servo holding), ≈ 75 mA peak while moving; nothing
   of it passes through the arena, whose USB link stayed up throughout.
 
+### Hands-on sanity check (all five sensors, 1 Hz, 50 s)
+
+Covering the light sensors: VEML7700 / TSL2591 ~30–40 lx → ~2 lx, AS7343
+clear 196 → 3 counts, all three in step; ~75 lx after. Breath / fingertip on
+the SHT4x: 22.7 °C / 59 %RH → 29.6 °C / 93 %RH within seconds, relaxing after.
+IMU tilt 13° → 73° and back while handled, bump latch fired with the right
+axes on every jostle (including the cable tug when the neighboring boards were
+covered) and cleared on each read. No I2C errors.
+
 ## Bus limits — six devices on one jack
 
 `pixi run qwiic-soak`: round-robin read-only register transfers over every
