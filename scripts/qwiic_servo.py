@@ -13,9 +13,10 @@ pHAT's USB-C, the Adafruit board's screw terminal), never from the Qwiic
 The PCA9685 also answers the all-call address 0x70 (reads included) until
 MODE1.ALLCALL is cleared; configure() clears it so a PCA9548 mux at 0x70 can
 coexist. The pHAT's logic side is NOT powered from the Qwiic 3.3 V: without
-its USB-C supply the board is simply absent from the bus. Register level
-bench-verified 2026-10-12 (prescale, pulse read-back, full-OFF, ALLCALL off);
-servo motion still to be exercised -- docs/development/qwiic-bench-2026-10-12.md.
+its USB-C supply the board is simply absent from the bus. Bench-verified
+2026-10-12 on the pHAT with a micro servo on ch0 (prescale, pulse read-back,
+full-OFF, ALLCALL off, --sweep moves the arm; ~49 mA idle / ~75 mA peak on the
+pHAT's own supply) -- docs/development/qwiic-bench-2026-10-12.md.
 """
 
 import argparse

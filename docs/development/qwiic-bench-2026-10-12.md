@@ -14,7 +14,7 @@ the controller, and settle how sensors are configured and logged. Follows
 - Chain (one daisy chain on J2, Adafruit STEMMA QT breakouts, as plugged on the bench):
   VEML7700 0x10, TSL2591 0x29, AS7343 0x39, **SHT4x 0x44**, **LSM6DSOX 0x6A**.
 - Added later in the session: **SparkFun Pi Servo pHAT (PCA9685 0x40)** at the end
-  of the chain, USB-C powered, no servo attached yet (register level only).
+  of the chain, USB-C powered (power meter inline), one micro servo on ch0.
 - Not on the bench: the PCA9548 mux, a second SHT4x (duplicate address). Their
   code paths are written but **unverified** — marked below.
 - Everything is host-side. The only firmware edit is the `QWIIC_I2C_CLOCK_HZ`
@@ -72,7 +72,13 @@ line then clear.
   mistaken_for_a_mux`). The LAB-211 mux tests in `test_qwiic_i2c.py` apply the
   same exclusion. After `configure()` clears ALLCALL, 0x70 leaves the scan. A real mux at 0x70 next to an un-configured PCA9685 would still be
   ambiguous: configure the PCA9685 first, or strap the mux to 0x71–0x77.
-- No servo motion yet (phase 2: servo on ch0 + USB-C charger, `qwiic-servo --sweep`).
+- **Servo motion verified.** Micro servo on ch0, pHAT on a 5 V USB-C adapter
+  with a power meter inline: `pixi run qwiic-servo -- --channel 0 --sweep`
+  (1000 → 2000 → 1000 µs in 100 µs steps, 0.3 s each, counts 205 → 410 at
+  50.03 Hz, every count read back, channel released at the end) moved the arm
+  through its range and back, three runs. Meter on the pHAT's USB-C: ≈ 49 mA
+  idle (PCA9685 + LEDs + servo holding), ≈ 75 mA peak while moving; nothing
+  of it passes through the arena, whose USB link stayed up throughout.
 
 ## Bus limits — six devices on one jack
 
@@ -157,8 +163,6 @@ The firmware has no limit (the scan returns up to 112 addresses). The bus does:
 
 ## Open items
 
-- PCA9685 servo motion (`qwiic-servo --sweep` with a servo on ch0 and the
-  USB-C adapter); the register level is verified.
 - PCA9548 mux with a second SHT4x behind it; 200 mm cable position in the chain.
 - Hand test of the bump latch (tap the IMU while `qwiic-env` runs).
 - Confirm the IMU breakout: LSM6DSOX (±2–16 g) vs LSM6DSO32 (±4–32 g) — same
