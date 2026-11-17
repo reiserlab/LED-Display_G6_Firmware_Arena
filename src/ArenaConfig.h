@@ -18,12 +18,14 @@ struct PanelSet {
 
 #if defined(ARENA_HW_10_10)
   #include "hw/ArenaConfig_10_10.h"
+#elif defined(ARENA_HW_10_14)
+  #include "hw/ArenaConfig_10_14.h"
 #elif defined(ARENA_HW_12_18)
   #include "hw/ArenaConfig_12_18.h"
 #elif defined(ARENA_HW_2_10)
   #include "hw/ArenaConfig_2_10.h"
 #else
-  #error "Define ARENA_HW_10_10, ARENA_HW_12_18 or ARENA_HW_2_10 in build_flags (see platformio.ini)"
+  #error "Define ARENA_HW_10_10, ARENA_HW_10_14, ARENA_HW_12_18 or ARENA_HW_2_10 in build_flags (see platformio.ini)"
 #endif
 
 // MISO/CIPO OE-decode tie-high list. A board whose per-column OE decode ANDs

@@ -47,6 +47,9 @@ constexpr uint16_t panel_pixel_count
 #if defined(ARENA_HW_10_10)
 constexpr uint8_t panel_count_per_frame_row = 4;   // G6_4x10 arena (arena_10-10)
 constexpr uint8_t panel_count_per_frame_col = 10;
+#elif defined(ARENA_HW_10_14)
+constexpr uint8_t panel_count_per_frame_row = 4;   // G6_4x10 arena (arena_10-14)
+constexpr uint8_t panel_count_per_frame_col = 10;
 #elif defined(ARENA_HW_12_18)
 constexpr uint8_t panel_count_per_frame_row = 4;   // G6_4x12 arena (arena_12-18)
 constexpr uint8_t panel_count_per_frame_col = 12;
@@ -54,7 +57,7 @@ constexpr uint8_t panel_count_per_frame_col = 12;
 constexpr uint8_t panel_count_per_frame_row = 2;   // G6_2x10 arena — the CSHL course controllers
 constexpr uint8_t panel_count_per_frame_col = 10;
 #else
-#error "Define ARENA_HW_10_10, ARENA_HW_12_18 or ARENA_HW_2_10 in build_flags (see platformio.ini)"
+#error "Define ARENA_HW_10_10, ARENA_HW_10_14, ARENA_HW_12_18 or ARENA_HW_2_10 in build_flags (see platformio.ini)"
 #endif
 
 constexpr uint8_t panel_count_per_frame
