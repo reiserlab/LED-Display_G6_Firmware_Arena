@@ -54,6 +54,10 @@ pixi run build-10-10     # compile (arena_10-10)
 pixi run deploy-10-10    # compile and upload (arena_10-10)
 pixi run monitor-10-10   # USB serial monitor (logs to log/)
 
+pixi run build-10-14     # compile (arena_10-14)
+pixi run deploy-10-14    # compile and upload (arena_10-14)
+pixi run monitor-10-14   # USB serial monitor (logs to log/)
+
 pixi run build-12-18     # compile (arena_12-18)
 pixi run deploy-12-18    # compile and upload (arena_12-18)
 pixi run monitor-12-18   # USB serial monitor (logs to log/)
@@ -64,7 +68,7 @@ pixi run monitor-2-10    # USB serial monitor (logs to log/)
 ```
 
 Each hardware target also has a `-performance` variant (`deploy-10-10-performance`,
-`deploy-12-18-performance`, `deploy-2-10-performance`) that builds without `DEBUG_SERIAL`.
+`deploy-10-14-performance`, `deploy-12-18-performance`, `deploy-2-10-performance`) that builds without `DEBUG_SERIAL`.
 
 The `monitor-*` tasks work on Linux, macOS and Windows and pick the arena's serial port
 automatically. If more than one Teensy is attached, name the port explicitly:

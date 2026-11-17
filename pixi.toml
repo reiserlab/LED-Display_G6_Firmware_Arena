@@ -14,6 +14,12 @@ build-10-10 = "pio run -e teensy41-10-10"
 # unchanged on Linux/macOS/Windows and logs to log/<ts>_<variant>.log. Forward
 # args after `--`, e.g.  pixi run monitor-10-10 -- --port COM5
 monitor-10-10 = "python scripts/monitor.py -e teensy41-10-10"
+# arena_10-14 (4x10, same CS map as 10-10). ARENA_HW_10_14 build flag; same
+# quartet, keep in sync.
+deploy-10-14 = "pio run -e teensy41-10-14 -t upload"
+deploy-10-14-performance = "pio run -e teensy41-10-14-performance -t upload"
+build-10-14 = "pio run -e teensy41-10-14"
+monitor-10-14 = "python scripts/monitor.py -e teensy41-10-14"
 # arena_12-18 (12-column arena). Same envs, ARENA_HW_12_18 build flag instead
 # -- see platformio.ini. Keep this task quartet in sync with the 10-10 one
 # above whenever build/upload/monitor flags change.
